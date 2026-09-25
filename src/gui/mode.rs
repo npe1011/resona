@@ -1,10 +1,7 @@
 /// Resona GUI の操作モード定義
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
-    #[default]
-    View,
-    Zoom,
     Phase,
     Baseline,
     Reference,
@@ -14,17 +11,21 @@ pub enum AppMode {
     JCoupling,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ZoomSubMode {
-    #[default]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomTool {
     Rect,
     X,
     Y,
 }
 
+// 互換性のためのエイリアス
+pub type ZoomSubMode = ZoomTool;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PeakSubMode {
     #[default]
+    None,
+    Threshold,
     Add,
     Delete,
 }
@@ -32,6 +33,7 @@ pub enum PeakSubMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IntegrateSubMode {
     #[default]
+    None,
     Add,
     Edit,
     Split,
@@ -42,6 +44,7 @@ pub enum IntegrateSubMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MultiviewSubMode {
     #[default]
+    None,
     AddRect,
     AddX,
     Edit,

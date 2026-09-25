@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use egui::{CentralPanel, Color32, Context, Key, Pos2, Rect, Stroke, TopBottomPanel, SidePanel};
+use egui::{CentralPanel, Color32, Context, Key, Margin, Pos2, Rect, RichText, Stroke, TopBottomPanel, SidePanel};
 use crate::core::{
     analyze_multiplet, auto_detect_integrations, estimate_noise_mad, pick_peaks,
     snap_and_add_peak, IntegrationItem, JCouplingResultItem, MultiviewItem, Project, RectF,
@@ -9,9 +9,9 @@ use crate::gui::dialogs::{
     show_display_dialog, show_ft_dialog, show_jcoupling_dialog, DisplayDialogState, FtDialogState,
     JCouplingDialogState,
 };
-use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomSubMode};
+use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 use crate::gui::panels::{
-    show_action_bar, show_mode_bar, show_side_panel, ActionEvent, ActionBarState,
+    show_action_bar, show_mode_bar, show_side_panel, ActionEvent, ActionBarState, ModeBarEvent,
 };
 use crate::gui::plot::{paint_spectrum, PlotStyle, PlotTransform};
 
@@ -20,7 +20,8 @@ pub struct ResonaApp {
     pub current_file_path: Option<PathBuf>,
     pub current_directory: Option<PathBuf>,
 
-    pub mode: AppMode,
+    pub mode: Option<AppMode>,
+    pub active_zoom: Option<ZoomTool>,
     pub action_state: ActionBarState,
     pub ft_dialog_state: FtDialogState,
     pub display_dialog_state: DisplayDialogState,
@@ -28,10 +29,12 @@ pub struct ResonaApp {
 
     pub plot_style: PlotStyle,
     pub transform: Option<PlotTransform>,
+    pub zoom_history: Vec<(f64, f64, f64, f64)>, // (ppm_min, ppm_max, y_min, y_max)
 
     // ドラッグ状態
     pub drag_start: Option<Pos2>,
     pub drag_current: Option<Pos2>,
+    pub is_dragging_threshold: bool,
 
     // 選択状態
     pub selected_multiview_id: Option<String>,
@@ -46,15 +49,18 @@ impl Default for ResonaApp {
             project: Project::new(),
             current_file_path: None,
             current_directory: None,
-            mode: AppMode::View,
+            mode: None,
+            active_zoom: None,
             action_state: ActionBarState::default(),
             ft_dialog_state: FtDialogState::default(),
             display_dialog_state: DisplayDialogState::default(),
             jcoupling_dialog_state: JCouplingDialogState::default(),
             plot_style: PlotStyle::default(),
             transform: None,
+            zoom_history: Vec::new(),
             drag_start: None,
             drag_current: None,
+            is_dragging_threshold: false,
             selected_multiview_id: None,
             selected_j_idx: None,
             status_message: "Ready. Drag & drop .jdf or .rsn file here.".to_string(),
@@ -76,7 +82,7 @@ impl ResonaApp {
             "jdf" => self.project.load_jdf(p, None),
             "rsn" | "ez" => self.project.load_rsn(p),
             _ => {
-                self.status_message = format!("Unsupported file extension: {}", ext);
+                self.status_message = format!("Unsupported file extension {}", ext);
                 return;
             }
         };
@@ -87,12 +93,16 @@ impl ResonaApp {
                 if let Some(parent) = p.parent() {
                     self.current_directory = Some(parent.to_path_buf());
                 }
-                self.action_state.ref_current_ppm = None;
+                let is_13c = self.project.metadata.nucleus.contains("13C") || self.project.metadata.nucleus.contains("C13");
+                self.action_state.ref_target_ppm = if is_13c { 77.16 } else { 7.26 };
+                self.action_state.ref_solvent_idx = 0;
+                self.action_state.ref_set_active = false;
+                self.zoom_history.clear();
                 self.reset_zoom();
-                self.status_message = format!("Loaded: {}", p.display());
+                self.status_message = format!("Loaded {}", p.display());
             }
             Err(e) => {
-                self.status_message = format!("Error loading file: {}", e);
+                self.status_message = format!("Error loading file {}", e);
             }
         }
     }
@@ -103,10 +113,10 @@ impl ResonaApp {
         match self.project.save_rsn(p) {
             Ok(_) => {
                 self.current_file_path = Some(p.to_path_buf());
-                self.status_message = format!("Saved project: {}", p.display());
+                self.status_message = format!("Saved project {}", p.display());
             }
             Err(e) => {
-                self.status_message = format!("Error saving project: {}", e);
+                self.status_message = format!("Error saving project {}", e);
             }
         }
     }
@@ -182,7 +192,6 @@ impl ResonaApp {
     fn handle_shortcuts(&mut self, ctx: &Context) {
         let input = ctx.input(|i| i.clone());
 
-        // Ctrl / Cmd 判定
         let ctrl_or_cmd = input.modifiers.command || input.modifiers.ctrl;
 
         // Ctrl + O: Open
@@ -211,27 +220,37 @@ impl ResonaApp {
             }
         }
 
-        // Home: Reset Zoom (どのモード・フォーカスでも常に動作)
+        // Escape: 現在のモードおよびズーム・サブモードを解除
+        if input.key_pressed(Key::Escape) {
+            self.mode = None;
+            self.active_zoom = None;
+            self.action_state.clear_submodes();
+            self.status_message = "Mode cleared".to_string();
+        }
+
+        // Home: Reset Zoom (常に動作)
         if input.key_pressed(Key::Home) {
             self.reset_zoom();
         }
 
         // Delete / Backspace: 選択されたMultiviewまたはJ-Coupling行の削除
         if input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace) {
-            if self.mode == AppMode::Multiview {
-                if let Some(ref sel_id) = self.selected_multiview_id {
-                    self.project.state.multiviews.retain(|mv| mv.id != *sel_id);
-                    self.selected_multiview_id = None;
-                    self.project.push_history();
-                    self.status_message = "Deleted selected multiview inset".to_string();
-                }
-            } else if self.mode == AppMode::JCoupling {
-                if let Some(idx) = self.selected_j_idx {
-                    if idx < self.project.state.j_couplings.len() {
-                        self.project.state.j_couplings.remove(idx);
-                        self.selected_j_idx = None;
+            if let Some(mode) = self.mode {
+                if mode == AppMode::Multiview {
+                    if let Some(ref sel_id) = self.selected_multiview_id {
+                        self.project.state.multiviews.retain(|mv| mv.id != *sel_id);
+                        self.selected_multiview_id = None;
                         self.project.push_history();
-                        self.status_message = "Deleted selected J-coupling result".to_string();
+                        self.status_message = "Deleted selected multiview inset".to_string();
+                    }
+                } else if mode == AppMode::JCoupling {
+                    if let Some(idx) = self.selected_j_idx {
+                        if idx < self.project.state.j_couplings.len() {
+                            self.project.state.j_couplings.remove(idx);
+                            self.selected_j_idx = None;
+                            self.project.push_history();
+                            self.status_message = "Deleted selected J-coupling result".to_string();
+                        }
                     }
                 }
             }
@@ -252,42 +271,80 @@ impl ResonaApp {
 
 impl eframe::App for ResonaApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // ezNMR / 科学NMR標準の洗練されたライトテーマを設定
+        let mut visuals = egui::Visuals::light();
+        visuals.window_fill = Color32::WHITE;
+        visuals.panel_fill = Color32::from_rgb(248, 249, 250); // #f8f9fa
+        ctx.set_visuals(visuals);
+
         self.handle_shortcuts(ctx);
         self.handle_drag_and_drop(ctx);
 
         // 1. トップメニューバー
-        TopBottomPanel::top("top_menu").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open... (Ctrl+O)").clicked() {
-                        self.open_file_dialog();
-                        ui.close_menu();
-                    }
-                    if ui.button("Save .rsn (Ctrl+S)").clicked() {
-                        self.save_rsn_dialog();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Exit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
+        TopBottomPanel::top("top_menu")
+            .frame(egui::Frame::none()
+                .fill(Color32::WHITE)
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
+            .show(ctx, |ui| {
+                egui::menu::bar(ui, |ui| {
+                    ui.menu_button("File", |ui| {
+                        if ui.button("Open... (Ctrl+O)").clicked() {
+                            self.open_file_dialog();
+                            ui.close_menu();
+                        }
+                        if ui.button("Save .rsn (Ctrl+S)").clicked() {
+                            self.save_rsn_dialog();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Exit").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
 
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Undo (Ctrl+Z)").clicked() {
-                        self.project.undo();
-                        ui.close_menu();
-                    }
-                    if ui.button("Redo (Ctrl+Y)").clicked() {
-                        self.project.redo();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Fourier Transform Settings...").clicked() {
+                    ui.menu_button("Edit", |ui| {
+                        if ui.button("Undo (Ctrl+Z)").clicked() {
+                            self.project.undo();
+                            ui.close_menu();
+                        }
+                        if ui.button("Redo (Ctrl+Y)").clicked() {
+                            self.project.redo();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Fourier Transform Settings...").clicked() {
+                            self.ft_dialog_state.open = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Display Settings...").clicked() {
+                            if let Some(ref t) = self.transform {
+                                self.display_dialog_state.ppm_min = t.ppm_min;
+                                self.display_dialog_state.ppm_max = t.ppm_max;
+                                self.display_dialog_state.y_min = t.y_min;
+                                self.display_dialog_state.y_max = t.y_max;
+                            }
+                            self.display_dialog_state.ppm_decimals = self.plot_style.ppm_decimals;
+                            self.display_dialog_state.integral_decimals = self.plot_style.integral_decimals;
+                            self.display_dialog_state.open = true;
+                            ui.close_menu();
+                        }
+                    });
+                });
+            });
+
+        // 2. モード切替ツールバー (1行目: ezNMR完全準拠のライトテーマバー)
+        TopBottomPanel::top("mode_toolbar")
+            .frame(egui::Frame::none()
+                .fill(Color32::from_rgb(248, 249, 250))
+                .inner_margin(Margin::symmetric(8.0, 5.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
+            .show(ctx, |ui| {
+                match show_mode_bar(ui, &mut self.mode) {
+                    ModeBarEvent::None => {}
+                    ModeBarEvent::OpenReFt => {
                         self.ft_dialog_state.open = true;
-                        ui.close_menu();
                     }
-                    if ui.button("Display Settings...").clicked() {
+                    ModeBarEvent::OpenDisplay => {
                         if let Some(ref t) = self.transform {
                             self.display_dialog_state.ppm_min = t.ppm_min;
                             self.display_dialog_state.ppm_max = t.ppm_max;
@@ -297,32 +354,45 @@ impl eframe::App for ResonaApp {
                         self.display_dialog_state.ppm_decimals = self.plot_style.ppm_decimals;
                         self.display_dialog_state.integral_decimals = self.plot_style.integral_decimals;
                         self.display_dialog_state.open = true;
-                        ui.close_menu();
                     }
-                });
+                }
             });
-        });
 
-        // 2. モード切替ツールバー
-        TopBottomPanel::top("mode_toolbar").show(ctx, |ui| {
-            show_mode_bar(ui, &mut self.mode);
-        });
-
-        // 3. コンテキスト専用アクションバー
+        // 3. コンテキスト専用アクションバー (2行目: 左 ZOOM常駐フレーム + 右 コンテキストフレーム)
         let mut p0 = self.project.state.p0;
         let mut p1 = self.project.state.p1;
         let mut int_scale = self.project.state.integration_scale;
 
-        let action_event = TopBottomPanel::top("action_bar").show(ctx, |ui| {
-            show_action_bar(
-                ui,
-                self.mode,
-                &mut self.action_state,
-                &mut p0,
-                &mut p1,
-                &mut int_scale,
-            )
-        }).inner;
+        let noise_level = if let Some(spec) = &self.project.spectrum_real {
+            estimate_noise_mad(spec)
+        } else {
+            1.0
+        };
+
+        if self.mode == Some(AppMode::Peak) && self.action_state.peak_threshold <= 0.0 {
+            let initial_thresh = self.project.state.peak_threshold.unwrap_or(noise_level * 10.0);
+            self.action_state.peak_threshold = initial_thresh;
+            self.project.state.peak_threshold = Some(initial_thresh);
+        }
+
+        let action_event = TopBottomPanel::top("action_bar")
+            .frame(egui::Frame::none()
+                .fill(Color32::from_rgb(248, 249, 250))
+                .inner_margin(Margin::symmetric(8.0, 4.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
+            .show(ctx, |ui| {
+                show_action_bar(
+                    ui,
+                    self.mode,
+                    &mut self.active_zoom,
+                    &mut self.action_state,
+                    &mut p0,
+                    &mut p1,
+                    &mut int_scale,
+                    &self.project.metadata.nucleus,
+                    noise_level,
+                )
+            }).inner;
 
         if (p0 - self.project.state.p0).abs() > 1e-4 || (p1 - self.project.state.p1).abs() > 1e-4 {
             self.project.update_phase(p0, p1);
@@ -333,10 +403,20 @@ impl eframe::App for ResonaApp {
         match action_event {
             ActionEvent::None => {}
             ActionEvent::ResetZoom => self.reset_zoom(),
+            ActionEvent::UndoZoom => {
+                if let Some((p_min, p_max, y_min, y_max)) = self.zoom_history.pop() {
+                    if let Some(ref mut t) = self.transform {
+                        t.ppm_min = p_min;
+                        t.ppm_max = p_max;
+                        t.y_min = y_min;
+                        t.y_max = y_max;
+                    }
+                }
+            }
             ActionEvent::AutoPhase => {
                 let (new_p0, new_p1) = self.project.auto_phase();
                 self.project.push_history();
-                self.status_message = format!("ACME Autophase applied: P0={:.2}°, P1={:.2}°", new_p0, new_p1);
+                self.status_message = format!("ACME Autophase applied (P0={:.2}°, P1={:.2}°)", new_p0, new_p1);
             }
             ActionEvent::ResetPhase => {
                 self.project.update_phase(0.0, 0.0);
@@ -346,36 +426,36 @@ impl eframe::App for ResonaApp {
                 let lam = 10.0_f64.powf(log_lambda);
                 self.project.auto_baseline(lam, p);
                 self.project.push_history();
-                self.status_message = format!("ALS baseline corrected: λ=1e{:.1}, p={:.4}", log_lambda, p);
+                self.status_message = format!("ALS baseline corrected (λ=1e{:.1}, p={:.4})", log_lambda, p);
             }
             ActionEvent::ClearBaseline => {
                 self.project.clear_baseline();
                 self.project.push_history();
                 self.status_message = "Baseline correction cleared".to_string();
             }
-            ActionEvent::ApplyShiftReference { target_ppm } => {
-                if let Some(cur) = self.action_state.ref_current_ppm {
-                    self.project.set_shift_reference(cur, target_ppm);
-                    self.action_state.ref_current_ppm = Some(target_ppm);
-                    self.project.push_history();
-                    self.status_message = format!("Chemical shift calibrated: {:.3} -> {:.3} ppm", cur, target_ppm);
-                }
+            ActionEvent::ApplyShiftReference { peak_ppm, target_ppm } => {
+                self.project.set_shift_reference(peak_ppm, target_ppm);
+                self.project.push_history();
+                self.status_message = format!("Referenced peak at {:.3} ppm -> {:.3} ppm", peak_ppm, target_ppm);
             }
             ActionEvent::AutoPeak => {
                 if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
                     let noise = estimate_noise_mad(spec);
                     let thresh = noise * 10.0;
+                    self.action_state.peak_threshold = thresh;
                     self.project.state.peak_threshold = Some(thresh);
                     self.project.state.peaks = pick_peaks(spec, ppm, thresh, &self.project.state.peaks);
                     self.project.push_history();
-                    self.status_message = format!("Auto detected {} peaks (thresh={:.1})", self.project.state.peaks.len(), thresh);
+                    self.status_message = format!("Auto detected {} peaks (thresh={:.1}, noise={:.2})", self.project.state.peaks.len(), thresh, noise);
                 }
             }
-            ActionEvent::PickAllPeaks => {
+            ActionEvent::PickPeaks { threshold } => {
                 if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
-                    let thresh = self.project.state.peak_threshold.unwrap_or(0.0);
-                    self.project.state.peaks = pick_peaks(spec, ppm, thresh, &self.project.state.peaks);
+                    self.action_state.peak_threshold = threshold;
+                    self.project.state.peak_threshold = Some(threshold);
+                    self.project.state.peaks = pick_peaks(spec, ppm, threshold, &self.project.state.peaks);
                     self.project.push_history();
+                    self.status_message = format!("Picked {} peaks with threshold {:.1}", self.project.state.peaks.len(), threshold);
                 }
             }
             ActionEvent::ClearPeaks => {
@@ -396,7 +476,6 @@ impl eframe::App for ResonaApp {
                 self.status_message = "All integrations cleared".to_string();
             }
             ActionEvent::AlignMultiview => {
-                // インセットをプロット上部に等間隔で横並びに自動配置
                 let n = self.project.state.multiviews.len();
                 if n > 0 {
                     if let Some(ref t) = self.transform {
@@ -425,357 +504,462 @@ impl eframe::App for ResonaApp {
                 self.project.push_history();
                 self.status_message = "All J-coupling results cleared".to_string();
             }
+            ActionEvent::CloseMode => {
+                self.mode = None;
+                self.action_state.clear_submodes();
+                self.status_message = "Mode closed".to_string();
+            }
         }
 
-        // 4. 右サイドパネル (メタデータ & J-Coupling)
+        // 4. 右サイドパネル (ezNMR完全準拠: Metadata, FT Settings, J-Coupling)
         SidePanel::right("side_panel")
             .resizable(true)
-            .default_width(260.0)
+            .default_width(250.0)
+            .frame(egui::Frame::none()
+                .fill(Color32::WHITE)
+                .inner_margin(Margin::symmetric(8.0, 8.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
                 show_side_panel(
                     ui,
                     &self.project.metadata,
+                    &self.project.state.ft_settings,
                     &mut self.project.state.j_couplings,
                     &mut self.selected_j_idx,
                 );
             });
 
         // 5. ステータスバー (下部)
-        TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&self.status_message);
+        TopBottomPanel::bottom("status_bar")
+            .frame(egui::Frame::none()
+                .fill(Color32::from_rgb(248, 249, 250))
+                .inner_margin(Margin::symmetric(8.0, 3.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&self.status_message).size(11.0).color(Color32::from_rgb(108, 117, 125)));
+                });
             });
-        });
 
-        // 6. メインプロット領域
-        let mut should_reset_zoom = false;
-        CentralPanel::default().show(ctx, |ui| {
-            let available_rect = ui.available_rect_before_wrap();
-            let plot_rect = Rect::from_min_max(
-                available_rect.min,
-                Pos2::new(available_rect.max.x, available_rect.max.y - 5.0),
-            );
+        // 6. メインプロット領域 (純白背景、下部80pxピークラベル領域)
+        CentralPanel::default()
+            .frame(egui::Frame::none().fill(Color32::WHITE))
+            .show(ctx, |ui| {
+                let available_rect = ui.available_rect_before_wrap();
+                let plot_rect = Rect::from_min_max(
+                    available_rect.min,
+                    Pos2::new(available_rect.max.x, available_rect.max.y - 4.0),
+                );
 
-            // 初期 transform のセットアップ
-            if self.transform.is_none() {
-                self.transform = Some(PlotTransform::new(
-                    plot_rect,
-                    -0.5,
-                    10.5,
-                    -100.0,
-                    1000.0,
-                ));
-                self.reset_zoom();
-            }
-
-            if let Some(ref mut t) = self.transform {
-                t.screen_rect = plot_rect;
-
-                // プロット描画
-                if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
-                    let ref_factor = self.project.state.integration_ref_value
-                        / self.project.state.integration_ref_area.max(1e-12);
-                    paint_spectrum(
-                        ui,
-                        t,
-                        ppm,
-                        spec,
-                        &self.project.state.peaks,
-                        &self.project.state.integrations,
-                        self.project.state.integration_scale,
-                        self.project.state.integration_offset,
-                        ref_factor,
-                        &self.project.state.multiviews,
-                        self.action_state.multiview_ratio,
-                        self.selected_multiview_id.as_deref(),
-                        self.project.state.peak_threshold,
-                        &self.plot_style,
-                    );
-                } else {
-                    let painter = ui.painter_at(plot_rect);
-                    painter.rect_filled(plot_rect, 0.0, Color32::WHITE);
-                    painter.text(
-                        plot_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "No NMR data loaded.\nDrop a .jdf or .rsn file here, or use File -> Open...",
-                        egui::FontId::proportional(16.0),
-                        Color32::from_gray(120),
-                    );
+                // 初期 transform のセットアップ
+                if self.transform.is_none() {
+                    self.transform = Some(PlotTransform::new(
+                        plot_rect,
+                        -0.5,
+                        10.5,
+                        -100.0,
+                        1000.0,
+                    ));
+                    self.reset_zoom();
                 }
 
-                // マウスインタラクション
-                let response = ui.allocate_rect(plot_rect, egui::Sense::click_and_drag());
-                let pointer_pos = response.hover_pos();
+                let mut do_reset_zoom = false;
+                if let Some(ref mut t) = self.transform {
+                    t.screen_rect = plot_rect;
 
-                if let Some(pos) = pointer_pos {
-                    let (cur_ppm, cur_y) = t.screen_to_data(pos);
-                    self.status_message = format!("PPM: {:.3}, Intensity: {:.1}", cur_ppm, cur_y);
-                }
+                    // プロット描画
+                    if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                        let ref_factor = self.project.state.integration_ref_value
+                            / self.project.state.integration_ref_area.max(1e-12);
+                        let is_peak_mode = self.mode == Some(AppMode::Peak);
+                        let ref_drag_range = if self.mode == Some(AppMode::Reference) && self.action_state.ref_set_active {
+                            if let (Some(s), Some(c)) = (self.drag_start, self.drag_current) {
+                                let (p1, _) = t.screen_to_data(s);
+                                let (p2, _) = t.screen_to_data(c);
+                                Some((p1, p2))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
 
-                // スクロールホイールでのズーム
-                let scroll_delta = ui.input(|i| i.raw_scroll_delta);
-                if scroll_delta.y.abs() > 0.0 && plot_rect.contains(pointer_pos.unwrap_or_default()) {
-                    let factor = if scroll_delta.y > 0.0 { 1.15 } else { 0.85 };
-                    if let Some(pivot) = pointer_pos {
-                        t.zoom(pivot, factor, factor);
+                        let is_thresh_submode = is_peak_mode && self.action_state.peak_submode == PeakSubMode::Threshold;
+
+                        paint_spectrum(
+                            ui,
+                            t,
+                            ppm,
+                            spec,
+                            &self.project.state.peaks,
+                            &self.project.state.integrations,
+                            self.project.state.integration_scale,
+                            self.project.state.integration_offset,
+                            ref_factor,
+                            &self.project.state.multiviews,
+                            self.action_state.multiview_ratio,
+                            self.selected_multiview_id.as_deref(),
+                            Some(self.action_state.peak_threshold),
+                            is_peak_mode,
+                            is_thresh_submode,
+                            ref_drag_range,
+                            &self.plot_style,
+                        );
+                    } else {
+                        let painter = ui.painter_at(plot_rect);
+                        painter.rect_filled(plot_rect, 0.0, Color32::WHITE);
+                        painter.text(
+                            plot_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "No NMR data loaded.\nDrop a .jdf or .rsn file here, or use File -> Open...",
+                            egui::FontId::proportional(15.0),
+                            Color32::from_gray(140),
+                        );
                     }
-                }
 
-                // 中央クリックでのリセット
-                if response.middle_clicked() {
-                    should_reset_zoom = true;
-                }
-
-                // 右クリックでの全体表示リセット (Zoomモード時)
-                if response.secondary_clicked() && self.mode == AppMode::Zoom {
-                    should_reset_zoom = true;
-                }
-
-                // ドラッグ開始
-                if response.drag_started_by(egui::PointerButton::Primary) {
-                    self.drag_start = pointer_pos;
-                    self.drag_current = pointer_pos;
-                }
-
-                // ドラッグ中
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    self.drag_current = pointer_pos;
-
-                    if self.mode == AppMode::View {
-                        let delta = response.drag_delta();
-                        t.pan(delta);
+                    // マウスインタラクション (クリック & ドラッグ)
+                    // ※ ホイールズーム・中クリック・右ドラッグは廃止
+                    let response = ui.allocate_rect(plot_rect, egui::Sense::click_and_drag());
+                    let pointer_pos = response.hover_pos().or_else(|| ctx.input(|i| i.pointer.latest_pos()));
+                    let axis_y = t.axis_y();
+                    // ダブルクリックで拡大を1つ前に戻す (Zoom モード時)
+                    if response.double_clicked() && self.active_zoom.is_some() {
+                        if let Some((p_min, p_max, y_min, y_max)) = self.zoom_history.pop() {
+                            t.ppm_min = p_min;
+                            t.ppm_max = p_max;
+                            t.y_min = y_min;
+                            t.y_max = y_max;
+                            self.status_message = "Zoom undone (double-click)".to_string();
+                        } else {
+                            do_reset_zoom = true;
+                            self.status_message = "Zoom reset (double-click)".to_string();
+                        }
                     }
-                }
 
-                // 右ドラッグでのスムーズズーム (Viewモード時)
-                if response.dragged_by(egui::PointerButton::Secondary) && self.mode == AppMode::View {
-                    let delta = response.drag_delta();
-                    let factor_x = 1.0 + (delta.x as f64) * 0.01;
-                    let factor_y = 1.0 - (delta.y as f64) * 0.01;
-                    if let Some(pivot) = pointer_pos {
-                        t.zoom(pivot, factor_x, factor_y);
+                    // スレッショルドバーのホバー／ドラッグ判定 (Peak pick モード時)
+                    let is_peak_mode = self.mode == Some(AppMode::Peak) && self.active_zoom.is_none();
+                    let is_thresh_submode = is_peak_mode && self.action_state.peak_submode == PeakSubMode::Threshold;
+                    let thresh_val = self.action_state.peak_threshold;
+                    let mut near_threshold = false;
+
+                    if is_peak_mode {
+                        if let Some(pos) = pointer_pos {
+                            let in_plot = plot_rect.contains(pos) && pos.y <= axis_y && response.hovered();
+                            if is_thresh_submode {
+                                if in_plot {
+                                    near_threshold = true;
+                                    ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                }
+                            } else if thresh_val > 0.0 && in_plot {
+                                let sy_pos = t.y_to_screen_y(thresh_val);
+                                let sy_neg = t.y_to_screen_y(-thresh_val);
+                                if (pos.y - sy_pos).abs() <= 7.0 || (pos.y - sy_neg).abs() <= 7.0 {
+                                    near_threshold = true;
+                                    ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                }
+                            }
+                        }
+                        if self.is_dragging_threshold {
+                            ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        }
                     }
-                }
 
-                // ラバーバンド描画 (ドラッグ中)
-                if let (Some(start), Some(curr)) = (self.drag_start, self.drag_current) {
-                    let painter = ui.painter_at(plot_rect);
-                    match self.mode {
-                        AppMode::Zoom => {
-                            let band_rect = match self.action_state.zoom_submode {
-                                ZoomSubMode::Rect => Rect::from_two_pos(start, curr),
-                                ZoomSubMode::X => Rect::from_min_max(
+                    if is_thresh_submode && response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = pointer_pos {
+                            if plot_rect.contains(pos) && pos.y <= axis_y {
+                                let new_thresh = t.screen_y_to_y(pos.y).abs();
+                                self.action_state.peak_threshold = new_thresh;
+                                self.project.state.peak_threshold = Some(new_thresh);
+                            }
+                        }
+                    }
+
+                    if let Some(pos) = pointer_pos {
+                        let (cur_ppm, cur_y) = t.screen_to_data(pos);
+                        self.status_message = format!("PPM {:.3}   Intensity {:.1}", cur_ppm, cur_y);
+                    }
+
+                    // ドラッグ開始 (押下した瞬間の正確な原点座標を取得して遅れを解消)
+                    if response.drag_started_by(egui::PointerButton::Primary) {
+                        if near_threshold {
+                            self.is_dragging_threshold = true;
+                            if let Some(pos) = pointer_pos {
+                                let new_thresh = t.screen_y_to_y(pos.y).abs();
+                                self.action_state.peak_threshold = new_thresh;
+                                self.project.state.peak_threshold = Some(new_thresh);
+                            }
+                        } else {
+                            self.is_dragging_threshold = false;
+                            let origin = ctx.input(|i| i.pointer.press_origin()).or(pointer_pos);
+                            self.drag_start = origin;
+                            self.drag_current = pointer_pos;
+                        }
+                    }
+
+                    // ドラッグ中
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        if self.is_dragging_threshold {
+                            ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                            if let Some(pos) = pointer_pos {
+                                let new_thresh = t.screen_y_to_y(pos.y).abs();
+                                self.action_state.peak_threshold = new_thresh;
+                                self.project.state.peak_threshold = Some(new_thresh);
+                            }
+                        } else {
+                            self.drag_current = pointer_pos;
+                        }
+                    }
+
+                    // ラバーバンド描画 (ドラッグ中、スレッショルドドラッグでない場合)
+                    if !self.is_dragging_threshold {
+                        if let (Some(start), Some(curr)) = (self.drag_start, self.drag_current) {
+                            let painter = ui.painter_at(plot_rect);
+                        let axis_y = t.axis_y();
+
+                        // Zoom ツールがアクティブな場合は最優先で Zoom ラバーバンドを表示
+                        if let Some(tool) = self.active_zoom {
+                            let band_rect = match tool {
+                                ZoomTool::Rect => Rect::from_two_pos(start, curr),
+                                ZoomTool::X => Rect::from_min_max(
                                     Pos2::new(start.x.min(curr.x), plot_rect.min.y),
-                                    Pos2::new(start.x.max(curr.x), plot_rect.max.y),
+                                    Pos2::new(start.x.max(curr.x), axis_y),
                                 ),
-                                ZoomSubMode::Y => Rect::from_min_max(
+                                ZoomTool::Y => Rect::from_min_max(
                                     Pos2::new(plot_rect.min.x, start.y.min(curr.y)),
                                     Pos2::new(plot_rect.max.x, start.y.max(curr.y)),
                                 ),
                             };
                             painter.rect_filled(band_rect, 0.0, self.plot_style.rubberband_color);
-                            painter.rect_stroke(band_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(0, 120, 255)));
-                        }
-                        AppMode::Reference => {
-                            painter.line_segment(
-                                [Pos2::new(curr.x, plot_rect.min.y), Pos2::new(curr.x, plot_rect.max.y)],
-                                Stroke::new(2.0_f32, Color32::from_rgb(220, 180, 0)),
-                            );
-                        }
-                        AppMode::Peak => {
-                            let band_rect = Rect::from_min_max(
-                                Pos2::new(start.x.min(curr.x), plot_rect.min.y),
-                                Pos2::new(start.x.max(curr.x), plot_rect.max.y),
-                            );
-                            painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(0, 200, 100, 30));
-                        }
-                        AppMode::Integrate => {
-                            if self.action_state.integrate_submode == IntegrateSubMode::Add {
-                                let band_rect = Rect::from_min_max(
-                                    Pos2::new(start.x.min(curr.x), plot_rect.min.y),
-                                    Pos2::new(start.x.max(curr.x), plot_rect.max.y),
-                                );
-                                painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(255, 100, 100, 40));
+                            painter.rect_stroke(band_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(13, 110, 253)));
+                        } else if let Some(mode) = self.mode {
+                            match mode {
+                                AppMode::Reference => {
+                                    // paint_spectrum の ref_drag_range で既に半透明矩形を描画
+                                }
+                                AppMode::Peak => {
+                                    let band_rect = Rect::from_min_max(
+                                        Pos2::new(start.x.min(curr.x), plot_rect.min.y),
+                                        Pos2::new(start.x.max(curr.x), axis_y),
+                                    );
+                                    painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(0, 180, 80, 25));
+                                }
+                                AppMode::Integrate => {
+                                    if self.action_state.integrate_submode == IntegrateSubMode::Add {
+                                        let band_rect = Rect::from_min_max(
+                                            Pos2::new(start.x.min(curr.x), plot_rect.min.y),
+                                            Pos2::new(start.x.max(curr.x), axis_y),
+                                        );
+                                        painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(225, 29, 72, 30));
+                                    }
+                                }
+                                AppMode::Multiview => {
+                                    let band_rect = match self.action_state.multiview_submode {
+                                        MultiviewSubMode::AddRect => Rect::from_two_pos(start, curr),
+                                        MultiviewSubMode::AddX => Rect::from_min_max(
+                                            Pos2::new(start.x.min(curr.x), plot_rect.min.y),
+                                            Pos2::new(start.x.max(curr.x), axis_y),
+                                        ),
+                                        _ => Rect::from_two_pos(start, curr),
+                                    };
+                                    painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(147, 51, 234, 25));
+                                }
+                                AppMode::JCoupling => {
+                                    if self.action_state.jcoupling_add_active {
+                                        let band_rect = Rect::from_min_max(
+                                            Pos2::new(start.x.min(curr.x), plot_rect.min.y),
+                                            Pos2::new(start.x.max(curr.x), axis_y),
+                                        );
+                                        painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(13, 110, 253, 30));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        AppMode::Multiview => {
-                            let band_rect = match self.action_state.multiview_submode {
-                                MultiviewSubMode::AddRect => Rect::from_two_pos(start, curr),
-                                MultiviewSubMode::AddX => Rect::from_min_max(
-                                    Pos2::new(start.x.min(curr.x), plot_rect.min.y),
-                                    Pos2::new(start.x.max(curr.x), plot_rect.max.y),
-                                ),
-                                _ => Rect::from_two_pos(start, curr),
-                            };
-                            painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(200, 0, 200, 30));
-                        }
-                        AppMode::JCoupling => {
-                            if self.action_state.jcoupling_add_active {
-                                let band_rect = Rect::from_min_max(
-                                    Pos2::new(start.x.min(curr.x), plot_rect.min.y),
-                                    Pos2::new(start.x.max(curr.x), plot_rect.max.y),
-                                );
-                                painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(0, 150, 255, 40));
-                            }
-                        }
-                        _ => {}
                     }
                 }
 
-                // ドラッグ終了 (解放) 時の処理
-                if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    if let (Some(start), Some(end)) = (self.drag_start, self.drag_current) {
-                        let (p_start, y_start) = t.screen_to_data(start);
-                        let (p_end, y_end) = t.screen_to_data(end);
+                    // ドラッグ終了 (解放) 時の処理
+                    if response.drag_stopped_by(egui::PointerButton::Primary) {
+                        if self.is_dragging_threshold {
+                            self.is_dragging_threshold = false;
+                            self.status_message = format!("Threshold set to {:.2}", self.action_state.peak_threshold);
+                        } else if let (Some(start), Some(end)) = (self.drag_start, self.drag_current) {
+                            let (p_start, y_start) = t.screen_to_data(start);
+                            let (p_end, y_end) = t.screen_to_data(end);
 
-                        match self.mode {
-                            AppMode::Zoom => {
+                            if let Some(tool) = self.active_zoom {
+                                // ズーム前の範囲を履歴に保存
+                                self.zoom_history.push((t.ppm_min, t.ppm_max, t.y_min, t.y_max));
+
                                 let dx = (start.x - end.x).abs();
                                 let dy = (start.y - end.y).abs();
                                 if dx > 5.0 || dy > 5.0 {
-                                    match self.action_state.zoom_submode {
-                                        ZoomSubMode::Rect => {
+                                    match tool {
+                                        ZoomTool::Rect => {
                                             t.ppm_min = p_start.min(p_end);
                                             t.ppm_max = p_start.max(p_end);
                                             t.y_min = y_start.min(y_end);
                                             t.y_max = y_start.max(y_end);
                                         }
-                                        ZoomSubMode::X => {
+                                        ZoomTool::X => {
                                             t.ppm_min = p_start.min(p_end);
                                             t.ppm_max = p_start.max(p_end);
                                         }
-                                        ZoomSubMode::Y => {
+                                        ZoomTool::Y => {
                                             t.y_min = y_start.min(y_end);
                                             t.y_max = y_start.max(y_end);
                                         }
                                     }
                                 }
-                            }
-                            AppMode::Reference => {
-                                self.action_state.ref_current_ppm = Some(p_end);
-                            }
-                            AppMode::Peak => {
-                                if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
-                                    let p_low = p_start.min(p_end);
-                                    let p_high = p_start.max(p_end);
-                                    if (start.x - end.x).abs() > 5.0 {
-                                        if self.action_state.peak_submode == PeakSubMode::Add {
-                                            // 範囲内の最大値をピークとして追加
-                                            let mut best_p = p_low;
-                                            let mut max_val = f64::MIN;
-                                            for i in 0..ppm.len().min(spec.len()) {
-                                                let p = ppm[i];
-                                                if p >= p_low && p <= p_high && spec[i] > max_val {
-                                                    max_val = spec[i];
-                                                    best_p = p;
+                            } else if let Some(mode) = self.mode {
+                                match mode {
+                                    AppMode::Reference => {
+                                        if self.action_state.ref_set_active && (start.x - end.x).abs() > 3.0 {
+                                            if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                                let p_low = p_start.min(p_end);
+                                                let p_high = p_start.max(p_end);
+                                                let mut best_p = None;
+                                                let mut max_abs = -1.0_f64;
+                                                for i in 0..ppm.len().min(spec.len()) {
+                                                    let p = ppm[i];
+                                                    if p >= p_low && p <= p_high {
+                                                        let abs_val = spec[i].abs();
+                                                        if abs_val > max_abs {
+                                                            max_abs = abs_val;
+                                                            best_p = Some(p);
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(peak_ppm) = best_p {
+                                                    let target = self.action_state.ref_target_ppm;
+                                                    self.project.set_shift_reference(peak_ppm, target);
+                                                    self.project.push_history();
+                                                    self.status_message = format!("Referenced peak at {:.3} ppm -> {:.3} ppm", peak_ppm, target);
                                                 }
                                             }
-                                            if max_val > f64::MIN {
-                                                self.project.state.peaks = snap_and_add_peak(spec, ppm, best_p, &self.project.state.peaks);
-                                                self.project.push_history();
+                                        }
+                                    }
+                                    AppMode::Peak => {
+                                        if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                            let p_low = p_start.min(p_end);
+                                            let p_high = p_start.max(p_end);
+                                            if (start.x - end.x).abs() > 5.0 {
+                                                if self.action_state.peak_submode == PeakSubMode::Add {
+                                                    let mut best_p = p_low;
+                                                    let mut max_val = f64::MIN;
+                                                    for i in 0..ppm.len().min(spec.len()) {
+                                                        let p = ppm[i];
+                                                        if p >= p_low && p <= p_high && spec[i] > max_val {
+                                                            max_val = spec[i];
+                                                            best_p = p;
+                                                        }
+                                                    }
+                                                    if max_val > f64::MIN {
+                                                        self.project.state.peaks = snap_and_add_peak(spec, ppm, best_p, &self.project.state.peaks);
+                                                        self.project.push_history();
+                                                    }
+                                                } else if self.action_state.peak_submode == PeakSubMode::Delete {
+                                                    self.project.state.peaks.retain(|pk| pk.ppm < p_low || pk.ppm > p_high);
+                                                    self.project.push_history();
+                                                }
                                             }
-                                        } else {
-                                            // 範囲内のピークを削除
-                                            self.project.state.peaks.retain(|pk| pk.ppm < p_low || pk.ppm > p_high);
+                                        }
+                                    }
+                                    AppMode::Integrate => {
+                                        if self.action_state.integrate_submode == IntegrateSubMode::Add && (start.x - end.x).abs() > 5.0 {
+                                            let s_ppm = p_start.max(p_end);
+                                            let e_ppm = p_start.min(p_end);
+                                            let new_item = IntegrationItem {
+                                                id: format!("intg-{}", self.project.state.integrations.len() + 1),
+                                                start_ppm: s_ppm,
+                                                end_ppm: e_ppm,
+                                                y_start: 0.0,
+                                                y_end: 0.0,
+                                            };
+                                            self.project.state.integrations.push(new_item);
                                             self.project.push_history();
                                         }
                                     }
-                                }
-                            }
-                            AppMode::Integrate => {
-                                if self.action_state.integrate_submode == IntegrateSubMode::Add && (start.x - end.x).abs() > 5.0 {
-                                    let s_ppm = p_start.max(p_end);
-                                    let e_ppm = p_start.min(p_end);
-                                    let new_item = IntegrationItem {
-                                        id: format!("intg-{}", self.project.state.integrations.len() + 1),
-                                        start_ppm: s_ppm,
-                                        end_ppm: e_ppm,
-                                        y_start: 0.0,
-                                        y_end: 0.0,
-                                    };
-                                    self.project.state.integrations.push(new_item);
-                                    self.project.push_history();
-                                }
-                            }
-                            AppMode::Multiview => {
-                                if (start.x - end.x).abs() > 10.0 {
-                                    let s_ppm = p_start.min(p_end);
-                                    let e_ppm = p_start.max(p_end);
-                                    let geom = match self.action_state.multiview_submode {
-                                        MultiviewSubMode::AddRect => RectF {
-                                            x: start.x.min(end.x),
-                                            y: start.y.min(end.y),
-                                            w: (start.x - end.x).abs().max(80.0),
-                                            h: (start.y - end.y).abs().max(60.0),
-                                        },
-                                        _ => RectF {
-                                            x: start.x.min(end.x),
-                                            y: plot_rect.min.y + 20.0,
-                                            w: 200.0,
-                                            h: 150.0,
-                                        },
-                                    };
-                                    let mv_id = format!("mv-{}", self.project.state.multiviews.len() + 1);
-                                    self.project.state.multiviews.push(MultiviewItem {
-                                        id: mv_id.clone(),
-                                        src_x_min: s_ppm,
-                                        src_x_max: e_ppm,
-                                        geometry: geom,
-                                    });
-                                    self.selected_multiview_id = Some(mv_id);
-                                    self.project.push_history();
-                                }
-                            }
-                            AppMode::JCoupling => {
-                                if self.action_state.jcoupling_add_active && (start.x - end.x).abs() > 5.0 {
-                                    let p_low = p_start.min(p_end);
-                                    let p_high = p_start.max(p_end);
-                                    let freq_mhz = self.project.metadata.obs_freq_mhz;
-
-                                    // 範囲内のピークを収集
-                                    let mut peaks_hz = Vec::new();
-                                    let mut intensities = Vec::new();
-                                    for pk in &self.project.state.peaks {
-                                        if pk.ppm >= p_low && pk.ppm <= p_high {
-                                            peaks_hz.push(pk.ppm * freq_mhz);
-                                            intensities.push(pk.intensity);
+                                    AppMode::Multiview => {
+                                        if (start.x - end.x).abs() > 10.0 {
+                                            let s_ppm = p_start.min(p_end);
+                                            let e_ppm = p_start.max(p_end);
+                                            let geom = match self.action_state.multiview_submode {
+                                                MultiviewSubMode::AddRect => RectF {
+                                                    x: start.x.min(end.x),
+                                                    y: start.y.min(end.y),
+                                                    w: (start.x - end.x).abs().max(80.0),
+                                                    h: (start.y - end.y).abs().max(60.0),
+                                                },
+                                                _ => RectF {
+                                                    x: start.x.min(end.x),
+                                                    y: plot_rect.min.y + 20.0,
+                                                    w: 200.0,
+                                                    h: 150.0,
+                                                },
+                                            };
+                                            let mv_id = format!("mv-{}", self.project.state.multiviews.len() + 1);
+                                            self.project.state.multiviews.push(MultiviewItem {
+                                                id: mv_id.clone(),
+                                                src_x_min: s_ppm,
+                                                src_x_max: e_ppm,
+                                                geometry: geom,
+                                            });
+                                            self.selected_multiview_id = Some(mv_id);
+                                            self.project.push_history();
                                         }
                                     }
+                                    AppMode::JCoupling => {
+                                        if self.action_state.jcoupling_add_active && (start.x - end.x).abs() > 5.0 {
+                                            let p_low = p_start.min(p_end);
+                                            let p_high = p_start.max(p_end);
+                                            let freq_mhz = self.project.metadata.obs_freq_mhz;
 
-                                    let center_ppm = (p_low + p_high) * 0.5;
-                                    let shift_str = format!("{:.2}", center_ppm);
-                                    let shift_str_m = format!("{:.2}-{:.2}", p_low, p_high);
+                                            let mut peaks_hz = Vec::new();
+                                            let mut intensities = Vec::new();
+                                            for pk in &self.project.state.peaks {
+                                                if pk.ppm >= p_low && pk.ppm <= p_high {
+                                                    peaks_hz.push(pk.ppm * freq_mhz);
+                                                    intensities.push(pk.intensity);
+                                                }
+                                            }
 
-                                    let candidates = analyze_multiplet(
-                                        peaks_hz,
-                                        intensities,
-                                        &shift_str,
-                                        &shift_str_m,
-                                        &self.project.metadata.nucleus,
-                                        1.0,
-                                    );
+                                            let center_ppm = (p_low + p_high) * 0.5;
+                                            let shift_str = format!("{:.2}", center_ppm);
+                                            let shift_str_m = format!("{:.2}-{:.2}", p_low, p_high);
 
-                                    if !candidates.is_empty() {
-                                        self.jcoupling_dialog_state.candidates = candidates;
-                                        self.jcoupling_dialog_state.selected_idx = 0;
-                                        self.jcoupling_dialog_state.edited_text = self.jcoupling_dialog_state.candidates[0].text.clone();
-                                        self.jcoupling_dialog_state.center_ppm = center_ppm;
-                                        self.jcoupling_dialog_state.open = true;
+                                            let candidates = analyze_multiplet(
+                                                peaks_hz,
+                                                intensities,
+                                                &shift_str,
+                                                &shift_str_m,
+                                                &self.project.metadata.nucleus,
+                                                1.0,
+                                            );
+
+                                            if !candidates.is_empty() {
+                                                self.jcoupling_dialog_state.candidates = candidates;
+                                                self.jcoupling_dialog_state.selected_idx = 0;
+                                                self.jcoupling_dialog_state.edited_text = self.jcoupling_dialog_state.candidates[0].text.clone();
+                                                self.jcoupling_dialog_state.center_ppm = center_ppm;
+                                                self.jcoupling_dialog_state.open = true;
+                                            }
+                                        }
                                     }
+                                    _ => {}
                                 }
                             }
-                            _ => {}
                         }
+                        self.drag_start = None;
+                        self.drag_current = None;
+                        self.is_dragging_threshold = false;
                     }
-                    self.drag_start = None;
-                    self.drag_current = None;
                 }
-            }
-        });
 
-        if should_reset_zoom {
-            self.reset_zoom();
-        }
+                if do_reset_zoom {
+                    self.reset_zoom();
+                }
+            });
 
         // 7. ダイアログの表示と処理
         if let Some(ft_settings) = show_ft_dialog(ctx, &mut self.ft_dialog_state) {
@@ -796,7 +980,7 @@ impl eframe::App for ResonaApp {
                         self.status_message = "Fourier Transform applied with updated settings".to_string();
                     }
                     Err(e) => {
-                        self.status_message = format!("FT error: {}", e);
+                        self.status_message = format!("FT error {}", e);
                     }
                 }
             }

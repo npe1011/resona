@@ -51,17 +51,17 @@ pub fn show_ft_dialog(ctx: &egui::Context, state: &mut FtDialogState) -> Option<
                 match &mut state.settings.window {
                     WindowFunction::Exponential { lb } => {
                         ui.horizontal(|ui| {
-                            ui.label("Line Broadening (Hz):");
+                            ui.label("Line Broadening (Hz)");
                             ui.add(DragValue::new(lb).speed(0.05).range(0.01..=50.0));
                         });
                     }
                     WindowFunction::Gaussian { g1, g2, g3 } => {
                         ui.horizontal(|ui| {
-                            ui.label("GM g1 (Hz):");
+                            ui.label("GM g1 (Hz)");
                             ui.add(DragValue::new(g1).speed(0.1));
-                            ui.label("g2 (Hz):");
+                            ui.label("g2 (Hz)");
                             ui.add(DragValue::new(g2).speed(0.1));
-                            ui.label("g3:");
+                            ui.label("g3");
                             ui.add(DragValue::new(g3).speed(0.01));
                         });
                     }

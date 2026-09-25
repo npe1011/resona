@@ -44,9 +44,9 @@ pub fn show_display_dialog(
             ui.group(|ui| {
                 ui.label(egui::RichText::new("X-Axis (ppm)").strong());
                 ui.horizontal(|ui| {
-                    ui.label("Min ppm:");
+                    ui.label("Min ppm");
                     ui.add(DragValue::new(&mut state.ppm_min).speed(0.1));
-                    ui.label("Max ppm:");
+                    ui.label("Max ppm");
                     ui.add(DragValue::new(&mut state.ppm_max).speed(0.1));
                 });
             });
@@ -54,9 +54,9 @@ pub fn show_display_dialog(
             ui.group(|ui| {
                 ui.label(egui::RichText::new("Y-Axis (Intensity)").strong());
                 ui.horizontal(|ui| {
-                    ui.label("Min Intensity:");
+                    ui.label("Min Intensity");
                     ui.add(DragValue::new(&mut state.y_min).speed(10.0));
-                    ui.label("Max Intensity:");
+                    ui.label("Max Intensity");
                     ui.add(DragValue::new(&mut state.y_max).speed(10.0));
                 });
             });
@@ -64,9 +64,9 @@ pub fn show_display_dialog(
             ui.group(|ui| {
                 ui.label(egui::RichText::new("Precision").strong());
                 ui.horizontal(|ui| {
-                    ui.label("PPM Decimals:");
+                    ui.label("PPM Decimals");
                     ui.add(DragValue::new(&mut state.ppm_decimals).range(1..=6));
-                    ui.label("Integral Decimals:");
+                    ui.label("Integral Decimals");
                     ui.add(DragValue::new(&mut state.integral_decimals).range(0..=4));
                 });
             });

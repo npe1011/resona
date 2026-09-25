@@ -43,7 +43,7 @@ pub fn show_jcoupling_dialog(
             } else {
                 for (i, cand) in state.candidates.iter().enumerate() {
                     let err_str = if cand.error.is_finite() {
-                        format!(" [Error: {:.3}]", cand.error)
+                        format!(" [Error {:.3}]", cand.error)
                     } else {
                         "".to_string()
                     };
@@ -57,7 +57,7 @@ pub fn show_jcoupling_dialog(
             }
 
             ui.separator();
-            ui.label("Edit Output Text:");
+            ui.label("Edit Output Text");
             ui.add(TextEdit::singleline(&mut state.edited_text).desired_width(320.0));
 
             ui.separator();
