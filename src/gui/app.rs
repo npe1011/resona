@@ -1797,34 +1797,101 @@ impl eframe::App for ResonaApp {
                                             let p_high = p_start.max(p_end);
                                             let freq_mhz = self.project.metadata.obs_freq_mhz;
 
+                                            let mut peaks_in_range = Vec::new();
                                             let mut peaks_hz = Vec::new();
                                             let mut intensities = Vec::new();
                                             for pk in &self.project.state.peaks {
                                                 if pk.ppm >= p_low && pk.ppm <= p_high {
+                                                    peaks_in_range.push(pk);
                                                     peaks_hz.push(pk.ppm * freq_mhz);
                                                     intensities.push(pk.intensity);
                                                 }
                                             }
 
-                                            let center_ppm = (p_low + p_high) * 0.5;
-                                            let shift_str = format!("{:.2}", center_ppm);
-                                            let shift_str_m = format!("{:.2}-{:.2}", p_low, p_high);
+                                            if !peaks_hz.is_empty() {
+                                                // 1. ピーク強度加重平均による化学シフト重心の計算
+                                                let total_int: f64 = intensities.iter().sum();
+                                                let center_ppm = if total_int > 0.0 {
+                                                    peaks_in_range.iter().map(|p| p.ppm * p.intensity).sum::<f64>() / total_int
+                                                } else {
+                                                    (p_low + p_high) * 0.5
+                                                };
 
-                                            let candidates = analyze_multiplet(
-                                                peaks_hz,
-                                                intensities,
-                                                &shift_str,
-                                                &shift_str_m,
-                                                &self.project.metadata.nucleus,
-                                                1.0,
-                                            );
+                                                let shift_str = format!("{:.2}", center_ppm);
+                                                let shift_str_m = format!("{:.2}-{:.2}", p_high, p_low);
 
-                                            if !candidates.is_empty() {
-                                                self.jcoupling_dialog_state.candidates = candidates;
-                                                self.jcoupling_dialog_state.selected_idx = 0;
-                                                self.jcoupling_dialog_state.edited_text = self.jcoupling_dialog_state.candidates[0].text.clone();
-                                                self.jcoupling_dialog_state.center_ppm = center_ppm;
-                                                self.jcoupling_dialog_state.open = true;
+                                                // 2. プロトン数 (積分値) の算出
+                                                let mut raw_protons = 1.0_f64;
+                                                if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                                                    let ref_factor = self.project.state.integration_ref_value
+                                                        / self.project.state.integration_ref_area.max(1e-12);
+
+                                                    // 重なる既存の積分区間を探索
+                                                    let mut matched_intg = None;
+                                                    for intg in &self.project.state.integrations {
+                                                        let i_min = intg.min_ppm();
+                                                        let i_max = intg.max_ppm();
+                                                        let overlap_min = p_low.max(i_min);
+                                                        let overlap_max = p_high.min(i_max);
+                                                        if overlap_max > overlap_min {
+                                                            let overlap_len = overlap_max - overlap_min;
+                                                            if overlap_len > 0.4 * (i_max - i_min) || overlap_len > 0.4 * (p_high - p_low) {
+                                                                if let Some(res) = compute_integral(spec, ppm, intg, 1.0, ref_factor, 0.0) {
+                                                                    matched_intg = Some(res.normalized_value);
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if let Some(val) = matched_intg {
+                                                        raw_protons = val;
+                                                    } else if !self.project.state.integrations.is_empty() || self.project.state.integration_ref_area != 1.0 {
+                                                        // 選択範囲の直接台形積分
+                                                        let n_pts = ppm.len().min(spec.len());
+                                                        let mut in_range_pts: Vec<(f64, f64)> = Vec::new();
+                                                        for i in 0..n_pts {
+                                                            let p = ppm[i];
+                                                            if p >= p_low && p <= p_high {
+                                                                in_range_pts.push((p, spec[i]));
+                                                            }
+                                                        }
+                                                        if in_range_pts.len() >= 2 {
+                                                            in_range_pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                                                            let mut area = 0.0_f64;
+                                                            for i in 0..in_range_pts.len() - 1 {
+                                                                let dx = (in_range_pts[i + 1].0 - in_range_pts[i].0).abs();
+                                                                let avg_y = (in_range_pts[i].1 + in_range_pts[i + 1].1) * 0.5;
+                                                                area += avg_y * dx;
+                                                            }
+                                                            raw_protons = (area.abs() * ref_factor).max(0.01);
+                                                        }
+                                                    }
+                                                }
+
+                                                // 3. Allow Non-Integer の適用
+                                                let proton_str = if self.action_state.non_integer_protons {
+                                                    format!("{:.2}H", raw_protons)
+                                                } else {
+                                                    format!("{}H", raw_protons.round().max(1.0) as i64)
+                                                };
+
+                                                let candidates = analyze_multiplet(
+                                                    peaks_hz,
+                                                    intensities,
+                                                    &shift_str,
+                                                    &shift_str_m,
+                                                    &proton_str,
+                                                    1.0,
+                                                );
+
+                                                if !candidates.is_empty() {
+                                                    self.jcoupling_dialog_state.candidates = candidates;
+                                                    self.jcoupling_dialog_state.selected_idx = 0;
+                                                    self.jcoupling_dialog_state.edited_text = self.jcoupling_dialog_state.candidates[0].text.clone();
+                                                    self.jcoupling_dialog_state.center_ppm = center_ppm;
+                                                    self.jcoupling_dialog_state.open = true;
+                                                }
                                             }
                                         }
                                     }
