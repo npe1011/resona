@@ -1,0 +1,191 @@
+use ndarray::Array1;
+use serde::{Deserialize, Serialize};
+
+use super::peak::estimate_noise_mad;
+
+/// 積分区間項目
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntegrationItem {
+    /// 一意な識別子 (UUID または連番)
+    pub id: String,
+    /// 開始化学シフト (ppm, 通常は大きい値 / 低磁場側)
+    pub start_ppm: f64,
+    /// 終了化学シフト (ppm, 通常は小さい値 / 高磁場側)
+    pub end_ppm: f64,
+    /// 開始点での局所ベースライン Y レベル
+    #[serde(default)]
+    pub y_start: f64,
+    /// 終了点での局所ベースライン Y レベル
+    #[serde(default)]
+    pub y_end: f64,
+}
+
+/// 単一の積分区間に対する面積および累積積分曲線を計算する
+#[derive(Debug, Clone)]
+pub struct IntegralResult {
+    /// 区間内の PPM 配列
+    pub ppm: Vec<f64>,
+    /// 表示用の積分曲線 Y 座標 (局所ベースライン + スケーリング積分 + オフセット)
+    pub curve_y: Vec<f64>,
+    /// 台形公式による総面積
+    pub total_area: f64,
+    /// リファレンス値換算後のプロトン数 / 表示値
+    pub normalized_value: f64,
+}
+
+/// 単一区間の台形公式積分を計算する
+pub fn compute_integral(
+    spectrum: &Array1<f64>,
+    ppm: &Array1<f64>,
+    item: &IntegrationItem,
+    global_scale: f64,
+    ref_factor: f64,
+    offset_factor: f64,
+) -> Option<IntegralResult> {
+    let n = spectrum.len();
+    if n == 0 || n != ppm.len() {
+        return None;
+    }
+
+    let mut x1 = item.start_ppm;
+    let mut x2 = item.end_ppm;
+    let mut y1 = item.y_start;
+    let mut y2 = item.y_end;
+
+    if x1 < x2 {
+        std::mem::swap(&mut x1, &mut x2);
+        std::mem::swap(&mut y1, &mut y2);
+    }
+
+    // インデックス探索
+    let mut idx1 = 0;
+    let mut min_d1 = f64::INFINITY;
+    let mut idx2 = 0;
+    let mut min_d2 = f64::INFINITY;
+
+    for (i, &p) in ppm.iter().enumerate() {
+        let d1 = (p - x1).abs();
+        if d1 < min_d1 {
+            min_d1 = d1;
+            idx1 = i;
+        }
+        let d2 = (p - x2).abs();
+        if d2 < min_d2 {
+            min_d2 = d2;
+            idx2 = i;
+        }
+    }
+
+    if idx1 > idx2 {
+        std::mem::swap(&mut idx1, &mut idx2);
+    }
+
+    if idx2 - idx1 < 2 {
+        return None;
+    }
+
+    let region_ppm = &ppm.as_slice()?[idx1..=idx2];
+    let region_spec = &spectrum.as_slice()?[idx1..=idx2];
+    let m_points = region_ppm.len();
+
+    // 局所線形ベースライン: y_bl = m * ppm + c
+    let (m, c) = if (x2 - x1).abs() > 1e-12 {
+        let slope = (y2 - y1) / (x2 - x1);
+        let intercept = y1 - slope * x1;
+        (slope, intercept)
+    } else {
+        (0.0, y1)
+    };
+
+    // 台形公式による累積積分
+    let mut integral = vec![0.0; m_points];
+    let mut total_area = 0.0;
+
+    for i in 0..m_points - 1 {
+        let local_bl_a = m * region_ppm[i] + c;
+        let local_bl_b = m * region_ppm[i + 1] + c;
+
+        let corr_a = region_spec[i] - local_bl_a;
+        let corr_b = region_spec[i + 1] - local_bl_b;
+
+        let dx = (region_ppm[i] - region_ppm[i + 1]).abs();
+        let da = (corr_a + corr_b) / 2.0 * dx;
+
+        total_area += da;
+        integral[i + 1] = total_area;
+    }
+
+    // 表示用曲線の生成: y_bl + integral * scale + offset
+    let max_spec = spectrum.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let offset = max_spec * offset_factor;
+
+    let mut curve_y = Vec::with_capacity(m_points);
+    for i in 0..m_points {
+        let local_bl = m * region_ppm[i] + c;
+        curve_y.push(local_bl + integral[i] * global_scale + offset);
+    }
+
+    Some(IntegralResult {
+        ppm: region_ppm.to_vec(),
+        curve_y,
+        total_area: total_area.abs(),
+        normalized_value: total_area.abs() * ref_factor,
+    })
+}
+
+/// スペクトル全体から自動で有意なピーク領域を検出し、積分区間リストを生成する
+pub fn auto_detect_integrations(
+    spectrum: &Array1<f64>,
+    ppm: &Array1<f64>,
+) -> Vec<IntegrationItem> {
+    let n = spectrum.len();
+    if n < 10 || n != ppm.len() {
+        return Vec::new();
+    }
+
+    let noise = estimate_noise_mad(spectrum);
+    let mut vals: Vec<f64> = spectrum.to_vec();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = vals[n / 2];
+
+    let thresh_low = median + 0.5 * noise;
+    let thresh_high = median + 15.0 * noise;
+
+    let mut items = Vec::new();
+    let mut in_region = false;
+    let mut start_idx = 0;
+    let mut has_high_peak = false;
+
+    for i in 0..n {
+        if spectrum[i] > thresh_low {
+            if !in_region {
+                in_region = true;
+                start_idx = i;
+                has_high_peak = false;
+            }
+            if spectrum[i] > thresh_high {
+                has_high_peak = true;
+            }
+        } else if in_region {
+            in_region = false;
+            let end_idx = i.saturating_sub(1);
+            // 十分な高さのピークを含み、かつ一定の幅（5点以上）を持つ領域
+            if has_high_peak && end_idx > start_idx + 5 {
+                // 両端を少し広げる (マージン)
+                let s_margin = start_idx.saturating_sub(5);
+                let e_margin = (end_idx + 5).min(n - 1);
+
+                let id = format!("intg-{}", items.len() + 1);
+                items.push(IntegrationItem {
+                    id,
+                    start_ppm: ppm[s_margin],
+                    end_ppm: ppm[e_margin],
+                    y_start: median,
+                    y_end: median,
+                });
+            }
+        }
+    }
+
+    items
+}
