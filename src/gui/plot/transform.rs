@@ -29,6 +29,12 @@ impl PlotTransform {
         }
     }
 
+    /// 下部マージン (X軸下の領域) を指定した新しい PlotTransform を生成
+    pub fn with_bottom_margin(mut self, margin: f32) -> Self {
+        self.bottom_margin = margin;
+        self
+    }
+
     /// メインプロットの底（X軸の位置）の画面Y座標
     pub fn axis_y(&self) -> f32 {
         self.screen_rect.max.y - self.bottom_margin

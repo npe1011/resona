@@ -58,8 +58,10 @@ pub fn paint_spectrum(
     integration_offset: f64,
     integration_ref_factor: f64,
     multiviews: &[MultiviewItem],
-    multiview_ratio: f64,
+    _multiview_ratio: f64,
     selected_multiview_id: Option<&str>,
+    hovered_multiview_id: Option<&str>,
+    is_multiview_edit_mode: bool,
     threshold: Option<f64>,
     is_peak_mode: bool,
     is_threshold_submode: bool,
@@ -217,12 +219,15 @@ pub fn paint_spectrum(
     // 7. Multiview (インセット拡大窓)
     paint_multiviews(
         ui,
-        transform,
         ppm,
         spectrum,
+        peaks,
+        integrations,
+        integration_ref_factor,
         multiviews,
-        multiview_ratio,
         selected_multiview_id,
+        hovered_multiview_id,
+        is_multiview_edit_mode,
         style,
     );
 
@@ -503,15 +508,18 @@ fn paint_integrations(
     }
 }
 
-/// Multiview (インセットプロット) の描画
+/// Multiview (インセットプロット) の描画 (ezNMR仕様準拠)
 fn paint_multiviews(
     ui: &Ui,
-    _main_transform: &PlotTransform,
     ppm: &Array1<f64>,
     spectrum: &Array1<f64>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_ref_factor: f64,
     multiviews: &[MultiviewItem],
-    ratio: f64,
     selected_id: Option<&str>,
+    hovered_id: Option<&str>,
+    is_edit_mode: bool,
     style: &PlotStyle,
 ) {
     for mv in multiviews {
@@ -520,23 +528,40 @@ fn paint_multiviews(
             vec2(mv.geometry.w, mv.geometry.h),
         );
 
-        let is_selected = selected_id == Some(&mv.id);
-        let painter = ui.painter_at(inset_rect);
+        if inset_rect.width() < 30.0 || inset_rect.height() < 30.0 {
+            continue;
+        }
 
-        // 背景 (白)
+        let is_selected = selected_id == Some(&mv.id);
+        let is_hovered = is_edit_mode && hovered_id == Some(&mv.id);
+        let painter = ui.painter_at(inset_rect.expand(2.0));
+
+        // 1. 薄い影 (ドロップシャドウ) と 白背景
+        let shadow_rect = inset_rect.translate(vec2(1.5, 1.5));
+        painter.rect_filled(shadow_rect, 1.0, Color32::from_rgba_premultiplied(0, 0, 0, 20));
         painter.rect_filled(inset_rect, 0.0, Color32::WHITE);
 
-        // インセットプロット用の局所座標変換
+        // 2. プロット内部領域と X 軸領域の分離
+        // X 軸の高さを 18px とし、スペクトルベースラインと X 軸の間に少しだけ上品な隙間 (5px) を空ける
+        let axis_h = 18.0_f32;
+        let axis_y = inset_rect.max.y - axis_h;
+        let plot_rect = Rect::from_min_max(
+            inset_rect.min,
+            Pos2::new(inset_rect.max.x, (axis_y - 5.0).max(inset_rect.min.y + 10.0)),
+        );
+
+        // 3. 拡大対象 PPM 範囲の計算
         let src_min = mv.src_x_min.min(mv.src_x_max);
         let src_max = mv.src_x_min.max(mv.src_x_max);
 
-        let mut local_y_min = f64::MAX;
-        let mut local_y_max = f64::MIN;
+        let mut local_y_min = f64::INFINITY;
+        let mut local_y_max = f64::NEG_INFINITY;
         for i in 0..ppm.len().min(spectrum.len()) {
             let p = ppm[i];
             if p >= src_min && p <= src_max {
-                local_y_min = local_y_min.min(spectrum[i]);
-                local_y_max = local_y_max.max(spectrum[i]);
+                let v = spectrum[i];
+                if v < local_y_min { local_y_min = v; }
+                if v > local_y_max { local_y_max = v; }
             }
         }
         if local_y_min >= local_y_max {
@@ -544,41 +569,249 @@ fn paint_multiviews(
             local_y_max = 1.0;
         }
 
-        let y_span = (local_y_max - local_y_min).max(1e-6);
-        let eff_y_max = local_y_min + y_span / ratio.max(0.1);
+        // スペクトルと X 軸をぴったり近づけるため、下部は local_y_min.min(0.0) を基準にし、
+        // 下部余白はわずか 2% (ノイズがX軸直上に着地する程度) に抑える。
+        // 上部はピーク引き出し線と縦書き化学シフト値のスペースとして 35% の余裕を確保。
+        let y_min = mv.src_y_min.unwrap_or_else(|| local_y_min.min(0.0));
+        let y_max = mv.src_y_max.unwrap_or(local_y_max);
+        let h = (y_max - y_min).max(1e-6);
+        let y_min_adj = y_min - 0.02 * h;
+        let y_max_adj = y_max + 0.40 * h;
 
+        // インセット専用の座標変換 (bottom_margin を 0.0 にすることでプロット下端を X 軸に一致させる)
         let inset_transform = PlotTransform::new(
-            inset_rect,
+            plot_rect,
             src_min,
             src_max,
-            local_y_min - y_span * 0.05,
-            eff_y_max,
-        );
+            y_min_adj,
+            y_max_adj,
+        ).with_bottom_margin(0.0);
 
-        // インセット内部のスペクトル描画
+        // プロット領域専用のクリッピング painter (はみ出し防止)
+        let plot_painter = painter.with_clip_rect(plot_rect);
+
+        // 4. スペクトル曲線
         let mut pts: Vec<Pos2> = Vec::new();
         for i in 0..ppm.len().min(spectrum.len()) {
             let p = ppm[i];
             if p >= src_min && p <= src_max {
                 let pos = inset_transform.data_to_screen(p, spectrum[i]);
-                if inset_rect.contains(pos) {
-                    pts.push(pos);
-                }
+                pts.push(pos);
             }
         }
         if pts.len() > 1 {
-            painter.add(PathShape::line(
+            plot_painter.add(PathShape::line(
                 pts,
-                Stroke::new(1.0_f32, style.multiview_color),
+                Stroke::new(1.5_f32, style.multiview_color),
             ));
         }
 
-        // 枠線 (通常: グレー、選択中: ブルー)
-        let border_stroke = if is_selected {
-            Stroke::new(2.0_f32, Color32::from_rgb(13, 110, 253))
+        // 5. 積分曲線 & プロトン数テキスト (ezNMR仕様)
+        for integ in integrations {
+            let i_min = integ.min_ppm();
+            let i_max = integ.max_ppm();
+            if i_max < src_min || i_min > src_max {
+                continue;
+            }
+
+            if let Some(res) = compute_integral(spectrum, ppm, integ, 1.0, integration_ref_factor, 0.0) {
+                if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                    // 局所スケーリング: インセットの 25% 〜 70% に収める
+                    let mut intg_pts: Vec<Pos2> = Vec::new();
+                    for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
+                        if p >= src_min && p <= src_max {
+                            let bl = integ.baseline_y_at(p);
+                            let cum_area = (cy - bl).max(0.0);
+                            let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                            let target_data_y = y_min_adj + 0.20 * h + norm_y * (0.45 * h);
+                            intg_pts.push(inset_transform.data_to_screen(p, target_data_y));
+                        }
+                    }
+                    if intg_pts.len() > 1 {
+                        plot_painter.add(PathShape::line(
+                            intg_pts,
+                            Stroke::new(1.5_f32, style.integral_color),
+                        ));
+
+                        // プロトン数テキスト
+                        let mid_p = (i_min + i_max) * 0.5 + 0.15 * (i_max - i_min);
+                        let top_pos = inset_transform.data_to_screen(mid_p, y_min_adj + 0.68 * h);
+                        let val_text = format!("{:.2}", res.normalized_value);
+                        plot_painter.text(
+                            top_pos,
+                            egui::Align2::CENTER_BOTTOM,
+                            val_text,
+                            egui::FontId::proportional(10.0),
+                            style.integral_color,
+                        );
+                    }
+                }
+            }
+        }
+
+        // 6. ピーク引き出し線 & 化学シフト値 (潰れ防止: 時計回り90度回転の縦書き配置)
+        let sub_peaks: Vec<&PeakItem> = peaks
+            .iter()
+            .filter(|pk| pk.ppm >= src_min && pk.ppm <= src_max)
+            .collect();
+
+        if !sub_peaks.is_empty() {
+            let mut sorted_peaks = sub_peaks.clone();
+            if sorted_peaks.len() > 20 {
+                sorted_peaks.sort_by(|a, b| b.intensity.partial_cmp(&a.intensity).unwrap_or(std::cmp::Ordering::Equal));
+                sorted_peaks.truncate(20);
+            }
+            // PPM 降順 (左から右) にソートして線の交差を防止
+            sorted_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+
+            // 画面 X 座標ベースの物理リラクゼーション (縦書きテキスト幅約 10px に合わせた min_gap = 12.0px)
+            let mut screen_x_list: Vec<f32> = sorted_peaks
+                .iter()
+                .map(|p| inset_transform.ppm_to_screen_x(p.ppm))
+                .collect();
+
+            let min_gap_px = 12.0_f32;
+            for _ in 0..100 {
+                let mut moved = false;
+                for i in 1..screen_x_list.len() {
+                    let diff = screen_x_list[i] - screen_x_list[i - 1];
+                    if diff < min_gap_px {
+                        let overlap = min_gap_px - diff;
+                        screen_x_list[i - 1] -= overlap * 0.5;
+                        screen_x_list[i] += overlap * 0.5;
+                        moved = true;
+                    }
+                }
+                if !moved {
+                    break;
+                }
+            }
+
+            // テキスト上端と折れ曲がり Y 座標 (プロット領域の上部)
+            let font_peak = FontId::new(9.0, FontFamily::Proportional);
+            let peak_color = Color32::from_rgb(20, 20, 20);
+            let elbow_y = (plot_rect.min.y + 36.0).min(axis_y - 20.0);
+            let text_start_y = plot_rect.min.y + 4.0;
+
+            for (i, pk) in sorted_peaks.iter().enumerate() {
+                let px = inset_transform.ppm_to_screen_x(pk.ppm);
+                let tx = screen_x_list[i].clamp(plot_rect.min.x + 4.0, plot_rect.max.x - 4.0);
+
+                let peak_screen = inset_transform.data_to_screen(pk.ppm, pk.intensity);
+                // ピーク頭頂部から 24px 離した位置から引き出し線を開始 (スペクトルの山からしっかりと空間をあける)
+                let clearance = 24.0_f32;
+                let line_start_y = (peak_screen.y - clearance).clamp(elbow_y + 4.0, axis_y - 6.0);
+
+                // 引き出し線 (スペクトル上方 -> 折れ曲がりY -> テキスト位置)
+                if line_start_y > elbow_y + 2.0 {
+                    let stroke = Stroke::new(0.85_f32, Color32::from_gray(100));
+                    plot_painter.line_segment([Pos2::new(px, line_start_y), Pos2::new(px, elbow_y)], stroke);
+                    plot_painter.line_segment([Pos2::new(px, elbow_y), Pos2::new(tx, text_start_y + 28.0)], stroke);
+                    plot_painter.line_segment([Pos2::new(tx, text_start_y + 28.0), Pos2::new(tx, text_start_y + 30.0)], stroke);
+                }
+
+                // 時計回り90度回転の縦書き化学シフト値ラベル (文字が一切潰れず美しく並ぶ)
+                let shift_str = format!("{:.3}", pk.ppm);
+                let galley = plot_painter.layout_no_wrap(shift_str, font_peak.clone(), peak_color);
+                let text_h = galley.size().y;
+                let text_pos = Pos2::new(tx + text_h * 0.5, text_start_y);
+                let ts = egui::epaint::TextShape::new(text_pos, galley, peak_color)
+                    .with_angle(std::f32::consts::FRAC_PI_2);
+                plot_painter.add(ts);
+            }
+        }
+
+        // 7. X 軸目盛りと PPM 数値ラベル (プロット直下にピタッと配置)
+        painter.line_segment(
+            [Pos2::new(inset_rect.min.x, axis_y), Pos2::new(inset_rect.max.x, axis_y)],
+            Stroke::new(1.0_f32, Color32::BLACK),
+        );
+
+        let ppm_span = src_max - src_min;
+        let inset_w = inset_rect.width();
+        // ラベル1個あたり約 45〜55px の間隔を確保して重なりを防止
+        let target_ticks = (inset_w / 50.0).clamp(3.0, 7.0) as f64;
+        let rough_step = (ppm_span / target_ticks).max(1e-6);
+
+        // 1, 2, 5 系列のきりの良いステップに丸める
+        let exponent = rough_step.log10().floor();
+        let frac = rough_step / 10.0_f64.powf(exponent);
+        let nice_frac = if frac <= 1.5 {
+            1.0
+        } else if frac <= 3.0 {
+            2.0
+        } else if frac <= 7.0 {
+            5.0
         } else {
-            Stroke::new(1.0_f32, Color32::from_gray(180))
+            10.0
+        };
+        let step = nice_frac * 10.0_f64.powf(exponent);
+
+        let start_tick = (src_min / step).ceil() as i64;
+        let end_tick = (src_max / step).floor() as i64;
+
+        // 小数点桁数の自動決定
+        let decimals = if step < 0.0099 {
+            3
+        } else if step < 0.099 {
+            2
+        } else if step < 0.99 {
+            1
+        } else {
+            0
+        };
+
+        for t_idx in start_tick..=end_tick {
+            let tick_ppm = t_idx as f64 * step;
+            let tick_x = inset_transform.ppm_to_screen_x(tick_ppm);
+            // 枠線の左右 10px 以内は文字がはみ出さないようスキップ
+            if tick_x >= inset_rect.min.x + 10.0 && tick_x <= inset_rect.max.x - 10.0 {
+                // 目盛り線
+                painter.line_segment(
+                    [Pos2::new(tick_x, axis_y), Pos2::new(tick_x, axis_y + 3.0)],
+                    Stroke::new(1.0_f32, Color32::BLACK),
+                );
+                // ラベル
+                let label = format!("{:.1$}", tick_ppm, decimals);
+                painter.text(
+                    Pos2::new(tick_x, axis_y + 10.0),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::proportional(8.5),
+                    Color32::from_gray(30),
+                );
+            }
+        }
+
+        // 8. 枠線 (通常時: 薄いグレー枠 #94a3b8 / gray 160、選択/ホバー時: ブルー太枠)
+        let border_stroke = if is_selected || is_hovered {
+            Stroke::new(2.5_f32, Color32::from_rgb(13, 110, 253))
+        } else {
+            Stroke::new(1.2_f32, Color32::from_gray(160))
         };
         painter.rect_stroke(inset_rect, 0.0, border_stroke);
+
+        // 9. Edit モード時のリサイズハンドル
+        if is_edit_mode && is_selected {
+            let handle_size = 6.0_f32;
+            let h_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+            let h_color = Color32::from_rgb(13, 110, 253);
+
+            let corners = [
+                inset_rect.left_top(),
+                inset_rect.right_top(),
+                inset_rect.left_bottom(),
+                inset_rect.right_bottom(),
+                Pos2::new(inset_rect.center().x, inset_rect.top()),
+                Pos2::new(inset_rect.center().x, inset_rect.bottom()),
+                Pos2::new(inset_rect.left(), inset_rect.center().y),
+                Pos2::new(inset_rect.right(), inset_rect.center().y),
+            ];
+            for p in corners {
+                let h_rect = Rect::from_center_size(p, vec2(handle_size, handle_size));
+                painter.rect_filled(h_rect, 1.0, h_color);
+                painter.rect_stroke(h_rect, 1.0, h_stroke);
+            }
+        }
     }
 }

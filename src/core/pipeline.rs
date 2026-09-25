@@ -22,7 +22,7 @@ pub struct FtSettings {
 }
 
 fn default_zf() -> usize {
-    4
+    2
 }
 
 fn default_true() -> bool {
@@ -33,7 +33,7 @@ impl Default for FtSettings {
     fn default() -> Self {
         Self {
             window: WindowFunction::Exponential { lb: 0.12 },
-            zf_factor: 4,
+            zf_factor: 2,
             remove_digital_filter: true,
             auto_phase: true,
         }

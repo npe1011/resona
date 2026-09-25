@@ -20,7 +20,17 @@ pub struct MultiviewItem {
     pub id: String,
     pub src_x_min: f64,
     pub src_x_max: f64,
+    #[serde(default)]
+    pub src_y_min: Option<f64>,
+    #[serde(default)]
+    pub src_y_max: Option<f64>,
+    #[serde(default = "default_ratio")]
+    pub ratio: f64,
     pub geometry: RectF,
+}
+
+pub fn default_ratio() -> f64 {
+    5.0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -29,6 +39,24 @@ pub struct RectF {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+impl RectF {
+    pub fn min_x(&self) -> f32 {
+        self.x
+    }
+    pub fn min_y(&self) -> f32 {
+        self.y
+    }
+    pub fn max_x(&self) -> f32 {
+        self.x + self.w
+    }
+    pub fn max_y(&self) -> f32 {
+        self.y + self.h
+    }
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
+    }
 }
 
 /// 表示範囲設定 (ズーム状態)
@@ -324,7 +352,13 @@ impl Project {
 
     /// プロジェクトを .rsn (または旧 .ez) ファイル (ZIPアーカイブ) として保存する
     pub fn save_rsn<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let file = File::create(path)?;
+        let p = path.as_ref();
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        let file = File::create(p)?;
         let mut zip = ZipWriter::new(file);
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);

@@ -19,6 +19,7 @@ pub enum ActionEvent {
     ClearPeaks,
     AutoIntegrate,
     ClearIntegrations,
+    AutoMultiview,
     AlignMultiview,
     ResetMultiview,
     ClearJCoupling,
@@ -442,7 +443,7 @@ pub fn show_action_bar(
 
                                 if light_button(ui, "Auto", false, 44.0).clicked() {
                                     *active_zoom = None;
-                                    event = ActionEvent::AlignMultiview;
+                                    event = ActionEvent::AutoMultiview;
                                 }
 
                                 let is_rect = state.multiview_submode == MultiviewSubMode::AddRect;
@@ -477,6 +478,22 @@ pub fn show_action_bar(
                                 if light_button(ui, "Clear", false, 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::ResetMultiview;
+                                }
+
+                                match state.multiview_submode {
+                                    MultiviewSubMode::AddRect => {
+                                        ui.label(RichText::new("Drag rectangle on peak to create inset").size(11.0).color(Color32::from_rgb(147, 51, 234)));
+                                    }
+                                    MultiviewSubMode::AddX => {
+                                        ui.label(RichText::new("Drag PPM range to create inset").size(11.0).color(Color32::from_rgb(147, 51, 234)));
+                                    }
+                                    MultiviewSubMode::Edit => {
+                                        ui.label(RichText::new("Drag inside to move, edges to resize, Delete to remove").size(11.0).color(Color32::from_rgb(13, 110, 253)));
+                                    }
+                                    MultiviewSubMode::Delete => {
+                                        ui.label(RichText::new("Click inset to delete").size(11.0).color(Color32::from_rgb(220, 38, 38)));
+                                    }
+                                    _ => {}
                                 }
                             }
                             AppMode::JCoupling => {

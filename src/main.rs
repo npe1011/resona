@@ -10,9 +10,24 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let args: Vec<String> = std::env::args().collect();
+    let initial_file = if args.len() > 1 && !args[1].starts_with('-') {
+        Some(std::path::PathBuf::from(&args[1]))
+    } else {
+        None
+    };
+
     eframe::run_native(
         "Resona",
         native_options,
-        Box::new(|cc| Ok(Box::new(ResonaApp::new(cc)))),
+        Box::new(move |cc| {
+            let mut app = ResonaApp::new(cc);
+            if let Some(ref path) = initial_file {
+                if path.exists() {
+                    app.open_file(path);
+                }
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
