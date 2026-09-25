@@ -63,6 +63,7 @@ pub fn paint_spectrum(
     threshold: Option<f64>,
     is_peak_mode: bool,
     is_threshold_submode: bool,
+    is_integrate_edit_mode: bool,
     ref_drag_range: Option<(f64, f64)>,
     style: &PlotStyle,
 ) {
@@ -203,6 +204,7 @@ pub fn paint_spectrum(
         integration_offset,
         integration_ref_factor,
         axis_y,
+        is_integrate_edit_mode,
         style,
     );
 
@@ -427,6 +429,7 @@ fn paint_integrations(
     offset: f64,
     ref_factor: f64,
     axis_y: f32,
+    is_edit_mode: bool,
     style: &PlotStyle,
 ) {
     let painter = ui.painter_at(transform.screen_rect);
@@ -449,6 +452,15 @@ fn paint_integrations(
                 Stroke::new(1.0_f32, style.integral_baseline_color),
             );
 
+            // Edit モード時の端点ハンドル描画 (ezNMR仕様: 青色丸ハンドル + 白色枠線)
+            if is_edit_mode {
+                painter.circle_filled(bl_start, 4.5, Color32::from_rgb(37, 99, 235));
+                painter.circle_stroke(bl_start, 4.5, Stroke::new(1.5_f32, Color32::WHITE));
+
+                painter.circle_filled(bl_end, 4.5, Color32::from_rgb(37, 99, 235));
+                painter.circle_stroke(bl_end, 4.5, Stroke::new(1.5_f32, Color32::WHITE));
+            }
+
             // 2. 累積積分カーブ (赤色, 2.0px)
             if let Some(res) = compute_integral(spectrum, ppm, intg, scale, ref_factor, offset) {
                 if res.ppm.len() > 1 && res.ppm.len() == res.curve_y.len() {
@@ -465,7 +477,7 @@ fn paint_integrations(
                     if pts.len() > 1 {
                         painter.add(PathShape::line(
                             pts,
-                            Stroke::new(1.8_f32, style.integral_color),
+                            Stroke::new(2.0_f32, style.integral_color),
                         ));
                     }
 

@@ -46,6 +46,9 @@ pub struct ActionBarState {
     // Peak モード
     pub peak_threshold: f64,
 
+    // Integrate モード
+    pub integration_ref_val: f64,
+
     // Multiview モード
     pub multiview_ratio: f64,
 }
@@ -76,6 +79,7 @@ impl Default for ActionBarState {
             ref_target_ppm: 7.26,
             ref_set_active: false,
             peak_threshold: 0.0,
+            integration_ref_val: 1.0,
             multiview_ratio: 5.0,
         }
     }
@@ -396,8 +400,11 @@ pub fn show_action_bar(
                                     *active_zoom = None;
                                 }
 
-                                ui.label(RichText::new("Reference").size(12.0));
-                                ui.add(DragValue::new(integration_scale).speed(0.1).range(0.01..=100.0));
+                                ui.label(RichText::new("Scale").size(12.0));
+                                ui.add(DragValue::new(integration_scale).speed(0.1).range(1e-12..=1e12));
+
+                                ui.label(RichText::new("Ref Val").size(12.0));
+                                ui.add(DragValue::new(&mut state.integration_ref_val).speed(0.1).range(0.01..=1000.0));
 
                                 let is_ref = state.integrate_submode == IntegrateSubMode::Reference;
                                 if light_button(ui, "Set", is_ref, 40.0).clicked() {
@@ -408,6 +415,25 @@ pub fn show_action_bar(
                                 if light_button(ui, "Clear", false, 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::ClearIntegrations;
+                                }
+
+                                match state.integrate_submode {
+                                    IntegrateSubMode::Add => {
+                                        ui.label(RichText::new("Drag over peak to integrate").size(11.0).color(Color32::from_rgb(13, 110, 253)));
+                                    }
+                                    IntegrateSubMode::Edit => {
+                                        ui.label(RichText::new("Drag handles or curve").size(11.0).color(Color32::from_rgb(13, 110, 253)));
+                                    }
+                                    IntegrateSubMode::Split => {
+                                        ui.label(RichText::new("Click or drag to split").size(11.0).color(Color32::from_rgb(13, 110, 253)));
+                                    }
+                                    IntegrateSubMode::Delete => {
+                                        ui.label(RichText::new("Click or drag to delete").size(11.0).color(Color32::from_rgb(220, 38, 38)));
+                                    }
+                                    IntegrateSubMode::Reference => {
+                                        ui.label(RichText::new("Click or drag to set reference").size(11.0).color(Color32::from_rgb(13, 110, 253)));
+                                    }
+                                    _ => {}
                                 }
                             }
                             AppMode::Multiview => {

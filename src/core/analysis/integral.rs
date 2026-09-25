@@ -20,6 +20,33 @@ pub struct IntegrationItem {
     pub y_end: f64,
 }
 
+impl IntegrationItem {
+    pub fn min_ppm(&self) -> f64 {
+        self.start_ppm.min(self.end_ppm)
+    }
+
+    pub fn max_ppm(&self) -> f64 {
+        self.start_ppm.max(self.end_ppm)
+    }
+
+    pub fn contains_ppm(&self, ppm: f64) -> bool {
+        let min = self.min_ppm();
+        let max = self.max_ppm();
+        ppm >= min && ppm <= max
+    }
+
+    /// 指定した PPM における線形局所ベースラインの Y 値を補間計算
+    pub fn baseline_y_at(&self, ppm: f64) -> f64 {
+        let (x1, x2) = (self.start_ppm, self.end_ppm);
+        let (y1, y2) = (self.y_start, self.y_end);
+        if (x2 - x1).abs() > 1e-12 {
+            y1 + (y2 - y1) / (x2 - x1) * (ppm - x1)
+        } else {
+            y1
+        }
+    }
+}
+
 /// 単一の積分区間に対する面積および累積積分曲線を計算する
 #[derive(Debug, Clone)]
 pub struct IntegralResult {

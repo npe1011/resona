@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use egui::{CentralPanel, Color32, Context, Key, Margin, Pos2, Rect, RichText, Stroke, TopBottomPanel, SidePanel};
 use crate::core::{
-    analyze_multiplet, auto_detect_integrations, estimate_noise_mad, pick_peaks,
+    analyze_multiplet, auto_detect_integrations, compute_integral, estimate_noise_mad, pick_peaks,
     snap_and_add_peak, IntegrationItem, JCouplingResultItem, MultiviewItem, Project, RectF,
 };
 
@@ -14,6 +14,15 @@ use crate::gui::panels::{
     show_action_bar, show_mode_bar, show_side_panel, ActionEvent, ActionBarState, ModeBarEvent,
 };
 use crate::gui::plot::{paint_spectrum, PlotStyle, PlotTransform};
+
+/// Integrate Edit モードでのドラッグ対象
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IntegrateDragTarget {
+    StartHandle(usize),
+    EndHandle(usize),
+    Scale { start_scale: f64, start_y: f32 },
+    Offset { start_offset: f64, start_y: f32 },
+}
 
 pub struct ResonaApp {
     pub project: Project,
@@ -35,6 +44,7 @@ pub struct ResonaApp {
     pub drag_start: Option<Pos2>,
     pub drag_current: Option<Pos2>,
     pub is_dragging_threshold: bool,
+    pub integrate_drag: Option<IntegrateDragTarget>,
 
     // 選択状態
     pub selected_multiview_id: Option<String>,
@@ -61,6 +71,7 @@ impl Default for ResonaApp {
             drag_start: None,
             drag_current: None,
             is_dragging_threshold: false,
+            integrate_drag: None,
             selected_multiview_id: None,
             selected_j_idx: None,
             status_message: "Ready. Drag & drop .jdf or .rsn file here.".to_string(),
@@ -466,6 +477,20 @@ impl eframe::App for ResonaApp {
             ActionEvent::AutoIntegrate => {
                 if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
                     self.project.state.integrations = auto_detect_integrations(spec, ppm);
+                    let mut max_area = 0.0_f64;
+                    for intg in &self.project.state.integrations {
+                        if let Some(res) = compute_integral(spec, ppm, intg, 1.0, 1.0, 0.03) {
+                            if res.total_area > max_area {
+                                max_area = res.total_area;
+                            }
+                        }
+                    }
+                    let max_spec = spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    if max_area > 1e-12 && max_spec > 0.0 {
+                        self.project.state.integration_scale = (max_spec * 0.35) / max_area;
+                        self.project.state.integration_ref_area = max_area;
+                        self.project.state.integration_ref_value = 1.0;
+                    }
                     self.project.push_history();
                     self.status_message = format!("Auto detected {} integration regions", self.project.state.integrations.len());
                 }
@@ -585,6 +610,24 @@ impl eframe::App for ResonaApp {
                         };
 
                         let is_thresh_submode = is_peak_mode && self.action_state.peak_submode == PeakSubMode::Threshold;
+                        let is_integrate_edit_mode = self.mode == Some(AppMode::Integrate)
+                            && self.action_state.integrate_submode == IntegrateSubMode::Edit;
+
+                        // 積分スケールが初期値 (1.0) のままの場合、自動で見やすい高さ (主ピークの約35%) にスケーリング
+                        if self.project.state.integration_scale == 1.0 && !self.project.state.integrations.is_empty() {
+                            let mut max_area = 0.0_f64;
+                            for intg in &self.project.state.integrations {
+                                if let Some(res) = compute_integral(spec, ppm, intg, 1.0, 1.0, 0.03) {
+                                    if res.total_area > max_area {
+                                        max_area = res.total_area;
+                                    }
+                                }
+                            }
+                            let max_spec = spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                            if max_area > 1e-12 && max_spec > 0.0 {
+                                self.project.state.integration_scale = (max_spec * 0.35) / max_area;
+                            }
+                        }
 
                         paint_spectrum(
                             ui,
@@ -602,6 +645,7 @@ impl eframe::App for ResonaApp {
                             Some(self.action_state.peak_threshold),
                             is_peak_mode,
                             is_thresh_submode,
+                            is_integrate_edit_mode,
                             ref_drag_range,
                             &self.plot_style,
                         );
@@ -639,6 +683,9 @@ impl eframe::App for ResonaApp {
                     // スレッショルドバーのホバー／ドラッグ判定 (Peak pick モード時)
                     let is_peak_mode = self.mode == Some(AppMode::Peak) && self.active_zoom.is_none();
                     let is_thresh_submode = is_peak_mode && self.action_state.peak_submode == PeakSubMode::Threshold;
+                    let is_integrate_edit_mode = self.mode == Some(AppMode::Integrate)
+                        && self.action_state.integrate_submode == IntegrateSubMode::Edit
+                        && self.active_zoom.is_none();
                     let thresh_val = self.action_state.peak_threshold;
                     let mut near_threshold = false;
 
@@ -664,12 +711,83 @@ impl eframe::App for ResonaApp {
                         }
                     }
 
-                    if is_thresh_submode && response.clicked_by(egui::PointerButton::Primary) {
+                    if response.clicked_by(egui::PointerButton::Primary) {
                         if let Some(pos) = pointer_pos {
                             if plot_rect.contains(pos) && pos.y <= axis_y {
-                                let new_thresh = t.screen_y_to_y(pos.y).abs();
-                                self.action_state.peak_threshold = new_thresh;
-                                self.project.state.peak_threshold = Some(new_thresh);
+                                let (click_ppm, _) = t.screen_to_data(pos);
+                                if is_thresh_submode {
+                                    let new_thresh = t.screen_y_to_y(pos.y).abs();
+                                    self.action_state.peak_threshold = new_thresh;
+                                    self.project.state.peak_threshold = Some(new_thresh);
+                                } else if self.mode == Some(AppMode::Integrate) && self.active_zoom.is_none() {
+                                    match self.action_state.integrate_submode {
+                                        IntegrateSubMode::Delete => {
+                                            let before_count = self.project.state.integrations.len();
+                                            self.project.state.integrations.retain(|item| !item.contains_ppm(click_ppm));
+                                            if self.project.state.integrations.len() < before_count {
+                                                self.project.push_history();
+                                                self.status_message = "Deleted integration".to_string();
+                                            }
+                                        }
+                                        IntegrateSubMode::Split => {
+                                            let mut split_idx = None;
+                                            for (idx, item) in self.project.state.integrations.iter().enumerate() {
+                                                if item.contains_ppm(click_ppm) {
+                                                    split_idx = Some(idx);
+                                                    break;
+                                                }
+                                            }
+                                            if let Some(idx) = split_idx {
+                                                let item = self.project.state.integrations.remove(idx);
+                                                let (x1, x2) = (item.start_ppm, item.end_ppm);
+                                                let (y1, y2) = (item.y_start, item.y_end);
+                                                let y_split = item.baseline_y_at(click_ppm);
+                                                let d1 = IntegrationItem {
+                                                    id: format!("intg-{}", self.project.state.integrations.len() + 1),
+                                                    start_ppm: x1,
+                                                    end_ppm: click_ppm,
+                                                    y_start: y1,
+                                                    y_end: y_split,
+                                                };
+                                                let d2 = IntegrationItem {
+                                                    id: format!("intg-{}", self.project.state.integrations.len() + 2),
+                                                    start_ppm: click_ppm,
+                                                    end_ppm: x2,
+                                                    y_start: y_split,
+                                                    y_end: y2,
+                                                };
+                                                self.project.state.integrations.insert(idx, d2);
+                                                self.project.state.integrations.insert(idx, d1);
+                                                self.project.push_history();
+                                                self.status_message = format!("Split integration at {:.3} ppm", click_ppm);
+                                            }
+                                        }
+                                        IntegrateSubMode::Reference => {
+                                            let mut target_idx = None;
+                                            for (idx, item) in self.project.state.integrations.iter().enumerate() {
+                                                if item.contains_ppm(click_ppm) {
+                                                    target_idx = Some(idx);
+                                                    break;
+                                                }
+                                            }
+                                            if let Some(idx) = target_idx {
+                                                if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                                                    let item = &self.project.state.integrations[idx];
+                                                    if let Some(res) = compute_integral(spec, ppm, item, 1.0, 1.0, 0.03) {
+                                                        if res.total_area > 1e-12 {
+                                                            let target_val = self.action_state.integration_ref_val;
+                                                            self.project.state.integration_ref_area = res.total_area;
+                                                            self.project.state.integration_ref_value = target_val;
+                                                            self.project.push_history();
+                                                            self.status_message = format!("Set reference integral to {:.2}", target_val);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
                     }
@@ -677,6 +795,19 @@ impl eframe::App for ResonaApp {
                     if let Some(pos) = pointer_pos {
                         let (cur_ppm, cur_y) = t.screen_to_data(pos);
                         self.status_message = format!("PPM {:.3}   Intensity {:.1}", cur_ppm, cur_y);
+                    }
+
+                    // 非ドラッグ時: Split サブモードではマウス位置に縦の青色ガイド線を表示
+                    if self.mode == Some(AppMode::Integrate) && self.action_state.integrate_submode == IntegrateSubMode::Split && self.drag_start.is_none() {
+                        if let Some(pos) = pointer_pos {
+                            if plot_rect.contains(pos) && pos.y <= axis_y {
+                                let painter = ui.painter_at(plot_rect);
+                                painter.line_segment(
+                                    [Pos2::new(pos.x, plot_rect.min.y), Pos2::new(pos.x, axis_y)],
+                                    Stroke::new(1.5_f32, Color32::from_rgb(13, 110, 253)),
+                                );
+                            }
+                        }
                     }
 
                     // ドラッグ開始 (押下した瞬間の正確な原点座標を取得して遅れを解消)
@@ -687,6 +818,48 @@ impl eframe::App for ResonaApp {
                                 let new_thresh = t.screen_y_to_y(pos.y).abs();
                                 self.action_state.peak_threshold = new_thresh;
                                 self.project.state.peak_threshold = Some(new_thresh);
+                            }
+                        } else if is_integrate_edit_mode {
+                            self.is_dragging_threshold = false;
+                            if let Some(pos) = pointer_pos {
+                                let mut hit_handle = None;
+                                for (idx, intg) in self.project.state.integrations.iter().enumerate() {
+                                    let s_pos = t.data_to_screen(intg.start_ppm, intg.y_start);
+                                    let e_pos = t.data_to_screen(intg.end_ppm, intg.y_end);
+                                    if (pos - s_pos).length() < 12.0 {
+                                        hit_handle = Some(IntegrateDragTarget::StartHandle(idx));
+                                        break;
+                                    } else if (pos - e_pos).length() < 12.0 {
+                                        hit_handle = Some(IntegrateDragTarget::EndHandle(idx));
+                                        break;
+                                    }
+                                }
+                                if let Some(target) = hit_handle {
+                                    self.integrate_drag = Some(target);
+                                } else {
+                                    let (ppm, _) = t.screen_to_data(pos);
+                                    let mut in_intg = false;
+                                    for intg in &self.project.state.integrations {
+                                        if intg.contains_ppm(ppm) {
+                                            in_intg = true;
+                                            break;
+                                        }
+                                    }
+                                    if in_intg {
+                                        let mid_y = (plot_rect.min.y + axis_y) * 0.5;
+                                        if pos.y < mid_y {
+                                            self.integrate_drag = Some(IntegrateDragTarget::Scale {
+                                                start_scale: self.project.state.integration_scale,
+                                                start_y: pos.y,
+                                            });
+                                        } else {
+                                            self.integrate_drag = Some(IntegrateDragTarget::Offset {
+                                                start_offset: self.project.state.integration_offset,
+                                                start_y: pos.y,
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             self.is_dragging_threshold = false;
@@ -705,13 +878,46 @@ impl eframe::App for ResonaApp {
                                 self.action_state.peak_threshold = new_thresh;
                                 self.project.state.peak_threshold = Some(new_thresh);
                             }
+                        } else if let Some(target) = self.integrate_drag {
+                            if let Some(pos) = pointer_pos {
+                                match target {
+                                    IntegrateDragTarget::StartHandle(idx) => {
+                                        if idx < self.project.state.integrations.len() {
+                                            let (p, y) = t.screen_to_data(pos);
+                                            self.project.state.integrations[idx].start_ppm = p;
+                                            self.project.state.integrations[idx].y_start = y;
+                                        }
+                                    }
+                                    IntegrateDragTarget::EndHandle(idx) => {
+                                        if idx < self.project.state.integrations.len() {
+                                            let (p, y) = t.screen_to_data(pos);
+                                            self.project.state.integrations[idx].end_ppm = p;
+                                            self.project.state.integrations[idx].y_end = y;
+                                        }
+                                    }
+                                    IntegrateDragTarget::Scale { start_scale, start_y } => {
+                                        ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                        let dy = start_y - pos.y;
+                                        let factor = ((dy / (plot_rect.height() * 0.25)) as f64).exp();
+                                        self.project.state.integration_scale = (start_scale * factor).max(1e-12);
+                                        self.status_message = format!("Scale {:.2e}", self.project.state.integration_scale);
+                                    }
+                                    IntegrateDragTarget::Offset { start_offset, start_y } => {
+                                        ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                        let dy = start_y - pos.y;
+                                        let d_offset = (dy / plot_rect.height()) as f64 * 0.5;
+                                        self.project.state.integration_offset = start_offset + d_offset;
+                                        self.status_message = format!("Offset {:.3}", self.project.state.integration_offset);
+                                    }
+                                }
+                            }
                         } else {
                             self.drag_current = pointer_pos;
                         }
                     }
 
                     // ラバーバンド描画 (ドラッグ中、スレッショルドドラッグでない場合)
-                    if !self.is_dragging_threshold {
+                    if !self.is_dragging_threshold && self.integrate_drag.is_none() {
                         if let (Some(start), Some(curr)) = (self.drag_start, self.drag_current) {
                             let painter = ui.painter_at(plot_rect);
                         let axis_y = t.axis_y();
@@ -744,12 +950,53 @@ impl eframe::App for ResonaApp {
                                     painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(0, 180, 80, 25));
                                 }
                                 AppMode::Integrate => {
-                                    if self.action_state.integrate_submode == IntegrateSubMode::Add {
-                                        let band_rect = Rect::from_min_max(
-                                            Pos2::new(start.x.min(curr.x), plot_rect.min.y),
-                                            Pos2::new(start.x.max(curr.x), axis_y),
-                                        );
-                                        painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(225, 29, 72, 30));
+                                    let min_x = start.x.min(curr.x);
+                                    let max_x = start.x.max(curr.x);
+                                    let band_rect = Rect::from_min_max(
+                                        Pos2::new(min_x, plot_rect.min.y),
+                                        Pos2::new(max_x, axis_y),
+                                    );
+                                    match self.action_state.integrate_submode {
+                                        IntegrateSubMode::Add => {
+                                            // 1. 半透明の濃いめハイライト (赤/ピンク)
+                                            painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(225, 29, 72, 45));
+                                            painter.rect_stroke(band_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(225, 29, 72)));
+                                            // 2. 開始位置と現在位置の両端に明瞭な縦線 (上からX軸まで届く赤線)
+                                            let stroke_v = Stroke::new(1.5_f32, Color32::from_rgb(225, 29, 72));
+                                            painter.line_segment([Pos2::new(start.x, plot_rect.min.y), Pos2::new(start.x, axis_y)], stroke_v);
+                                            painter.line_segment([Pos2::new(curr.x, plot_rect.min.y), Pos2::new(curr.x, axis_y)], stroke_v);
+
+                                            // 3. 上端に選択範囲の PPM 情報ガイド
+                                            let (p1, _) = t.screen_to_data(start);
+                                            let (p2, _) = t.screen_to_data(curr);
+                                            let p_s = p1.max(p2);
+                                            let p_e = p1.min(p2);
+                                            let label_txt = format!("{:.3} ~ {:.3} ppm (Δ={:.3})", p_s, p_e, p_s - p_e);
+                                            painter.text(
+                                                Pos2::new((min_x + max_x) * 0.5, plot_rect.min.y + 12.0),
+                                                egui::Align2::CENTER_CENTER,
+                                                label_txt,
+                                                egui::FontId::proportional(11.5),
+                                                Color32::from_rgb(225, 29, 72),
+                                            );
+                                        }
+                                        IntegrateSubMode::Delete => {
+                                            painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(220, 38, 38, 50));
+                                            let stroke_v = Stroke::new(1.5_f32, Color32::from_rgb(220, 38, 38));
+                                            painter.line_segment([Pos2::new(start.x, plot_rect.min.y), Pos2::new(start.x, axis_y)], stroke_v);
+                                            painter.line_segment([Pos2::new(curr.x, plot_rect.min.y), Pos2::new(curr.x, axis_y)], stroke_v);
+                                        }
+                                        IntegrateSubMode::Split => {
+                                            let stroke_v = Stroke::new(2.0_f32, Color32::from_rgb(13, 110, 253));
+                                            painter.line_segment([Pos2::new(curr.x, plot_rect.min.y), Pos2::new(curr.x, axis_y)], stroke_v);
+                                        }
+                                        IntegrateSubMode::Reference => {
+                                            painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(13, 110, 253, 45));
+                                            let stroke_v = Stroke::new(1.5_f32, Color32::from_rgb(13, 110, 253));
+                                            painter.line_segment([Pos2::new(start.x, plot_rect.min.y), Pos2::new(start.x, axis_y)], stroke_v);
+                                            painter.line_segment([Pos2::new(curr.x, plot_rect.min.y), Pos2::new(curr.x, axis_y)], stroke_v);
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 AppMode::Multiview => {
@@ -780,7 +1027,10 @@ impl eframe::App for ResonaApp {
 
                     // ドラッグ終了 (解放) 時の処理
                     if response.drag_stopped_by(egui::PointerButton::Primary) {
-                        if self.is_dragging_threshold {
+                        if self.integrate_drag.is_some() {
+                            self.integrate_drag = None;
+                            self.project.push_history();
+                        } else if self.is_dragging_threshold {
                             self.is_dragging_threshold = false;
                             self.status_message = format!("Threshold set to {:.2}", self.action_state.peak_threshold);
                         } else if let (Some(start), Some(end)) = (self.drag_start, self.drag_current) {
@@ -866,18 +1116,121 @@ impl eframe::App for ResonaApp {
                                         }
                                     }
                                     AppMode::Integrate => {
-                                        if self.action_state.integrate_submode == IntegrateSubMode::Add && (start.x - end.x).abs() > 5.0 {
-                                            let s_ppm = p_start.max(p_end);
-                                            let e_ppm = p_start.min(p_end);
-                                            let new_item = IntegrationItem {
-                                                id: format!("intg-{}", self.project.state.integrations.len() + 1),
-                                                start_ppm: s_ppm,
-                                                end_ppm: e_ppm,
-                                                y_start: 0.0,
-                                                y_end: 0.0,
-                                            };
-                                            self.project.state.integrations.push(new_item);
-                                            self.project.push_history();
+                                        let p_low = p_start.min(p_end);
+                                        let p_high = p_start.max(p_end);
+                                        let dx = (start.x - end.x).abs();
+                                        match self.action_state.integrate_submode {
+                                            IntegrateSubMode::Add => {
+                                                if dx > 5.0 {
+                                                    let s_ppm = p_start.max(p_end);
+                                                    let e_ppm = p_start.min(p_end);
+                                                    let med = self.project.spectrum_real.as_ref().map(|s| {
+                                                        let mut sorted = s.to_vec();
+                                                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                                        sorted[sorted.len() / 2]
+                                                    }).unwrap_or(0.0);
+
+                                                    let new_item = IntegrationItem {
+                                                        id: format!("intg-{}", self.project.state.integrations.len() + 1),
+                                                        start_ppm: s_ppm,
+                                                        end_ppm: e_ppm,
+                                                        y_start: med,
+                                                        y_end: med,
+                                                    };
+
+                                                    if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                                                        if self.project.state.integrations.is_empty() || self.project.state.integration_scale == 1.0 {
+                                                            if let Some(res) = compute_integral(spec, ppm, &new_item, 1.0, 1.0, 0.03) {
+                                                                if res.total_area > 1e-12 {
+                                                                    self.project.state.integration_ref_area = res.total_area;
+                                                                    self.project.state.integration_ref_value = 1.0;
+                                                                    let max_spec = spec.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+                                                                    if max_spec > 0.0 {
+                                                                        self.project.state.integration_scale = (max_spec * 0.35) / res.total_area;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    self.project.state.integrations.push(new_item);
+                                                    self.project.push_history();
+                                                    self.status_message = format!("Added integration {:.3} ~ {:.3} ppm", s_ppm, e_ppm);
+                                                }
+                                            }
+                                            IntegrateSubMode::Delete => {
+                                                if dx > 3.0 {
+                                                    let before_len = self.project.state.integrations.len();
+                                                    self.project.state.integrations.retain(|item| {
+                                                        let item_low = item.min_ppm();
+                                                        let item_high = item.max_ppm();
+                                                        !(p_low.max(item_low) <= p_high.min(item_high))
+                                                    });
+                                                    if self.project.state.integrations.len() != before_len {
+                                                        self.project.push_history();
+                                                        self.status_message = "Deleted integrations in range".to_string();
+                                                    }
+                                                }
+                                            }
+                                            IntegrateSubMode::Split => {
+                                                let split_ppm = p_end;
+                                                let mut split_idx = None;
+                                                for (idx, item) in self.project.state.integrations.iter().enumerate() {
+                                                    if item.contains_ppm(split_ppm) {
+                                                        split_idx = Some(idx);
+                                                        break;
+                                                    }
+                                                }
+                                                if let Some(idx) = split_idx {
+                                                    let item = self.project.state.integrations.remove(idx);
+                                                    let (x1, x2) = (item.start_ppm, item.end_ppm);
+                                                    let (y1, y2) = (item.y_start, item.y_end);
+                                                    let y_split = item.baseline_y_at(split_ppm);
+                                                    let d1 = IntegrationItem {
+                                                        id: format!("intg-{}", self.project.state.integrations.len() + 1),
+                                                        start_ppm: x1,
+                                                        end_ppm: split_ppm,
+                                                        y_start: y1,
+                                                        y_end: y_split,
+                                                    };
+                                                    let d2 = IntegrationItem {
+                                                        id: format!("intg-{}", self.project.state.integrations.len() + 2),
+                                                        start_ppm: split_ppm,
+                                                        end_ppm: x2,
+                                                        y_start: y_split,
+                                                        y_end: y2,
+                                                    };
+                                                    self.project.state.integrations.insert(idx, d2);
+                                                    self.project.state.integrations.insert(idx, d1);
+                                                    self.project.push_history();
+                                                    self.status_message = format!("Split integration at {:.3} ppm", split_ppm);
+                                                }
+                                            }
+                                            IntegrateSubMode::Reference => {
+                                                let ref_ppm = p_end;
+                                                let mut target_idx = None;
+                                                for (idx, item) in self.project.state.integrations.iter().enumerate() {
+                                                    if item.contains_ppm(ref_ppm) || (p_low.max(item.min_ppm()) <= p_high.min(item.max_ppm())) {
+                                                        target_idx = Some(idx);
+                                                        break;
+                                                    }
+                                                }
+                                                if let Some(idx) = target_idx {
+                                                    if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                                                        let item = &self.project.state.integrations[idx];
+                                                        if let Some(res) = compute_integral(spec, ppm, item, 1.0, 1.0, 0.03) {
+                                                            if res.total_area > 1e-12 {
+                                                                let target_val = self.action_state.integration_ref_val;
+                                                                self.project.state.integration_ref_area = res.total_area;
+                                                                self.project.state.integration_ref_value = target_val;
+                                                                self.project.push_history();
+                                                                self.status_message = format!("Set reference integral to {:.2}", target_val);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     AppMode::Multiview => {
