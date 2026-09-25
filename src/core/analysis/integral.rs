@@ -143,8 +143,12 @@ pub fn compute_integral(
     }
 
     // 表示用曲線の生成: y_bl + integral * scale + offset
-    let max_spec = spectrum.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let offset = max_spec * offset_factor;
+    let offset = if offset_factor.abs() > 1e-12 {
+        let max_spec = spectrum.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        max_spec * offset_factor
+    } else {
+        0.0
+    };
 
     let mut curve_y = Vec::with_capacity(m_points);
     for i in 0..m_points {

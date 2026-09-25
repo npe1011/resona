@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use egui::{CentralPanel, Color32, Context, Key, Margin, Pos2, Rect, RichText, Stroke, TopBottomPanel, SidePanel};
 use crate::core::{
-    analyze_multiplet, auto_detect_integrations, compute_integral, estimate_noise_mad, pick_peaks,
+    analyze_multiplet, auto_detect_integrations, compute_integral, pick_peaks,
     snap_and_add_peak, IntegrationItem, JCouplingResultItem, MultiviewItem, Project, RectF,
 };
 
@@ -686,11 +686,7 @@ impl eframe::App for ResonaApp {
         let mut p1 = self.project.state.p1;
         let mut int_scale = self.project.state.integration_scale;
 
-        let noise_level = if let Some(spec) = &self.project.spectrum_real {
-            estimate_noise_mad(spec)
-        } else {
-            1.0
-        };
+        let noise_level = self.project.noise_level();
 
         if self.mode == Some(AppMode::Peak) && self.action_state.peak_threshold <= 0.0 {
             let initial_thresh = self.project.state.peak_threshold.unwrap_or(noise_level * 10.0);
@@ -763,7 +759,7 @@ impl eframe::App for ResonaApp {
             }
             ActionEvent::AutoPeak => {
                 if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
-                    let noise = estimate_noise_mad(spec);
+                    let noise = self.project.noise_level();
                     let thresh = noise * 10.0;
                     self.action_state.peak_threshold = thresh;
                     self.project.state.peak_threshold = Some(thresh);
@@ -797,7 +793,7 @@ impl eframe::App for ResonaApp {
                             }
                         }
                     }
-                    let max_spec = spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let max_spec = self.project.max_intensity();
                     if max_area > 1e-12 && max_spec > 0.0 {
                         self.project.state.integration_scale = (max_spec * 0.35) / max_area;
                         self.project.state.integration_ref_area = max_area;
@@ -929,7 +925,7 @@ impl eframe::App for ResonaApp {
                                     }
                                 }
                             }
-                            let max_spec = spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                            let max_spec = self.project.max_intensity();
                             if max_area > 1e-12 && max_spec > 0.0 {
                                 self.project.state.integration_scale = (max_spec * 0.35) / max_area;
                             }
@@ -1638,7 +1634,7 @@ impl eframe::App for ResonaApp {
                                                                 if res.total_area > 1e-12 {
                                                                     self.project.state.integration_ref_area = res.total_area;
                                                                     self.project.state.integration_ref_value = 1.0;
-                                                                    let max_spec = spec.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+                                                                    let max_spec = self.project.max_intensity();
                                                                     if max_spec > 0.0 {
                                                                         self.project.state.integration_scale = (max_spec * 0.35) / res.total_area;
                                                                     }
@@ -1860,6 +1856,7 @@ impl eframe::App for ResonaApp {
                         self.project.ppm = Some(processed.ppm);
                         self.project.spectrum_real = Some(processed.spectrum_real);
                         self.project.complex_spectrum_unphased = Some(processed.complex_spectrum_unphased);
+                        self.project.invalidate_cache();
                         self.project.state.ft_settings = ft_settings;
                         self.project.push_history();
                         self.reset_zoom();

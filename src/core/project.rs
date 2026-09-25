@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -204,6 +205,10 @@ pub struct Project {
     pub state: ProjectState,
     /// Undo/Redo 履歴
     pub history: HistoryManager,
+    /// キャッシュされたノイズレベル (MAD)
+    pub cached_noise_level: Cell<Option<f64>>,
+    /// キャッシュされたスペクトルの最大強度
+    pub cached_max_intensity: Cell<Option<f64>>,
 }
 
 impl Project {
@@ -217,7 +222,43 @@ impl Project {
             metadata: AcquisitionMetadata::default(),
             state: ProjectState::default(),
             history: HistoryManager::new(),
+            cached_noise_level: Cell::new(None),
+            cached_max_intensity: Cell::new(None),
         }
+    }
+
+    /// スペクトルの最大強度を取得する (キャッシュ付き)
+    pub fn max_intensity(&self) -> f64 {
+        if let Some(val) = self.cached_max_intensity.get() {
+            return val;
+        }
+        let val = if let Some(ref spec) = self.spectrum_real {
+            spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            0.0
+        };
+        self.cached_max_intensity.set(Some(val));
+        val
+    }
+
+    /// ノイズレベル (MAD) を取得する (キャッシュ付き)
+    pub fn noise_level(&self) -> f64 {
+        if let Some(val) = self.cached_noise_level.get() {
+            return val;
+        }
+        let val = if let Some(ref spec) = self.spectrum_real {
+            crate::core::analysis::estimate_noise_mad(spec)
+        } else {
+            1.0
+        };
+        self.cached_noise_level.set(Some(val));
+        val
+    }
+
+    /// キャッシュを無効化する (スペクトル更新時に呼び出す)
+    pub fn invalidate_cache(&self) {
+        self.cached_noise_level.set(None);
+        self.cached_max_intensity.set(None);
     }
 
     /// JDF ファイルを開き、初期化して処理を実行する
@@ -242,6 +283,7 @@ impl Project {
             self.auto_phase();
         }
 
+        self.invalidate_cache();
         self.history = HistoryManager::new();
         self.history.commit(&self.state, &self.ppm, &self.spectrum_real);
 
@@ -258,6 +300,7 @@ impl Project {
             // ベースライン補正が適用されていた場合はリセット
             self.baseline_array = None;
             self.spectrum_real = Some(spec);
+            self.invalidate_cache();
         }
     }
 
@@ -279,6 +322,7 @@ impl Project {
                 let (corrected, bl) = crate::core::baseline::apply_baseline_correction(spec, lam, p);
                 self.spectrum_real = Some(corrected);
                 self.baseline_array = Some(bl);
+                self.invalidate_cache();
             }
         }
     }
@@ -287,6 +331,7 @@ impl Project {
     pub fn clear_baseline(&mut self) {
         if self.baseline_array.is_some() {
             self.update_phase(self.state.p0, self.state.p1);
+            self.invalidate_cache();
         }
     }
 
@@ -332,6 +377,7 @@ impl Project {
             self.state = snapshot.0.clone();
             self.ppm = snapshot.1.clone();
             self.spectrum_real = snapshot.2.clone();
+            self.invalidate_cache();
             true
         } else {
             false
@@ -344,6 +390,7 @@ impl Project {
             self.state = snapshot.0.clone();
             self.ppm = snapshot.1.clone();
             self.spectrum_real = snapshot.2.clone();
+            self.invalidate_cache();
             true
         } else {
             false
@@ -493,6 +540,7 @@ impl Project {
             self.spectrum_real = Some(real);
         }
 
+        self.invalidate_cache();
         self.history = HistoryManager::new();
         self.history.commit(&self.state, &self.ppm, &self.spectrum_real);
 
@@ -503,5 +551,45 @@ impl Project {
 impl Default for Project {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_project_cache_and_invalidation() {
+        let mut proj = Project::new();
+        proj.spectrum_real = Some(Array1::from_vec(vec![1.0, 50.0, 2.0, 10.0, 3.0]));
+        proj.complex_spectrum_unphased = Some(Array1::from_vec(vec![
+            Complex64::new(1.0, 0.0),
+            Complex64::new(50.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(10.0, 0.0),
+            Complex64::new(3.0, 0.0),
+        ]));
+
+        assert!(proj.cached_max_intensity.get().is_none());
+        assert!(proj.cached_noise_level.get().is_none());
+
+        // 初回計算
+        let max_val = proj.max_intensity();
+        assert_eq!(max_val, 50.0);
+        assert_eq!(proj.cached_max_intensity.get(), Some(50.0));
+
+        let noise = proj.noise_level();
+        assert!(noise > 0.0);
+        assert_eq!(proj.cached_noise_level.get(), Some(noise));
+
+        // 位相変更によるキャッシュ無効化のテスト
+        proj.update_phase(180.0, 0.0);
+        assert!(proj.cached_max_intensity.get().is_none());
+        assert!(proj.cached_noise_level.get().is_none());
+
+        // 位相180度後の最大値 (元の-1.0〜-50.0なので最大値は-1.0)
+        let new_max = proj.max_intensity();
+        assert!((new_max - (-1.0)).abs() < 1e-6);
+        assert_eq!(proj.cached_max_intensity.get(), Some(new_max));
     }
 }
