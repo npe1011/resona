@@ -45,8 +45,7 @@ pub enum IntegrateSubMode {
 pub enum MultiviewSubMode {
     #[default]
     None,
-    AddRect,
-    AddX,
+    Add,
     Edit,
     Delete,
 }

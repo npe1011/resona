@@ -21,6 +21,7 @@ pub enum ActionEvent {
     AutoIntegrate,
     ClearIntegrations,
     AutoMultiview,
+    AdjustYMultiview,
     AlignMultiview,
     ResetMultiview,
     ClearJCoupling,
@@ -137,6 +138,18 @@ fn close_button(ui: &mut Ui) -> egui::Response {
     ui.add(btn)
 }
 
+/// Auto処理用の強調ボタン (パープル背景・白文字・パープル枠線で強調)
+fn auto_button(ui: &mut Ui, text: &str, min_width: f32) -> egui::Response {
+    let rich = RichText::new(text).strong().size(12.0).color(Color32::WHITE);
+    let btn = Button::new(rich)
+        .min_size(vec2(min_width, 22.0))
+        .fill(Color32::from_rgb(126, 34, 206)) // #7e22ce (purple-700)
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(107, 33, 168))) // #6b21a8
+        .rounding(3.0_f32);
+
+    ui.add(btn)
+}
+
 /// ezNMR 2段目ツールバーの描画 (左: 常駐ZOOMフレーム, 右: コンテキストフレーム)
 pub fn show_action_bar(
     ui: &mut Ui,
@@ -234,7 +247,7 @@ pub fn show_action_bar(
 
                         match mode {
                             AppMode::Phase => {
-                                if light_button(ui, "Auto", false, 46.0).clicked() {
+                                if auto_button(ui, "Auto", 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::AutoPhase;
                                 }
@@ -325,7 +338,7 @@ pub fn show_action_bar(
                                 ui.label(RichText::new("Target (ppm)").size(12.0));
                                 ui.add(DragValue::new(&mut state.ref_target_ppm).speed(0.01));
 
-                                if light_button(ui, "Auto", false, 46.0).clicked() {
+                                if auto_button(ui, "Auto", 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::AutoReference;
                                 }
@@ -342,7 +355,7 @@ pub fn show_action_bar(
                                 }
                             }
                             AppMode::Peak => {
-                                if light_button(ui, "Auto", false, 46.0).clicked() {
+                                if auto_button(ui, "Auto", 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::AutoPeak;
                                 }
@@ -378,7 +391,7 @@ pub fn show_action_bar(
                                 }
                             }
                             AppMode::Integrate => {
-                                if light_button(ui, "Auto", false, 46.0).clicked() {
+                                if auto_button(ui, "Auto", 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::AutoIntegrate;
                                 }
@@ -447,20 +460,14 @@ pub fn show_action_bar(
                                 ui.label(RichText::new("Ratio").size(12.0));
                                 ui.add(DragValue::new(&mut state.multiview_ratio).speed(0.5).range(0.5..=100.0));
 
-                                if light_button(ui, "Auto", false, 44.0).clicked() {
+                                if auto_button(ui, "Auto", 44.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::AutoMultiview;
                                 }
 
-                                let is_rect = state.multiview_submode == MultiviewSubMode::AddRect;
-                                if light_button(ui, "Add (Rect)", is_rect, 68.0).clicked() {
-                                    state.multiview_submode = MultiviewSubMode::AddRect;
-                                    *active_zoom = None;
-                                }
-
-                                let is_x = state.multiview_submode == MultiviewSubMode::AddX;
-                                if light_button(ui, "Add (X)", is_x, 58.0).clicked() {
-                                    state.multiview_submode = MultiviewSubMode::AddX;
+                                let is_add = state.multiview_submode == MultiviewSubMode::Add;
+                                if light_button(ui, "Add", is_add, 46.0).clicked() {
+                                    state.multiview_submode = MultiviewSubMode::Add;
                                     *active_zoom = None;
                                 }
 
@@ -476,6 +483,11 @@ pub fn show_action_bar(
                                     *active_zoom = None;
                                 }
 
+                                if light_button(ui, "Adjust-Y", false, 64.0).clicked() {
+                                    *active_zoom = None;
+                                    event = ActionEvent::AdjustYMultiview;
+                                }
+
                                 if light_button(ui, "Align", false, 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::AlignMultiview;
@@ -487,11 +499,8 @@ pub fn show_action_bar(
                                 }
 
                                 match state.multiview_submode {
-                                    MultiviewSubMode::AddRect => {
-                                        ui.label(RichText::new("Drag rectangle on peak to create inset").size(11.0).color(Color32::from_rgb(147, 51, 234)));
-                                    }
-                                    MultiviewSubMode::AddX => {
-                                        ui.label(RichText::new("Drag PPM range to create inset").size(11.0).color(Color32::from_rgb(147, 51, 234)));
+                                    MultiviewSubMode::Add => {
+                                        ui.label(RichText::new("Drag on peak to create inset").size(11.0).color(Color32::from_rgb(147, 51, 234)));
                                     }
                                     MultiviewSubMode::Edit => {
                                         ui.label(RichText::new("Drag inside to move, edges to resize, Delete to remove").size(11.0).color(Color32::from_rgb(13, 110, 253)));

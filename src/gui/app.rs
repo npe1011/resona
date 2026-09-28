@@ -333,6 +333,37 @@ impl ResonaApp {
         }
     }
 
+    /// 既存の拡大図について、枠全体の縦の大きさ（h）を最大のものに揃え、
+    /// アスペクト比（w/h）を維持して拡大・縮小する (Adjust-Y)
+    pub fn adjust_y_multiviews(&mut self) {
+        if self.project.state.multiviews.is_empty() {
+            return;
+        }
+
+        let max_h = self
+            .project
+            .state
+            .multiviews
+            .iter()
+            .map(|mv| mv.geometry.h)
+            .fold(0.0_f32, f32::max);
+
+        if max_h <= 0.0 {
+            return;
+        }
+
+        for mv in &mut self.project.state.multiviews {
+            if mv.geometry.h > 0.0 {
+                let scale = max_h / mv.geometry.h;
+                mv.geometry.w *= scale;
+                mv.geometry.h = max_h;
+            }
+        }
+
+        self.project.push_history();
+        self.status_message = format!("Adjusted multiview heights to {:.0}px", max_h);
+    }
+
     /// 既存の Multiview を最大化学シフト降順にソートし、画面上部に下揃えで整列配置 (ezNMR準拠)
     pub fn align_multiviews(&mut self, plot_rect: Rect) {
         if self.project.state.multiviews.is_empty() {
@@ -860,6 +891,9 @@ impl eframe::App for ResonaApp {
                 let plot_rect = self.transform.as_ref().map(|t| t.screen_rect).unwrap_or(Rect::from_min_size(Pos2::new(100.0, 100.0), egui::vec2(800.0, 600.0)));
                 let ppm_span = self.transform.as_ref().map(|t| (t.ppm_max - t.ppm_min).abs()).unwrap_or(10.0);
                 self.auto_create_multiview_from_integrations(plot_rect, ppm_span);
+            }
+            ActionEvent::AdjustYMultiview => {
+                self.adjust_y_multiviews();
             }
             ActionEvent::AlignMultiview => {
                 let plot_rect = self.transform.as_ref().map(|t| t.screen_rect).unwrap_or(Rect::from_min_size(Pos2::new(100.0, 100.0), egui::vec2(800.0, 600.0)));
@@ -1514,21 +1548,7 @@ impl eframe::App for ResonaApp {
                                     let delta_p = p_high - p_low;
 
                                     match self.action_state.multiview_submode {
-                                        MultiviewSubMode::AddRect => {
-                                            let band_rect = Rect::from_two_pos(start, curr);
-                                            painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(147, 51, 234, 45));
-                                            painter.rect_stroke(band_rect, 0.0, Stroke::new(1.5_f32, Color32::from_rgb(147, 51, 234)));
-
-                                            let label_txt = format!("{:.3} ~ {:.3} ppm", p_high, p_low);
-                                            painter.text(
-                                                Pos2::new(band_rect.center().x, (band_rect.min.y - 12.0).max(plot_rect.min.y + 12.0)),
-                                                egui::Align2::CENTER_CENTER,
-                                                label_txt,
-                                                egui::FontId::proportional(11.5),
-                                                Color32::from_rgb(147, 51, 234),
-                                            );
-                                        }
-                                        MultiviewSubMode::AddX => {
+                                        MultiviewSubMode::Add => {
                                             let min_x = start.x.min(curr.x);
                                             let max_x = start.x.max(curr.x);
                                             let band_rect = Rect::from_min_max(
@@ -1783,38 +1803,10 @@ impl eframe::App for ResonaApp {
                                         let p_low = p_start.min(p_end);
                                         let p_high = p_start.max(p_end);
                                         let dx = (start.x - end.x).abs();
-                                        let dy = (start.y - end.y).abs();
                                         let ratio = self.action_state.multiview_ratio;
 
                                         match self.action_state.multiview_submode {
-                                            MultiviewSubMode::AddRect => {
-                                                if dx > 8.0 && dy > 8.0 {
-                                                    let w = (dx * (ratio as f32 * 0.5)).clamp(240.0, 600.0);
-                                                    let h = (w * 0.70).clamp(160.0, 420.0);
-                                                    // 既存の拡大図に被らないように左上から順に空き位置を探索
-                                                    let pos = find_non_overlapping_multiview_pos(&self.project.state.multiviews, plot_rect, w, h);
-                                                    let geom = RectF {
-                                                        x: pos.x,
-                                                        y: pos.y,
-                                                        w,
-                                                        h,
-                                                    };
-                                                    let mv_id = format!("mv-{}", self.project.state.multiviews.len() + 1);
-                                                    self.project.state.multiviews.push(MultiviewItem {
-                                                        id: mv_id.clone(),
-                                                        src_x_min: p_low,
-                                                        src_x_max: p_high,
-                                                        src_y_min: None,
-                                                        src_y_max: None,
-                                                        ratio,
-                                                        geometry: geom,
-                                                    });
-                                                    self.selected_multiview_id = Some(mv_id);
-                                                    self.project.push_history();
-                                                    self.status_message = format!("Added multiview inset {:.3} ~ {:.3} ppm", p_high, p_low);
-                                                }
-                                            }
-                                            MultiviewSubMode::AddX => {
+                                            MultiviewSubMode::Add => {
                                                 if dx > 8.0 {
                                                     let view_ppm_span = (t.ppm_max - t.ppm_min).abs().max(1e-6);
                                                     let px_w = plot_rect.width();
