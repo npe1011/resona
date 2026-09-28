@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use egui::{CentralPanel, Color32, Context, Key, Margin, Pos2, Rect, RichText, Stroke, TopBottomPanel, SidePanel};
 use crate::core::{
     analyze_multiplet, auto_detect_integrations, compute_integral, pick_peaks,
-    snap_and_add_peak, IntegrationItem, JCouplingResultItem, MultiviewItem, Project, RectF,
+    add_peak_in_range, IntegrationItem, JCouplingResultItem, MultiviewItem, Project, RectF,
 };
 
 use crate::gui::dialogs::{
@@ -1231,6 +1231,32 @@ impl eframe::App for ResonaApp {
                                             self.selected_multiview_id = None;
                                         }
                                     }
+                                } else if self.mode == Some(AppMode::Peak) && self.active_zoom.is_none() {
+                                    if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                        let dt = if ppm.len() > 1 { (ppm[0] - ppm[ppm.len() - 1]).abs() / (ppm.len() - 1) as f64 } else { 0.001 };
+                                        match self.action_state.peak_submode {
+                                            PeakSubMode::Add => {
+                                                let p_low = click_ppm - dt * 5.0;
+                                                let p_high = click_ppm + dt * 5.0;
+                                                let before_count = self.project.state.peaks.len();
+                                                self.project.state.peaks = add_peak_in_range(spec, ppm, p_low, p_high, &self.project.state.peaks);
+                                                if self.project.state.peaks.len() > before_count {
+                                                    self.project.push_history();
+                                                    self.status_message = format!("Added peak near {:.3} ppm", click_ppm);
+                                                }
+                                            }
+                                            PeakSubMode::Delete => {
+                                                let tol = dt * 5.0;
+                                                let before_count = self.project.state.peaks.len();
+                                                self.project.state.peaks.retain(|pk| (pk.ppm - click_ppm).abs() > tol);
+                                                if self.project.state.peaks.len() < before_count {
+                                                    self.project.push_history();
+                                                    self.status_message = format!("Deleted peak near {:.3} ppm", click_ppm);
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                 } else if self.mode == Some(AppMode::Integrate) && self.active_zoom.is_none() {
                                     match self.action_state.integrate_submode {
                                         IntegrateSubMode::Delete => {
@@ -1720,24 +1746,24 @@ impl eframe::App for ResonaApp {
                                         if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
                                             let p_low = p_start.min(p_end);
                                             let p_high = p_start.max(p_end);
-                                            if (start.x - end.x).abs() > 5.0 {
+                                            let dx = (start.x - end.x).abs();
+                                            if dx > 3.0 {
                                                 if self.action_state.peak_submode == PeakSubMode::Add {
-                                                    let mut best_p = p_low;
-                                                    let mut max_val = f64::MIN;
-                                                    for i in 0..ppm.len().min(spec.len()) {
-                                                        let p = ppm[i];
-                                                        if p >= p_low && p <= p_high && spec[i] > max_val {
-                                                            max_val = spec[i];
-                                                            best_p = p;
-                                                        }
-                                                    }
-                                                    if max_val > f64::MIN {
-                                                        self.project.state.peaks = snap_and_add_peak(spec, ppm, best_p, &self.project.state.peaks);
+                                                    let before_count = self.project.state.peaks.len();
+                                                    self.project.state.peaks = add_peak_in_range(spec, ppm, p_low, p_high, &self.project.state.peaks);
+                                                    if self.project.state.peaks.len() > before_count {
                                                         self.project.push_history();
+                                                        self.status_message = format!("Added peak in range [{:.3}, {:.3}] ppm", p_low, p_high);
+                                                    } else {
+                                                        self.status_message = "Peak already exists in selected range".to_string();
                                                     }
                                                 } else if self.action_state.peak_submode == PeakSubMode::Delete {
+                                                    let before_count = self.project.state.peaks.len();
                                                     self.project.state.peaks.retain(|pk| pk.ppm < p_low || pk.ppm > p_high);
-                                                    self.project.push_history();
+                                                    if self.project.state.peaks.len() < before_count {
+                                                        self.project.push_history();
+                                                        self.status_message = "Deleted peaks in selected range".to_string();
+                                                    }
                                                 }
                                             }
                                         }
