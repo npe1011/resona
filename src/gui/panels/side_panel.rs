@@ -10,20 +10,22 @@ pub fn show_side_panel(
     selected_j_idx: &mut Option<usize>,
 ) {
     ScrollArea::vertical().show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 8.0;
+        ui.spacing_mut().item_spacing.y = 4.0;
 
         // -------------------------------------------------------------
         // 1. Experimental Parameters テーブル (Python版 ezNMR 完全準拠)
         // -------------------------------------------------------------
-        ui.label(RichText::new("Experimental Parameters").strong().size(12.0).color(Color32::from_rgb(70, 75, 80)));
+        ui.label(RichText::new("Experimental Parameters").strong().size(11.5).color(Color32::from_rgb(70, 75, 80)));
         render_zebra_table(ui, "meta_table", &metadata.to_display_rows());
 
+        ui.add_space(2.0);
         ui.separator();
+        ui.add_space(2.0);
 
         // -------------------------------------------------------------
         // 2. FT Settings テーブル (Zebra stripe)
         // -------------------------------------------------------------
-        ui.label(RichText::new("FT Settings").strong().size(12.0).color(Color32::from_rgb(70, 75, 80)));
+        ui.label(RichText::new("FT Settings").strong().size(11.5).color(Color32::from_rgb(70, 75, 80)));
         render_zebra_table(ui, "ft_table", &[
             ("Window Type", match ft_settings.window {
                 WindowFunction::None => "None".to_string(),
@@ -40,17 +42,19 @@ pub fn show_side_panel(
             ("Auto Phase", if ft_settings.auto_phase { "Yes".to_string() } else { "No".to_string() }),
         ]);
 
+        ui.add_space(2.0);
         ui.separator();
+        ui.add_space(2.0);
 
         // -------------------------------------------------------------
         // 3. J-Coupling 結果テーブル
         // -------------------------------------------------------------
-        ui.label(RichText::new(format!("J-Couplings ({})", j_couplings.len())).strong().size(12.0).color(Color32::from_rgb(70, 75, 80)));
+        ui.label(RichText::new(format!("J-Couplings ({})", j_couplings.len())).strong().size(11.5).color(Color32::from_rgb(70, 75, 80)));
 
         if j_couplings.is_empty() {
             ui.label(
                 RichText::new("No multiplets analyzed yet\nSelect J Coupling and drag over peak")
-                    .size(11.0)
+                    .size(10.5)
                     .italics()
                     .color(Color32::from_gray(140)),
             );
@@ -69,7 +73,7 @@ pub fn show_side_panel(
 
                 egui::Frame::none()
                     .fill(bg_color)
-                    .inner_margin(egui::Margin::symmetric(4.0, 3.0))
+                    .inner_margin(egui::Margin::symmetric(4.0, 2.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let label = format!("#{}  {}", i + 1, jc.text);
@@ -79,7 +83,7 @@ pub fn show_side_panel(
                                 Color32::from_rgb(40, 40, 40)
                             };
 
-                            let resp = ui.selectable_label(is_selected, RichText::new(label).size(11.0).color(text_color));
+                            let resp = ui.selectable_label(is_selected, RichText::new(label).size(10.5).color(text_color));
                             if resp.clicked() {
                                 *selected_j_idx = Some(i);
                             }
@@ -98,7 +102,7 @@ pub fn show_side_panel(
                 }
             }
 
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             if ui.button("Copy All to Clipboard").clicked() {
                 let mut clip = String::new();
                 for jc in j_couplings.iter() {
@@ -115,11 +119,12 @@ pub fn show_side_panel(
 fn render_zebra_table(ui: &mut Ui, id_salt: &str, rows: &[(&str, String)]) {
     egui::Grid::new(id_salt)
         .striped(true)
-        .spacing([12.0, 4.0])
+        .spacing([8.0, 2.0])
+        .min_row_height(14.0)
         .show(ui, |ui| {
             for (key, val) in rows {
-                ui.label(RichText::new(*key).size(11.0).color(Color32::from_rgb(108, 117, 125)));
-                ui.label(RichText::new(val).size(11.0).strong().color(Color32::from_rgb(33, 37, 41)));
+                ui.label(RichText::new(*key).size(10.5).color(Color32::from_rgb(108, 117, 125)));
+                ui.label(RichText::new(val).size(10.5).strong().color(Color32::from_rgb(33, 37, 41)));
                 ui.end_row();
             }
         });

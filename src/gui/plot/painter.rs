@@ -23,6 +23,9 @@ pub struct PlotStyle {
     pub rubberband_color: Color32,
     pub ppm_decimals: usize,
     pub integral_decimals: usize,
+    pub auto_ticks: bool,
+    pub tick_major: f64,
+    pub tick_minor: usize,
 }
 
 impl Default for PlotStyle {
@@ -42,6 +45,9 @@ impl Default for PlotStyle {
             rubberband_color: Color32::from_rgba_premultiplied(13, 110, 253, 40),
             ppm_decimals: 3,
             integral_decimals: 2,
+            auto_ticks: false,
+            tick_major: 1.0,
+            tick_minor: 10,
         }
     }
 }
@@ -292,21 +298,37 @@ fn paint_ppm_axis(ui: &Ui, transform: &PlotTransform, axis_y: f32, style: &PlotS
         return;
     }
 
-    let approx_ticks = 8.0;
-    let rough_step = span / approx_ticks;
-    let exponent = (rough_step.log10().floor()) as i32;
-    let base = 10.0_f64.powi(exponent);
-    let fraction = rough_step / base;
-
-    let step = if fraction < 1.5 {
-        1.0 * base
-    } else if fraction < 3.0 {
-        2.0 * base
-    } else if fraction < 7.0 {
-        5.0 * base
+    let (step, dec) = if !style.auto_ticks && style.tick_major > 1e-4 {
+        let s = style.tick_major;
+        let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
+        (s, d)
     } else {
-        10.0 * base
+        // 13C NMR (通常スパン 30〜300 ppm) は 10.0 ppm を標準とする
+        if span >= 30.0 && span <= 300.0 {
+            (10.0, 0)
+        } else {
+            let approx_ticks = 8.0;
+            let rough_step = span / approx_ticks;
+            let exponent = (rough_step.log10().floor()) as i32;
+            let base = 10.0_f64.powi(exponent);
+            let fraction = rough_step / base;
+
+            let s = if fraction < 1.5 {
+                1.0 * base
+            } else if fraction < 3.0 {
+                2.0 * base
+            } else if fraction < 7.0 {
+                5.0 * base
+            } else {
+                10.0 * base
+            };
+            let d = (-exponent).max(0) as usize;
+            (s, d)
+        }
     };
+
+    let minor_n = style.tick_minor.max(1);
+    let minor_step = step / (minor_n as f64);
 
     let start_ppm = (transform.ppm_min.min(transform.ppm_max) / step).floor() * step;
     let end_ppm = (transform.ppm_min.max(transform.ppm_max) / step).ceil() * step;
@@ -315,14 +337,13 @@ fn paint_ppm_axis(ui: &Ui, transform: &PlotTransform, axis_y: f32, style: &PlotS
     while current_ppm <= end_ppm + 1e-9 {
         let sx = transform.ppm_to_screen_x(current_ppm);
         if sx >= rect.min.x && sx <= rect.max.x {
-            // 上向き目盛り線 (主目盛り)
+            // 上向き目盛り線 (主目盛り: 5.0px)
             painter.line_segment(
                 [Pos2::new(sx, axis_y), Pos2::new(sx, axis_y - 5.0)],
                 Stroke::new(1.0_f32, style.axis_color),
             );
 
             // 目盛り数値 (軸の上部に表示)
-            let dec = (-exponent).max(0) as usize;
             let val_str = format!("{:.1$}", current_ppm, dec);
             painter.text(
                 Pos2::new(sx, axis_y - 7.0),
@@ -332,6 +353,21 @@ fn paint_ppm_axis(ui: &Ui, transform: &PlotTransform, axis_y: f32, style: &PlotS
                 style.axis_color,
             );
         }
+
+        // サブ目盛り (StepをN分割した目盛りマーク: 2.5px、数字なし)
+        if minor_n > 1 {
+            for m in 1..minor_n {
+                let sub_ppm = current_ppm + (m as f64) * minor_step;
+                let sub_sx = transform.ppm_to_screen_x(sub_ppm);
+                if sub_sx >= rect.min.x && sub_sx <= rect.max.x {
+                    painter.line_segment(
+                        [Pos2::new(sub_sx, axis_y), Pos2::new(sub_sx, axis_y - 2.5)],
+                        Stroke::new(0.8_f32, style.axis_color),
+                    );
+                }
+            }
+        }
+
         current_ppm += step;
     }
 }
@@ -395,8 +431,8 @@ fn paint_peaks_eznmr(
         .map(|p| transform.ppm_to_screen_x(p.ppm))
         .collect();
 
-    // 最小間隔 (ピクセル: フォントサイズ拡大に合わせて余裕を持たせる)
-    let min_gap = 16.0_f32;
+    // 最小間隔 (ピクセル: 16.0 -> 11.0 に詰めて数値同士をすっきり整列)
+    let min_gap = 11.0_f32;
 
     // 対称緩和 (Symmetric relaxation) アンチコリジョン
     for _ in 0..300 {
@@ -425,7 +461,12 @@ fn paint_peaks_eznmr(
 
     for (i, peak) in visible_peaks.iter().enumerate() {
         let px = transform.ppm_to_screen_x(peak.ppm);
-        let tx = text_x[i].clamp(rect.min.x + 4.0, rect.max.x - 4.0);
+        let tx = text_x[i];
+
+        // 枠外にはみ出るものは clamp して端に固めるのではなく omit (スキップ)
+        if tx < rect.min.x + 2.0 || tx > rect.max.x - 2.0 || px < rect.min.x || px > rect.max.x {
+            continue;
+        }
 
         // ピーク頭頂部の画面位置 (X軸を8pxほど跨いでスペクトルのふもとから引き出す)
         let peak_pos = transform.data_to_screen(peak.ppm, peak.intensity);
@@ -667,7 +708,7 @@ fn paint_multiviews(
                         // プロトン数テキスト
                         let mid_p = (i_min + i_max) * 0.5 + 0.15 * (i_max - i_min);
                         let top_pos = inset_transform.data_to_screen(mid_p, y_min_adj + 0.68 * h);
-                        let val_text = format!("{:.2}", res.normalized_value);
+                        let val_text = format!("{:.1$}", res.normalized_value, style.integral_decimals);
                         plot_painter.text(
                             top_pos,
                             egui::Align2::CENTER_BOTTOM,
@@ -695,13 +736,13 @@ fn paint_multiviews(
             // PPM 降順 (左から右) にソートして線の交差を防止
             sorted_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
 
-            // 画面 X 座標ベースの物理リラクゼーション (縦書きテキスト幅約 10px に合わせた min_gap = 12.0px)
+            // 画面 X 座標ベースの物理リラクゼーション (縦書きテキスト幅約 10px に合わせた min_gap = 9.5px)
             let mut screen_x_list: Vec<f32> = sorted_peaks
                 .iter()
                 .map(|p| inset_transform.ppm_to_screen_x(p.ppm))
                 .collect();
 
-            let min_gap_px = 12.0_f32;
+            let min_gap_px = 9.5_f32; // 12.0 -> 9.5 に詰める
             for _ in 0..100 {
                 let mut moved = false;
                 for i in 1..screen_x_list.len() {
@@ -726,7 +767,12 @@ fn paint_multiviews(
 
             for (i, pk) in sorted_peaks.iter().enumerate() {
                 let px = inset_transform.ppm_to_screen_x(pk.ppm);
-                let tx = screen_x_list[i].clamp(plot_rect.min.x + 4.0, plot_rect.max.x - 4.0);
+                let tx = screen_x_list[i];
+
+                // 枠外にはみ出るものは clamp せずに omit
+                if tx < plot_rect.min.x + 2.0 || tx > plot_rect.max.x - 2.0 || px < plot_rect.min.x || px > plot_rect.max.x {
+                    continue;
+                }
 
                 let peak_screen = inset_transform.data_to_screen(pk.ppm, pk.intensity);
                 // ピーク頭頂部から 24px 離した位置から引き出し線を開始 (スペクトルの山からしっかりと空間をあける)
@@ -741,8 +787,8 @@ fn paint_multiviews(
                     plot_painter.line_segment([Pos2::new(tx, text_start_y + 28.0), Pos2::new(tx, text_start_y + 30.0)], stroke);
                 }
 
-                // 時計回り90度回転の縦書き化学シフト値ラベル (文字が一切潰れず美しく並ぶ)
-                let shift_str = format!("{:.3}", pk.ppm);
+                // 時計回り90度回転の縦書き化学シフト値ラベル (style.ppm_decimals を反映)
+                let shift_str = format!("{:.1$}", pk.ppm, style.ppm_decimals);
                 let galley = plot_painter.layout_no_wrap(shift_str, font_peak.clone(), peak_color);
                 let text_h = galley.size().y;
                 let text_pos = Pos2::new(tx + text_h * 0.5, text_start_y);

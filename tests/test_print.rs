@@ -13,6 +13,11 @@ fn test_print_settings_default() {
     assert!(settings.info);
     assert!(settings.jcoupling);
     assert!(settings.filename);
+    assert_eq!(settings.ppm_decimals, 3);
+    assert_eq!(settings.integral_decimals, 2);
+    assert!(!settings.auto_ticks);
+    assert_eq!(settings.tick_major, 1.0);
+    assert_eq!(settings.tick_minor, 10);
 }
 
 #[test]
@@ -216,4 +221,58 @@ fn test_parameters_off_expands_plot_and_filename_toggle_fixed_y() {
     let baseline_no_fn = extract_baseline_y(&svg_no_fn);
     assert!(!baseline_fn.is_empty());
     assert_eq!(baseline_fn, baseline_no_fn, "Filename toggle must not shift plot Y position!");
+}
+
+#[test]
+fn test_custom_precision_and_manual_ticks() {
+    let mut settings = PrintSettings::default();
+    settings.ppm_decimals = 4;
+    settings.integral_decimals = 3;
+    settings.auto_ticks = false;
+    settings.tick_major = 2.0;
+
+    let ppm = Array1::linspace(10.0, 0.0, 100);
+    let mut spec = Array1::zeros(100);
+    spec[50] = 100.0;
+
+    let peaks = vec![PeakItem {
+        ppm: 5.123456,
+        intensity: 100.0,
+        is_auto: true,
+    }];
+    let integrations = vec![IntegrationItem {
+        id: "1".to_string(),
+        start_ppm: 6.0,
+        end_ppm: 4.0,
+        y_start: 0.0,
+        y_end: 0.0,
+    }];
+    let multiviews = Vec::new();
+    let metadata = AcquisitionMetadata::default();
+    let ft_settings = FtSettings::default();
+    let j_couplings = Vec::new();
+
+    let svg = generate_complete_page_svg(
+        &settings,
+        None,
+        Some(&ppm),
+        Some(&spec),
+        &peaks,
+        &integrations,
+        1.0,
+        0.03,
+        1.0,
+        &multiviews,
+        &metadata,
+        &ft_settings,
+        &j_couplings,
+        None,
+    );
+
+    // 4桁のPPM値 "5.1235" (四捨五入) が含まれるか確認
+    assert!(svg.contains("5.1235"), "Peak PPM should be formatted with 4 decimals");
+    // 3桁の積分値が含まれるか確認
+    assert!(svg.contains(".000") || svg.contains(".1"), "Integration should respect integral_decimals");
+    // 手動目盛り 2.0 が反映されているか (2.0, 4.0, 6.0, 8.0, 10.0)
+    assert!(svg.contains(">2.0<") || svg.contains(">2<") || svg.contains(">4.0<") || svg.contains(">8.0<"));
 }

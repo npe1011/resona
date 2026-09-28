@@ -340,6 +340,22 @@ impl ResonaApp {
                 t.ppm_max = p_min.max(p_max);
                 t.y_min = eff_y_min;
                 t.y_max = eff_y_max;
+
+                let span = (t.ppm_max - t.ppm_min).abs();
+                let is_13c = self.project.metadata.nucleus.to_uppercase().contains("13C")
+                    || self.project.metadata.nucleus.to_uppercase().contains("C13");
+                let default_step = if is_13c || (span >= 30.0 && span <= 300.0) {
+                    10.0
+                } else if span < 5.0 {
+                    0.5
+                } else if span < 30.0 {
+                    1.0
+                } else if span <= 600.0 {
+                    20.0
+                } else {
+                    50.0
+                };
+                self.plot_style.tick_major = default_step;
             }
         }
     }
@@ -480,6 +496,49 @@ impl ResonaApp {
 
         self.align_multiviews(plot_rect);
         self.status_message = format!("Auto-created {} multiview insets from integrals", self.project.state.multiviews.len());
+    }
+
+    /// Display Settings ダイアログを開く (相対パーセント、目盛り設定などを初期化)
+    pub fn open_display_dialog(&mut self) {
+        let max_intensity = self.project.spectrum_real.as_ref()
+            .map(|s| s.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0))
+            .unwrap_or(1.0);
+        self.display_dialog_state.max_peak_intensity = max_intensity;
+
+        if let Some(ref t) = self.transform {
+            self.display_dialog_state.ppm_min = t.ppm_min;
+            self.display_dialog_state.ppm_max = t.ppm_max;
+            self.display_dialog_state.y_min_scale = (t.y_min / max_intensity) * 100.0;
+            self.display_dialog_state.y_max_scale = (t.y_max / max_intensity) * 100.0;
+
+            let span = (t.ppm_max - t.ppm_min).abs();
+            if self.plot_style.tick_major <= 0.0 {
+                let is_13c = self.project.metadata.nucleus.to_uppercase().contains("13C")
+                    || self.project.metadata.nucleus.to_uppercase().contains("C13");
+                let default_step = if is_13c || (span >= 30.0 && span <= 300.0) {
+                    10.0
+                } else if span < 5.0 {
+                    0.5
+                } else if span < 30.0 {
+                    1.0
+                } else if span <= 600.0 {
+                    20.0
+                } else {
+                    50.0
+                };
+                self.plot_style.tick_major = default_step;
+            }
+        } else {
+            self.display_dialog_state.y_min_scale = -10.0;
+            self.display_dialog_state.y_max_scale = 110.0;
+        }
+
+        self.display_dialog_state.auto_ticks = self.plot_style.auto_ticks;
+        self.display_dialog_state.tick_major = self.plot_style.tick_major;
+        self.display_dialog_state.tick_minor = self.plot_style.tick_minor;
+        self.display_dialog_state.ppm_decimals = self.plot_style.ppm_decimals;
+        self.display_dialog_state.integral_decimals = self.plot_style.integral_decimals;
+        self.display_dialog_state.open = true;
     }
 
     /// 外部ダイアログ経由でファイルを開く
@@ -684,15 +743,7 @@ impl eframe::App for ResonaApp {
                             ui.close_menu();
                         }
                         if ui.button("Display Settings...").clicked() {
-                            if let Some(ref t) = self.transform {
-                                self.display_dialog_state.ppm_min = t.ppm_min;
-                                self.display_dialog_state.ppm_max = t.ppm_max;
-                                self.display_dialog_state.y_min = t.y_min;
-                                self.display_dialog_state.y_max = t.y_max;
-                            }
-                            self.display_dialog_state.ppm_decimals = self.plot_style.ppm_decimals;
-                            self.display_dialog_state.integral_decimals = self.plot_style.integral_decimals;
-                            self.display_dialog_state.open = true;
+                            self.open_display_dialog();
                             ui.close_menu();
                         }
                     });
@@ -714,15 +765,7 @@ impl eframe::App for ResonaApp {
                         self.ft_dialog_state.open = true;
                     }
                     ModeBarEvent::OpenDisplay => {
-                        if let Some(ref t) = self.transform {
-                            self.display_dialog_state.ppm_min = t.ppm_min;
-                            self.display_dialog_state.ppm_max = t.ppm_max;
-                            self.display_dialog_state.y_min = t.y_min;
-                            self.display_dialog_state.y_max = t.y_max;
-                        }
-                        self.display_dialog_state.ppm_decimals = self.plot_style.ppm_decimals;
-                        self.display_dialog_state.integral_decimals = self.plot_style.integral_decimals;
-                        self.display_dialog_state.open = true;
+                        self.open_display_dialog();
                     }
                     ModeBarEvent::OpenPrint => {
                         self.print_dialog_state.open();
@@ -2013,15 +2056,18 @@ impl eframe::App for ResonaApp {
             }
         }
 
-        if let Some((p_min, p_max, y_min, y_max, p_dec, i_dec)) = show_display_dialog(ctx, &mut self.display_dialog_state) {
+        if let Some(res) = show_display_dialog(ctx, &mut self.display_dialog_state) {
             if let Some(ref mut t) = self.transform {
-                t.ppm_min = p_min;
-                t.ppm_max = p_max;
-                t.y_min = y_min;
-                t.y_max = y_max;
+                t.ppm_min = res.ppm_min;
+                t.ppm_max = res.ppm_max;
+                t.y_min = res.y_min;
+                t.y_max = res.y_max;
             }
-            self.plot_style.ppm_decimals = p_dec;
-            self.plot_style.integral_decimals = i_dec;
+            self.plot_style.ppm_decimals = res.ppm_decimals;
+            self.plot_style.integral_decimals = res.integral_decimals;
+            self.plot_style.auto_ticks = res.auto_ticks;
+            self.plot_style.tick_major = res.tick_major;
+            self.plot_style.tick_minor = res.tick_minor;
         }
 
         if let Some((text, center_ppm)) = show_jcoupling_dialog(ctx, &mut self.jcoupling_dialog_state) {
@@ -2038,6 +2084,13 @@ impl eframe::App for ResonaApp {
         } else {
             1.0
         };
+
+        // 印刷ダイアログへ現在のスタイル設定（桁数・目盛り設定）を同期
+        self.print_dialog_state.settings.ppm_decimals = self.plot_style.ppm_decimals;
+        self.print_dialog_state.settings.integral_decimals = self.plot_style.integral_decimals;
+        self.print_dialog_state.settings.auto_ticks = self.plot_style.auto_ticks;
+        self.print_dialog_state.settings.tick_major = self.plot_style.tick_major;
+        self.print_dialog_state.settings.tick_minor = self.plot_style.tick_minor;
 
         show_print_dialog(
             ctx,

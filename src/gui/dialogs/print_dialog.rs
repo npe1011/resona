@@ -33,7 +33,23 @@ pub struct PrintSettings {
     pub info: bool,
     pub jcoupling: bool,
     pub filename: bool,
+    #[serde(default = "default_ppm_decimals")]
+    pub ppm_decimals: usize,
+    #[serde(default = "default_integral_decimals")]
+    pub integral_decimals: usize,
+    #[serde(default = "default_auto_ticks")]
+    pub auto_ticks: bool,
+    #[serde(default = "default_tick_major")]
+    pub tick_major: f64,
+    #[serde(default = "default_tick_minor")]
+    pub tick_minor: usize,
 }
+
+fn default_ppm_decimals() -> usize { 3 }
+fn default_integral_decimals() -> usize { 2 }
+fn default_auto_ticks() -> bool { false }
+fn default_tick_major() -> f64 { 1.0 }
+fn default_tick_minor() -> usize { 10 }
 
 impl Default for PrintSettings {
     fn default() -> Self {
@@ -47,6 +63,11 @@ impl Default for PrintSettings {
             info: true,
             jcoupling: true,
             filename: true,
+            ppm_decimals: 3,
+            integral_decimals: 2,
+            auto_ticks: false,
+            tick_major: 1.0,
+            tick_minor: 10,
         }
     }
 }
@@ -570,7 +591,7 @@ fn render_realtime_preview(
                 (p_min_data, p_max_data, -0.05 * y_max_data, y_max_data * 1.1, plot_rect)
             };
 
-            let preview_bottom_margin = 32.0_f32;
+            let preview_bottom_margin = 44.0_f32;
             let t = PlotTransform::new(plot_rect, p_min, p_max, y_min, y_max)
                 .with_bottom_margin(preview_bottom_margin);
             let axis_y = t.axis_y();
@@ -605,27 +626,39 @@ fn render_realtime_preview(
 
             // X軸目盛り & PPM ラベル
             let span = (p_max - p_min).abs();
-            let tick_interval = if span > 100.0 {
-                20.0
-            } else if span > 40.0 {
-                10.0
-            } else if span > 15.0 {
-                5.0
-            } else if span > 6.0 {
-                1.0
-            } else if span > 2.0 {
-                0.5
+            let (tick_interval, tick_dec) = if !settings.auto_ticks && settings.tick_major > 1e-4 {
+                let s = settings.tick_major;
+                let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
+                (s, d)
             } else {
-                0.1
+                let s = if span > 300.0 {
+                    20.0
+                } else if span > 25.0 {
+                    10.0
+                } else if span > 12.0 {
+                    2.0
+                } else if span > 4.0 {
+                    1.0
+                } else if span > 1.5 {
+                    0.5
+                } else {
+                    0.1
+                };
+                let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
+                (s, d)
             };
 
             let p_low = p_min.min(p_max);
             let p_high = p_min.max(p_max);
+            let minor_n = settings.tick_minor.max(1);
+            let minor_step = tick_interval / (minor_n as f64);
+
             let first_tick = (p_low / tick_interval).ceil() * tick_interval;
             let mut cur_tick = first_tick;
             while cur_tick <= p_high {
                 let tx = t.ppm_to_screen_x(cur_tick);
                 if tx >= plot_rect.min.x && tx <= plot_rect.max.x {
+                    // 主目盛り線
                     painter.line_segment(
                         [Pos2::new(tx, axis_y), Pos2::new(tx, axis_y + 3.0)],
                         Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 40)),
@@ -633,11 +666,28 @@ fn render_realtime_preview(
                     painter.text(
                         Pos2::new(tx, axis_y + 4.0),
                         Align2::CENTER_TOP,
-                        format!("{:.1}", cur_tick),
+                        format!("{:.1$}", cur_tick, tick_dec),
                         FontId::new(7.5, FontFamily::Proportional),
                         Color32::from_rgb(50, 50, 50),
                     );
                 }
+
+                // サブ目盛り (StepをN分割した目盛りマーク、数字なし)
+                if minor_n > 1 {
+                    for m in 1..minor_n {
+                        let sub_tick = cur_tick + (m as f64) * minor_step;
+                        if sub_tick <= p_high {
+                            let stx = t.ppm_to_screen_x(sub_tick);
+                            if stx >= plot_rect.min.x && stx <= plot_rect.max.x {
+                                painter.line_segment(
+                                    [Pos2::new(stx, axis_y), Pos2::new(stx, axis_y + 1.5)],
+                                    Stroke::new(0.8_f32, Color32::from_rgb(100, 100, 100)),
+                                );
+                            }
+                        }
+                    }
+                }
+
                 cur_tick += tick_interval;
             }
 
@@ -675,7 +725,7 @@ fn render_realtime_preview(
                                 painter.text(
                                     Pos2::new(mid_x, min_y - 2.0),
                                     Align2::CENTER_BOTTOM,
-                                    format!("{:.2}", res.normalized_value),
+                                    format!("{:.1$}", res.normalized_value, settings.integral_decimals),
                                     FontId::new(7.5, FontFamily::Proportional),
                                     Color32::from_rgb(225, 29, 72),
                                 );
@@ -699,7 +749,7 @@ fn render_realtime_preview(
                         .map(|p| t.ppm_to_screen_x(p.ppm))
                         .collect();
 
-                    let min_gap = 10.5_f32;
+                    let min_gap = 8.5_f32;
                     for _ in 0..200 {
                         let mut moved = false;
                         for i in 1..text_x.len() {
@@ -714,23 +764,32 @@ fn render_realtime_preview(
                         if !moved { break; }
                     }
 
-                    let y_elbow = axis_y + 8.0;
-                    let y_text_start = axis_y + 14.0;
+                    let y_elbow = axis_y + 11.0;
+                    let y_text_start = axis_y + 22.0;
                     let font_peak = FontId::new(6.5, FontFamily::Proportional);
 
                     for (i, pk) in visible_peaks.iter().enumerate() {
                         let px = t.ppm_to_screen_x(pk.ppm);
-                        let tx = text_x[i].clamp(plot_rect.min.x + 2.0, plot_rect.max.x - 2.0);
+                        let tx = text_x[i];
+
+                        // 枠外にはみ出るものはスキップ (omit)
+                        if tx < plot_rect.min.x + 2.0 || tx > plot_rect.max.x - 2.0 || px < plot_rect.min.x || px > plot_rect.max.x {
+                            continue;
+                        }
+
+                        // ピーク位置からベースラインの上約 6px 付近から開始し、X軸を突き抜けて y_elbow まで伸ばす (GUI準拠)
+                        let pk_sy = t.data_to_screen(pk.ppm, pk.intensity).y;
+                        let y_start = (axis_y - 6.0).max(pk_sy + 1.5);
 
                         let stroke_lead = Stroke::new(0.7_f32, Color32::from_rgb(150, 150, 150));
-                        painter.line_segment([Pos2::new(px, axis_y), Pos2::new(px, y_elbow)], stroke_lead);
-                        painter.line_segment([Pos2::new(px, y_elbow), Pos2::new(tx, y_text_start - 2.0)], stroke_lead);
-                        painter.line_segment([Pos2::new(tx, y_text_start - 2.0), Pos2::new(tx, y_text_start)], stroke_lead);
+                        painter.line_segment([Pos2::new(px, y_start), Pos2::new(px, y_elbow)], stroke_lead);
+                        painter.line_segment([Pos2::new(px, y_elbow), Pos2::new(tx, y_text_start - 2.5)], stroke_lead);
+                        painter.line_segment([Pos2::new(tx, y_text_start - 2.5), Pos2::new(tx, y_text_start)], stroke_lead);
 
-                        let val_str = format!("{:.3}", pk.ppm);
+                        let val_str = format!("{:.1$}", pk.ppm, settings.ppm_decimals);
                         let galley = painter.layout_no_wrap(val_str, font_peak.clone(), Color32::from_rgb(20, 20, 20));
                         let text_h = galley.size().y;
-                        let pos = Pos2::new(tx + text_h * 0.5, y_text_start + 1.0);
+                        let pos = Pos2::new(tx + text_h * 0.5, y_text_start + 2.0);
                         let ts = egui::epaint::TextShape::new(pos, galley, Color32::from_rgb(20, 20, 20))
                             .with_angle(std::f32::consts::FRAC_PI_2);
                         painter.add(ts);
@@ -836,7 +895,7 @@ fn render_realtime_preview(
                                             painter.text(
                                                 top_pos,
                                                 Align2::CENTER_BOTTOM,
-                                                format!("{:.2}", res.normalized_value),
+                                                format!("{:.1$}", res.normalized_value, settings.integral_decimals),
                                                 FontId::new(7.0, FontFamily::Proportional),
                                                 Color32::from_rgb(225, 29, 72),
                                             );
@@ -879,7 +938,13 @@ fn render_realtime_preview(
 
                                 for (i, pk) in sorted_peaks.iter().enumerate() {
                                     let px = mv_ppm_to_x(pk.ppm);
-                                    let tx = screen_x_list[i].clamp(inset_rect.min.x + 3.0, inset_rect.max.x - 3.0);
+                                    let tx = screen_x_list[i];
+
+                                    // 枠外にはみ出るものはスキップ (omit)
+                                    if tx < inset_rect.min.x + 3.0 || tx > inset_rect.max.x - 3.0 || px < inset_rect.min.x || px > inset_rect.max.x {
+                                        continue;
+                                    }
+
                                     let py = mv_y_to_y(pk.intensity);
                                     let clearance = 6.0_f32;
                                     let line_start_y = (py - clearance).clamp(mv_elbow_y + 2.0, inset_axis_y - 2.0);
@@ -891,7 +956,7 @@ fn render_realtime_preview(
                                         painter.line_segment([Pos2::new(tx, text_bottom_y + 2.0), Pos2::new(tx, text_bottom_y)], stroke_lead);
                                     }
 
-                                    let val_str = format!("{:.3}", pk.ppm);
+                                    let val_str = format!("{:.1$}", pk.ppm, settings.ppm_decimals);
                                     let galley = painter.layout_no_wrap(val_str, mv_font_peak.clone(), Color32::from_rgb(20, 20, 20));
                                     let text_h = galley.size().y;
                                     let pos = Pos2::new(tx + text_h * 0.5, mv_text_start_y);
@@ -1272,7 +1337,7 @@ fn generate_plot_svg_content(
         (p_min_data, p_max_data, -0.05 * y_max_data, y_max_data * 1.1, plot_w, plot_h, 0.0, 0.0)
     };
 
-    let bottom_margin = 55.0;
+    let bottom_margin = 65.0;
     let actual_plot_h = (plot_h - bottom_margin).max(10.0);
     let axis_y = plot_y + actual_plot_h;
 
@@ -1326,19 +1391,30 @@ fn generate_plot_svg_content(
     ));
 
     let span = (p_max - p_min).abs();
-    let tick_interval = if span > 100.0 {
-        20.0
-    } else if span > 40.0 {
-        10.0
-    } else if span > 15.0 {
-        5.0
-    } else if span > 6.0 {
-        1.0
-    } else if span > 2.0 {
-        0.5
+    let (tick_interval, tick_dec) = if !settings.auto_ticks && settings.tick_major > 1e-4 {
+        let s = settings.tick_major;
+        let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
+        (s, d)
     } else {
-        0.1
+        let s = if span > 300.0 {
+            20.0
+        } else if span > 25.0 {
+            10.0
+        } else if span > 12.0 {
+            2.0
+        } else if span > 4.0 {
+            1.0
+        } else if span > 1.5 {
+            0.5
+        } else {
+            0.1
+        };
+        let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
+        (s, d)
     };
+
+    let minor_n = settings.tick_minor.max(1);
+    let minor_step = tick_interval / (minor_n as f64);
 
     let first_tick = (p_low / tick_interval).ceil() * tick_interval;
     let mut cur_tick = first_tick;
@@ -1347,15 +1423,36 @@ fn generate_plot_svg_content(
         if tx >= plot_x && tx <= plot_x + plot_w {
             svg.push_str(&format!(
                 r##"<line x1="{x:.1}" y1="{y1}" x2="{x:.1}" y2="{y2}" stroke="#212529" stroke-width="1.0" />
-<text x="{x:.1}" y="{ty}" font-size="9" text-anchor="middle" font-family="sans-serif" fill="#212529">{val:.1}</text>
+<text x="{x:.1}" y="{ty}" font-size="9" text-anchor="middle" font-family="sans-serif" fill="#212529">{val:.prec$}</text>
 "##,
                 x = tx,
                 y1 = axis_y,
                 y2 = axis_y + 4.0,
                 ty = axis_y + 14.0,
                 val = cur_tick,
+                prec = tick_dec,
             ));
         }
+
+        // サブ目盛り (N分割、数字なし)
+        if minor_n > 1 {
+            for m in 1..minor_n {
+                let sub_tick = cur_tick + (m as f64) * minor_step;
+                if sub_tick <= p_high {
+                    let stx = ppm_to_x(sub_tick);
+                    if stx >= plot_x && stx <= plot_x + plot_w {
+                        svg.push_str(&format!(
+                            r##"<line x1="{x:.1}" y1="{y1}" x2="{x:.1}" y2="{y2}" stroke="#6c757d" stroke-width="0.6" />
+"##,
+                            x = stx,
+                            y1 = axis_y,
+                            y2 = axis_y + 2.0,
+                        ));
+                    }
+                }
+            }
+        }
+
         cur_tick += tick_interval;
     }
 
@@ -1380,7 +1477,7 @@ fn generate_plot_svg_content(
                 .map(|p| ppm_to_x(p.ppm))
                 .collect();
 
-            let min_gap = 12.0;
+            let min_gap = 10.0;
             for _ in 0..200 {
                 let mut moved = false;
                 for i in 1..text_x.len() {
@@ -1395,27 +1492,36 @@ fn generate_plot_svg_content(
                 if !moved { break; }
             }
 
-            let y_elbow = axis_y + 10.0;
-            let y_text_start = axis_y + 18.0;
+            let y_elbow = axis_y + 15.0;
+            let y_text_start = axis_y + 28.0;
 
             for (i, pk) in visible_peaks.iter().enumerate() {
                 let px = ppm_to_x(pk.ppm);
-                let tx = text_x[i].clamp(plot_x + 2.0, plot_x + plot_w - 2.0);
+                let tx = text_x[i];
+
+                // 枠外にはみ出るものはスキップ (omit)
+                if tx < plot_x + 2.0 || tx > plot_x + plot_w - 2.0 || px < plot_x || px > plot_x + plot_w {
+                    continue;
+                }
+
+                let pk_sy = y_to_y(pk.intensity);
+                let y_start = (axis_y - 8.0).max(pk_sy + 2.0);
 
                 svg.push_str(&format!(
-                    r##"<line x1="{px:.1}" y1="{axis_y:.1}" x2="{px:.1}" y2="{y_elbow:.1}" stroke="#888888" stroke-width="0.8" />
+                    r##"<line x1="{px:.1}" y1="{y_start:.1}" x2="{px:.1}" y2="{y_elbow:.1}" stroke="#888888" stroke-width="0.8" />
 <line x1="{px:.1}" y1="{y_elbow:.1}" x2="{tx:.1}" y2="{y_text_start_pre:.1}" stroke="#888888" stroke-width="0.8" />
 <line x1="{tx:.1}" y1="{y_text_start_pre:.1}" x2="{tx:.1}" y2="{y_text_start:.1}" stroke="#888888" stroke-width="0.8" />
-<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.3}</text></g>
+<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7.5" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.prec$}</text></g>
 "##,
                     px = px,
-                    axis_y = axis_y,
+                    y_start = y_start,
                     y_elbow = y_elbow,
-                    y_text_start_pre = y_text_start - 2.0,
+                    y_text_start_pre = y_text_start - 3.0,
                     tx = tx,
                     y_text_start = y_text_start,
                     ty = y_text_start + 2.0,
                     val = pk.ppm,
+                    prec = settings.ppm_decimals,
                 ));
             }
         }
@@ -1463,12 +1569,13 @@ fn generate_plot_svg_content(
 
                         svg.push_str(&format!(
                             r##"<path d="{}" stroke="#e11d48" stroke-width="1.4" fill="none" />
-<text x="{mx:.1}" y="{ty:.1}" font-size="9" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.2}</text>
+<text x="{mx:.1}" y="{ty:.1}" font-size="9" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.prec$}</text>
 "##,
                             curve_d,
                             mx = (sx_start + sx_end) * 0.5,
                             ty = min_sy - 3.0,
                             val = res.normalized_value,
+                            prec = settings.integral_decimals,
                         ));
                     }
                 }
@@ -1594,11 +1701,12 @@ fn generate_plot_svg_content(
                                     let tx = mv_ppm_to_x(mid_p);
                                     let ty = mv_y_to_y(y_min_adj + 0.70 * h_diff);
                                     svg.push_str(&format!(
-                                        r##"<text x="{tx:.1}" y="{ty:.1}" font-size="8" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.2}</text>
+                                        r##"<text x="{tx:.1}" y="{ty:.1}" font-size="8" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.prec$}</text>
 "##,
                                         tx = tx,
                                         ty = ty,
                                         val = res.normalized_value,
+                                        prec = settings.integral_decimals,
                                     ));
                                 }
                             }
@@ -1617,7 +1725,7 @@ fn generate_plot_svg_content(
                         sorted_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
 
                         let mut mv_text_x: Vec<f64> = sorted_peaks.iter().map(|p| mv_ppm_to_x(p.ppm)).collect();
-                        let min_gap = 8.0;
+                        let min_gap = 7.5;
                         for _ in 0..100 {
                             let mut moved = false;
                             for i in 1..mv_text_x.len() {
@@ -1639,7 +1747,13 @@ fn generate_plot_svg_content(
 
                         for (i, pk) in sorted_peaks.iter().enumerate() {
                             let px = mv_ppm_to_x(pk.ppm);
-                            let tx = mv_text_x[i].clamp(inset_x + 4.0, inset_x + inset_w - 4.0);
+                            let tx = mv_text_x[i];
+
+                            // 枠外にはみ出るものはスキップ (omit)
+                            if tx < inset_x + 3.0 || tx > inset_x + inset_w - 3.0 || px < inset_x || px > inset_x + inset_w {
+                                continue;
+                            }
+
                             let py = mv_y_to_y(pk.intensity);
                             let clearance = 12.0;
                             let line_start_y = (py - clearance).clamp(mv_elbow_y + 2.0, inset_axis_y - 2.0);
@@ -1660,11 +1774,12 @@ fn generate_plot_svg_content(
                             }
 
                             svg.push_str(&format!(
-                                r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="6" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.3}</text></g>
+                                r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="6" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.prec$}</text></g>
 "##,
                                 tx = tx,
                                 ty = mv_text_start_y,
                                 val = pk.ppm,
+                                prec = settings.ppm_decimals,
                             ));
                         }
                     }
@@ -2061,7 +2176,7 @@ fn print_windows_native(
             (p_min_data, p_max_data, -0.05 * y_max_data, y_max_data * 1.1, plot_w as f64, plot_h as f64, 0.0, 0.0)
         };
 
-        let bottom_margin = dpi_y * 45 / 72;
+        let bottom_margin = dpi_y * 58 / 72;
         let actual_plot_h = plot_h - bottom_margin;
         let axis_y = cur_y + actual_plot_h;
 
@@ -2116,19 +2231,61 @@ fn print_windows_native(
         unsafe { SetTextColor(hdc, rgb(33, 37, 41)) };
 
         let span = (p_max - p_min).abs();
-        let tick_interval = if span > 100.0 { 20.0 } else if span > 40.0 { 10.0 } else if span > 15.0 { 5.0 } else if span > 6.0 { 1.0 } else if span > 2.0 { 0.5 } else { 0.1 };
+        let (tick_interval, tick_dec) = if !settings.auto_ticks && settings.tick_major > 1e-4 {
+            let s = settings.tick_major;
+            let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
+            (s, d)
+        } else {
+            let s = if span > 300.0 {
+                20.0
+            } else if span > 25.0 {
+                10.0
+            } else if span > 12.0 {
+                2.0
+            } else if span > 4.0 {
+                1.0
+            } else if span > 1.5 {
+                0.5
+            } else {
+                0.1
+            };
+            let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
+            (s, d)
+        };
+
+        let minor_n = settings.tick_minor.max(1);
+        let minor_step = tick_interval / (minor_n as f64);
+
         let first_tick = (p_low / tick_interval).ceil() * tick_interval;
         let mut cur_tick = first_tick;
         while cur_tick <= p_high {
             let tx = ppm_to_x(cur_tick);
             if tx >= margin_x && tx <= margin_x + plot_w {
                 unsafe {
+                    // 主目盛り線 (4pt)
                     MoveToEx(hdc, tx, axis_y, std::ptr::null_mut());
                     LineTo(hdc, tx, axis_y + (dpi_y * 4 / 72));
-                    let val_str = to_wide(&format!("{:.1}", cur_tick));
+                    let val_str = to_wide(&format!("{:.1$}", cur_tick, tick_dec));
                     TextOutW(hdc, tx - (dpi_x * 8 / 72), axis_y + (dpi_y * 6 / 72), val_str.as_ptr(), (val_str.len() - 1) as i32);
                 }
             }
+
+            // サブ目盛り (N分割、2pt、数字なし)
+            if minor_n > 1 {
+                for m in 1..minor_n {
+                    let sub_tick = cur_tick + (m as f64) * minor_step;
+                    if sub_tick <= p_high {
+                        let stx = ppm_to_x(sub_tick);
+                        if stx >= margin_x && stx <= margin_x + plot_w {
+                            unsafe {
+                                MoveToEx(hdc, stx, axis_y, std::ptr::null_mut());
+                                LineTo(hdc, stx, axis_y + (dpi_y * 2 / 72));
+                            }
+                        }
+                    }
+                }
+            }
+
             cur_tick += tick_interval;
         }
 
@@ -2151,7 +2308,7 @@ fn print_windows_native(
 
             if !visible_peaks.is_empty() {
                 let mut text_x: Vec<i32> = visible_peaks.iter().map(|p| ppm_to_x(p.ppm)).collect();
-                let min_gap = dpi_x * 10 / 72;
+                let min_gap = dpi_x * 8 / 72;
                 for _ in 0..200 {
                     let mut moved = false;
                     for i in 1..text_x.len() {
@@ -2166,8 +2323,8 @@ fn print_windows_native(
                     if !moved { break; }
                 }
 
-                let y_elbow = axis_y + (dpi_y * 8 / 72);
-                let y_text_start = axis_y + (dpi_y * 14 / 72);
+                let y_elbow = axis_y + (dpi_y * 15 / 72);
+                let y_text_start = axis_y + (dpi_y * 28 / 72);
 
                 let lead_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(150, 150, 150)) };
                 let rot_font = make_font(6.5, false, 270);
@@ -2181,16 +2338,24 @@ fn print_windows_native(
                 let old_lead = unsafe { SelectObject(hdc, lead_pen) };
                 for (i, pk) in visible_peaks.iter().enumerate() {
                     let px = ppm_to_x(pk.ppm);
-                    let tx = text_x[i].clamp(margin_x + 2, margin_x + plot_w - 2);
+                    let tx = text_x[i];
+
+                    // 枠外にはみ出るものはスキップ (omit)
+                    if tx < margin_x + 2 || tx > margin_x + plot_w - 2 || px < margin_x || px > margin_x + plot_w {
+                        continue;
+                    }
+
+                    let pk_sy = y_to_y(pk.intensity);
+                    let y_start = (axis_y - (dpi_y * 8 / 72)).max(pk_sy + (dpi_y * 2 / 72));
 
                     unsafe {
-                        MoveToEx(hdc, px, axis_y, std::ptr::null_mut());
+                        MoveToEx(hdc, px, y_start, std::ptr::null_mut());
                         LineTo(hdc, px, y_elbow);
-                        LineTo(hdc, tx, y_text_start - 2);
+                        LineTo(hdc, tx, y_text_start - (dpi_y * 3 / 72));
                         LineTo(hdc, tx, y_text_start);
                     }
 
-                    let val_str = to_wide(&format!("{:.3}", pk.ppm));
+                    let val_str = to_wide(&format!("{:.1$}", pk.ppm, settings.ppm_decimals));
                     let draw_x = tx + tm.tmHeight / 2;
                     let draw_y = y_text_start + (dpi_y * 2 / 72);
                     unsafe {
@@ -2246,7 +2411,7 @@ fn print_windows_native(
                             }
 
                             let mid_x = (sx_start + sx_end) / 2;
-                            let val_str = to_wide(&format!("{:.2}", res.normalized_value));
+                            let val_str = to_wide(&format!("{:.1$}", res.normalized_value, settings.integral_decimals));
                             unsafe {
                                 TextOutW(hdc, mid_x - (dpi_x * 8 / 72), min_sy - (dpi_y * 10 / 72), val_str.as_ptr(), (val_str.len() - 1) as i32);
                             }
@@ -2380,7 +2545,7 @@ fn print_windows_native(
                                         let mid_p = (i_min.max(mv_src_min) + i_max.min(mv_src_max)) * 0.5;
                                         let tx = mv_ppm_to_x(mid_p);
                                         let ty = mv_y_to_y(y_min_adj + 0.70 * h_diff);
-                                        let val_str = to_wide(&format!("{:.2}", res.normalized_value));
+                                        let val_str = to_wide(&format!("{:.1$}", res.normalized_value, settings.integral_decimals));
                                         unsafe {
                                             TextOutW(hdc, tx - (dpi_x * 8 / 72), ty, val_str.as_ptr(), (val_str.len() - 1) as i32);
                                         }
@@ -2440,7 +2605,13 @@ fn print_windows_native(
 
                             for (i, pk) in sorted_peaks.iter().enumerate() {
                                 let px = mv_ppm_to_x(pk.ppm);
-                                let tx = mv_text_x[i].clamp(inset_x + 4, inset_x + inset_w - 4);
+                                let tx = mv_text_x[i];
+
+                                // 枠外にはみ出るものはスキップ (omit)
+                                if tx < inset_x + 3 || tx > inset_x + inset_w - 3 || px < inset_x || px > inset_x + inset_w {
+                                    continue;
+                                }
+
                                 let py = mv_y_to_y(pk.intensity);
                                 let clearance = dpi_y * 12 / 72;
                                 let line_start_y = (py - clearance).clamp(mv_elbow_y + 2, inset_axis_y - 2);
@@ -2454,7 +2625,7 @@ fn print_windows_native(
                                     }
                                 }
 
-                                let val_str = to_wide(&format!("{:.3}", pk.ppm));
+                                let val_str = to_wide(&format!("{:.1$}", pk.ppm, settings.ppm_decimals));
                                 let draw_x = tx + mv_tm.tmHeight / 2;
                                 let draw_y = mv_text_start_y;
                                 unsafe {
