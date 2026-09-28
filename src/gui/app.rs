@@ -254,6 +254,8 @@ impl ResonaApp {
         let p = path.as_ref();
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
 
+        let is_raw_data = ext == "jdf";
+
         let res = match ext.as_str() {
             "jdf" => self.project.load_jdf(p, None),
             "rsn" | "ez" => self.project.load_rsn(p),
@@ -281,6 +283,13 @@ impl ResonaApp {
                 self.zoom_history.clear();
                 self.reset_zoom();
                 self.status_message = format!("Loaded {}", p.display());
+
+                // 生データ読み込み時はFTダイアログを開き、パラメータを選べるようにする
+                if is_raw_data {
+                    self.ft_dialog_state.settings = self.project.state.ft_settings.clone();
+                    self.ft_dialog_state.reset_preview();
+                    self.ft_dialog_state.open = true;
+                }
             }
             Err(e) => {
                 self.status_message = format!("Error loading file {}", e);
@@ -667,6 +676,8 @@ impl eframe::App for ResonaApp {
                         }
                         ui.separator();
                         if ui.button("Fourier Transform Settings...").clicked() {
+                            self.ft_dialog_state.settings = self.project.state.ft_settings.clone();
+                            self.ft_dialog_state.reset_preview();
                             self.ft_dialog_state.open = true;
                             ui.close_menu();
                         }
@@ -696,6 +707,8 @@ impl eframe::App for ResonaApp {
                 match show_mode_bar(ui, &mut self.mode) {
                     ModeBarEvent::None => {}
                     ModeBarEvent::OpenReFt => {
+                        self.ft_dialog_state.settings = self.project.state.ft_settings.clone();
+                        self.ft_dialog_state.reset_preview();
                         self.ft_dialog_state.open = true;
                     }
                     ModeBarEvent::OpenDisplay => {
@@ -1959,7 +1972,15 @@ impl eframe::App for ResonaApp {
             });
 
         // 7. ダイアログの表示と処理
-        if let Some(ft_settings) = show_ft_dialog(ctx, &mut self.ft_dialog_state) {
+        if let Some(ft_settings) = show_ft_dialog(
+            ctx,
+            &mut self.ft_dialog_state,
+            self.project.fid_raw.as_ref(),
+            Some(&self.project.metadata),
+            self.project.metadata.digital_filter_delay,
+            self.project.state.p0,
+            self.project.state.p1,
+        ) {
             if let Some(ref fid_raw) = self.project.fid_raw {
                 let raw_fid = crate::core::RawFid {
                     data: fid_raw.clone(),
@@ -1973,6 +1994,9 @@ impl eframe::App for ResonaApp {
                         self.project.complex_spectrum_unphased = Some(processed.complex_spectrum_unphased);
                         self.project.invalidate_cache();
                         self.project.state.ft_settings = ft_settings;
+                        if self.project.state.ft_settings.auto_phase {
+                            self.project.auto_phase();
+                        }
                         self.project.push_history();
                         self.reset_zoom();
                         self.status_message = "Fourier Transform applied with updated settings".to_string();
