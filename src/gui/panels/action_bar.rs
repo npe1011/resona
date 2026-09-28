@@ -150,6 +150,75 @@ fn auto_button(ui: &mut Ui, text: &str, min_width: f32) -> egui::Response {
     ui.add(btn)
 }
 
+/// スライダー微調整用の連続変化対応ボタン (< / >)
+/// クリック時はbase_step分変化し、押し続けると指定時間で加速したのち等速で動き続ける
+fn continuous_step_button(
+    ui: &mut Ui,
+    id_salt: &str,
+    text: &str,
+    base_step: f64,
+    min_speed: f64,
+    max_speed: f64,
+    accel_duration: f64,
+) -> f64 {
+    let id = ui.make_persistent_id(id_salt);
+    let rich = RichText::new(text).strong().size(11.0).color(Color32::from_rgb(73, 80, 87));
+    let btn = Button::new(rich)
+        .min_size(vec2(18.0, 22.0))
+        .fill(Color32::WHITE)
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 218)))
+        .rounding(3.0_f32)
+        .sense(egui::Sense::click_and_drag());
+    let response = ui.add(btn);
+
+    let active_key = egui::Id::new("continuous_step_active_id");
+    let active_val: Option<u64> = ui.data_mut(|d| d.get_temp(active_key));
+    let my_val = id.value();
+    let is_primary_down = ui.input(|i| i.pointer.primary_down());
+
+    // このボタン上で押された瞬間の検知
+    if (response.is_pointer_button_down_on() || (response.hovered() && ui.input(|i| i.pointer.primary_pressed())))
+        && active_val.is_none()
+    {
+        ui.data_mut(|d| d.insert_temp(active_key, my_val));
+    }
+
+    let is_this_active = active_val == Some(my_val);
+    let dt = (ui.input(|i| i.stable_dt) as f64).min(0.1);
+    let mut delta = 0.0_f64;
+
+    if is_this_active && is_primary_down {
+        ui.ctx().request_repaint();
+        let hold_time: f64 = ui.data_mut(|d| d.get_temp::<f64>(id).unwrap_or(0.0));
+
+        if hold_time == 0.0 {
+            // 初回押下フレーム: 1ステップ分適用
+            delta = base_step;
+            ui.data_mut(|d| d.insert_temp(id, 0.0001_f64));
+        } else {
+            let next_hold = hold_time + dt;
+            ui.data_mut(|d| d.insert_temp(id, next_hold));
+
+            // ディレイ 0.25秒後から加速・等速フェーズ
+            const DELAY: f64 = 0.25;
+            if next_hold > DELAY {
+                let t = next_hold - DELAY;
+                // accel_duration 秒間で min_speed から max_speed まで加速し、以降は等速運動
+                let progress = (t / accel_duration.max(0.001)).clamp(0.0, 1.0);
+                let speed = min_speed + (max_speed - min_speed) * progress;
+                delta = speed * dt;
+            }
+        }
+    } else {
+        if is_this_active {
+            ui.data_mut(|d| d.remove_temp::<u64>(active_key));
+        }
+        ui.data_mut(|d| d.remove_temp::<f64>(id));
+    }
+
+    delta
+}
+
 /// ezNMR 2段目ツールバーの描画 (左: 常駐ZOOMフレーム, 右: コンテキストフレーム)
 pub fn show_action_bar(
     ui: &mut Ui,
@@ -252,13 +321,35 @@ pub fn show_action_bar(
                                     event = ActionEvent::AutoPhase;
                                 }
 
+                                ui.separator();
+
                                 ui.label(RichText::new("P0").size(12.0));
                                 ui.add(DragValue::new(p0).speed(0.1).suffix("°"));
+                                let p0_dec = continuous_step_button(ui, "p0_dec", "<", 0.5, 3.0, 30.0, 1.0);
+                                if p0_dec > 0.0 {
+                                    *p0 = (*p0 - p0_dec).clamp(-180.0, 180.0);
+                                }
                                 ui.add(Slider::new(p0, -180.0..=180.0).show_value(false));
+                                let p0_inc = continuous_step_button(ui, "p0_inc", ">", 0.5, 3.0, 30.0, 1.0);
+                                if p0_inc > 0.0 {
+                                    *p0 = (*p0 + p0_inc).clamp(-180.0, 180.0);
+                                }
+
+                                ui.separator();
 
                                 ui.label(RichText::new("P1").size(12.0));
                                 ui.add(DragValue::new(p1).speed(0.5).suffix("°"));
+                                let p1_dec = continuous_step_button(ui, "p1_dec", "<", 1.0, 6.0, 60.0, 1.0);
+                                if p1_dec > 0.0 {
+                                    *p1 = (*p1 - p1_dec).clamp(-360.0, 360.0);
+                                }
                                 ui.add(Slider::new(p1, -360.0..=360.0).show_value(false));
+                                let p1_inc = continuous_step_button(ui, "p1_inc", ">", 1.0, 6.0, 60.0, 1.0);
+                                if p1_inc > 0.0 {
+                                    *p1 = (*p1 + p1_inc).clamp(-360.0, 360.0);
+                                }
+
+                                ui.separator();
 
                                 if light_button(ui, "Reset", false, 46.0).clicked() {
                                     *active_zoom = None;
