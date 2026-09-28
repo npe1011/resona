@@ -39,7 +39,6 @@ pub fn show_side_panel(
             }),
             ("Group Delay", if ft_settings.remove_digital_filter { "Removed".to_string() } else { "Kept".to_string() }),
             ("Filter Delay", metadata.digital_filter_delay.map(|d| format!("{:.4} pts", d)).unwrap_or_else(|| "-".to_string())),
-            ("Auto Phase", if ft_settings.auto_phase { "Yes".to_string() } else { "No".to_string() }),
         ]);
 
         ui.add_space(2.0);

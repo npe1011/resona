@@ -2089,8 +2089,6 @@ impl eframe::App for ResonaApp {
             self.project.fid_raw.as_ref(),
             Some(&self.project.metadata),
             self.project.metadata.digital_filter_delay,
-            self.project.state.p0,
-            self.project.state.p1,
         ) {
             if let Some(ref fid_raw) = self.project.fid_raw {
                 let raw_fid = crate::core::RawFid {
@@ -2098,19 +2096,20 @@ impl eframe::App for ResonaApp {
                     metadata: self.project.metadata.clone(),
                     group_delay: self.project.metadata.digital_filter_delay,
                 };
-                match crate::core::process_raw_fid(&raw_fid, &ft_settings, self.project.state.p0, self.project.state.p1) {
+                match crate::core::process_raw_fid(&raw_fid, &ft_settings, 0.0, 0.0) {
                     Ok(processed) => {
                         self.project.ppm = Some(processed.ppm);
-                        self.project.spectrum_real = Some(processed.spectrum_real);
                         self.project.complex_spectrum_unphased = Some(processed.complex_spectrum_unphased);
-                        self.project.invalidate_cache();
                         self.project.state.ft_settings = ft_settings;
-                        if self.project.state.ft_settings.auto_phase {
-                            self.project.auto_phase();
-                        }
+                        self.project.baseline_array = None;
+                        self.project.state.baseline_method = crate::core::baseline::BaselineMethod::None;
+                        self.sync_action_bar_from_project();
+
+                        // フロント側から自動位相補正を自動実行
+                        let (p0, p1) = self.project.auto_phase();
                         self.project.push_history();
                         self.reset_zoom();
-                        self.status_message = "Fourier Transform applied with updated settings".to_string();
+                        self.status_message = format!("Fourier Transform applied (Autophased: P0={:.2}°, P1={:.2}°)", p0, p1);
                     }
                     Err(e) => {
                         self.status_message = format!("FT error {}", e);

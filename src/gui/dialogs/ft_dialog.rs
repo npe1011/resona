@@ -6,7 +6,8 @@ use ndarray::Array1;
 use num_complex::Complex64;
 
 use crate::core::{
-    compute_window_curve, process_raw_fid, AcquisitionMetadata, FtSettings, RawFid, WindowFunction,
+    apply_phase_and_extract_real, autophase_acme, compute_window_curve, process_raw_fid,
+    AcquisitionMetadata, FtSettings, RawFid, WindowFunction,
 };
 
 pub struct FtDialogState {
@@ -334,15 +335,13 @@ pub fn show_ft_dialog(
     fid_raw: Option<&Array1<Complex64>>,
     metadata: Option<&AcquisitionMetadata>,
     group_delay: Option<f64>,
-    p0: f64,
-    p1: f64,
 ) -> Option<FtSettings> {
     let mut applied_settings = None;
     if !state.open {
         return None;
     }
 
-    // 設定変更時または初回にプレビューを再計算
+    // 設定変更時または初回にプレビューを再計算 (ACME Autophase を自動適用)
     if state.last_settings.as_ref() != Some(&state.settings) || state.preview_spectrum.is_none() {
         if let (Some(fid), Some(meta)) = (fid_raw, metadata) {
             let raw = RawFid {
@@ -350,9 +349,15 @@ pub fn show_ft_dialog(
                 metadata: meta.clone(),
                 group_delay,
             };
-            if let Ok(processed) = process_raw_fid(&raw, &state.settings, p0, p1) {
+            if let Ok(processed) = process_raw_fid(&raw, &state.settings, 0.0, 0.0) {
+                let (prev_p0, prev_p1) = autophase_acme(&processed.complex_spectrum_unphased);
+                let preview_real = apply_phase_and_extract_real(
+                    &processed.complex_spectrum_unphased,
+                    prev_p0,
+                    prev_p1,
+                );
                 state.preview_ppm = Some(processed.ppm);
-                state.preview_spectrum = Some(processed.spectrum_real);
+                state.preview_spectrum = Some(preview_real);
             }
         }
         state.last_settings = Some(state.settings.clone());
@@ -501,7 +506,6 @@ pub fn show_ft_dialog(
                         ui.set_width(right_panel_w - 10.0);
                         ui.label(RichText::new("Options").strong());
                         ui.checkbox(&mut state.settings.remove_digital_filter, "Remove Digital Filter");
-                        ui.checkbox(&mut state.settings.auto_phase, "Run ACME Autophase");
                     });
 
                     ui.add_space(10.0);

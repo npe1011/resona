@@ -286,10 +286,8 @@ impl Project {
         self.state = ProjectState::default();
         self.state.ft_settings = settings;
 
-        // 初期自動位相補正がONの場合
-        if self.state.ft_settings.auto_phase {
-            self.auto_phase();
-        }
+        // 初期自動位相補正を実行
+        self.auto_phase();
 
         self.invalidate_cache();
         self.history = HistoryManager::new();

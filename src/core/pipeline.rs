@@ -17,8 +17,6 @@ pub struct FtSettings {
     pub zf_factor: usize,
     #[serde(default = "default_true")]
     pub remove_digital_filter: bool,
-    #[serde(default = "default_true")]
-    pub auto_phase: bool,
 }
 
 fn default_zf() -> usize {
@@ -35,7 +33,6 @@ impl Default for FtSettings {
             window: WindowFunction::Exponential { lb: 0.12 },
             zf_factor: 2,
             remove_digital_filter: true,
-            auto_phase: true,
         }
     }
 }

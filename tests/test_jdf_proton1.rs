@@ -30,7 +30,6 @@ fn test_proton1_pipeline() {
         window: WindowFunction::Exponential { lb: 0.12 },
         zf_factor: 4,
         remove_digital_filter: true,
-        auto_phase: false,
     };
 
     let p0 = 35.0;

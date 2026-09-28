@@ -12,7 +12,6 @@ fn test_acme_autophase_proton1() {
         window: WindowFunction::Exponential { lb: 0.12 },
         zf_factor: 4,
         remove_digital_filter: true,
-        auto_phase: false,
     };
     let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0).expect("Process failed");
 
