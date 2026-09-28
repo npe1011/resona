@@ -13,6 +13,7 @@ pub enum ActionEvent {
     ResetPhase,
     ApplyBaseline { log_lambda: f64, p: f64 },
     ClearBaseline,
+    AutoReference,
     ApplyShiftReference { peak_ppm: f64, target_ppm: f64 },
     AutoPeak,
     PickPeaks { threshold: f64 },
@@ -323,6 +324,11 @@ pub fn show_action_bar(
 
                                 ui.label(RichText::new("Target (ppm)").size(12.0));
                                 ui.add(DragValue::new(&mut state.ref_target_ppm).speed(0.01));
+
+                                if light_button(ui, "Auto", false, 46.0).clicked() {
+                                    *active_zoom = None;
+                                    event = ActionEvent::AutoReference;
+                                }
 
                                 if light_button(ui, "Set", state.ref_set_active, 46.0).clicked() {
                                     state.ref_set_active = true;

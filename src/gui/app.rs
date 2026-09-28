@@ -752,6 +752,54 @@ impl eframe::App for ResonaApp {
                 self.project.push_history();
                 self.status_message = "Baseline correction cleared".to_string();
             }
+            ActionEvent::AutoReference => {
+                let target = self.action_state.ref_target_ppm;
+                let nuc = &self.project.metadata.nucleus;
+                let is_1h = nuc.contains("1H") || nuc.is_empty() || nuc.contains("H1");
+                let delta = if is_1h { 0.10 } else { 1.00 };
+                let search_min = target - delta;
+                let search_max = target + delta;
+
+                if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                    let mut best_p = None;
+                    let mut max_val = f64::NEG_INFINITY;
+
+                    for i in 0..ppm.len().min(spec.len()) {
+                        let p = ppm[i];
+                        if p >= search_min && p <= search_max {
+                            let v = spec[i];
+                            if v > max_val {
+                                max_val = v;
+                                best_p = Some(p);
+                            }
+                        }
+                    }
+
+                    let noise = self.project.noise_level();
+                    if let Some(peak_ppm) = best_p {
+                        if max_val > noise * 2.0 {
+                            self.project.set_shift_reference(peak_ppm, target);
+                            self.project.push_history();
+                            self.status_message = format!(
+                                "Auto referenced: {:.3} ppm -> {:.3} ppm (Δ = {:+.3} ppm)",
+                                peak_ppm,
+                                target,
+                                target - peak_ppm
+                            );
+                        } else {
+                            self.status_message = format!(
+                                "Auto reference failed: No significant peak found within ±{:.2} ppm of {:.3} ppm (intensity={:.1}, noise={:.1})",
+                                delta, target, max_val, noise
+                            );
+                        }
+                    } else {
+                        self.status_message = format!(
+                            "Auto reference failed: No data points within ±{:.2} ppm of {:.3} ppm",
+                            delta, target
+                        );
+                    }
+                }
+            }
             ActionEvent::ApplyShiftReference { peak_ppm, target_ppm } => {
                 self.project.set_shift_reference(peak_ppm, target_ppm);
                 self.project.push_history();
@@ -938,6 +986,13 @@ impl eframe::App for ResonaApp {
                             &[]
                         };
 
+                        // Reference モード時のみ基準ピークマーカーを表示
+                        let ref_marker = if self.mode == Some(AppMode::Reference) {
+                            self.project.state.reference_point
+                        } else {
+                            None
+                        };
+
                         paint_spectrum(
                             ui,
                             t,
@@ -958,6 +1013,7 @@ impl eframe::App for ResonaApp {
                             is_thresh_submode,
                             is_integrate_edit_mode,
                             ref_drag_range,
+                            ref_marker,
                             &self.plot_style,
                         );
                     } else {

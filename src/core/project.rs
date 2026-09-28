@@ -82,6 +82,9 @@ pub struct ProjectState {
     pub p1: f64,
     #[serde(default)]
     pub shift_reference: f64,
+    /// 基準ピークの化学シフト (ppm)
+    #[serde(default)]
+    pub reference_point: Option<f64>,
     #[serde(default)]
     pub peak_threshold: Option<f64>,
     #[serde(default)]
@@ -119,6 +122,7 @@ impl Default for ProjectState {
             p0: 0.0,
             p1: 0.0,
             shift_reference: 0.0,
+            reference_point: None,
             peak_threshold: None,
             peaks: Vec::new(),
             integrations: Vec::new(),
@@ -341,6 +345,7 @@ impl Project {
         if let Some(ref mut ppm) = self.ppm {
             *ppm += shift;
             self.state.shift_reference += shift;
+            self.state.reference_point = Some(target_ppm);
 
             // ピークの追従
             for p in &mut self.state.peaks {

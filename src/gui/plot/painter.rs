@@ -67,6 +67,7 @@ pub fn paint_spectrum(
     is_threshold_submode: bool,
     is_integrate_edit_mode: bool,
     ref_drag_range: Option<(f64, f64)>,
+    ref_marker: Option<f64>,
     style: &PlotStyle,
 ) {
     let painter = ui.painter_at(transform.screen_rect);
@@ -87,6 +88,36 @@ pub fn paint_spectrum(
         let sel_rect = Rect::from_min_max(Pos2::new(min_x, rect.min.y), Pos2::new(max_x, axis_y));
         painter.rect_filled(sel_rect, 0.0, Color32::from_rgba_unmultiplied(13, 110, 253, 35));
         painter.rect_stroke(sel_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(13, 110, 253)));
+    }
+
+    // 2.2 Reference 基準ピークの表示 (赤い縦線 + 画面上部の化学シフト値)
+    if let Some(ref_ppm) = ref_marker {
+        let sx = transform.ppm_to_screen_x(ref_ppm);
+        if sx >= rect.min.x && sx <= rect.max.x {
+            // 赤い縦線 (1.2px)
+            let stroke_ref = Stroke::new(1.2_f32, Color32::from_rgb(220, 38, 38));
+            painter.line_segment([Pos2::new(sx, rect.min.y), Pos2::new(sx, axis_y)], stroke_ref);
+
+            // 画面上部の化学シフト値バッジ (白背景 + 赤色枠線 + 赤文字)
+            let label_str = format!("{:.3} ppm", ref_ppm);
+            let font_ref = FontId::new(10.5, FontFamily::Proportional);
+            let text_color = Color32::from_rgb(220, 38, 38);
+            let galley = painter.layout_no_wrap(label_str, font_ref, text_color);
+            let badge_size = galley.size() + vec2(8.0, 4.0);
+            let badge_center = Pos2::new(
+                sx.clamp(rect.min.x + badge_size.x * 0.5 + 4.0, rect.max.x - badge_size.x * 0.5 - 4.0),
+                rect.min.y + 12.0,
+            );
+            let badge_rect = Rect::from_center_size(badge_center, badge_size);
+
+            painter.rect_filled(badge_rect, 3.0, Color32::from_rgba_premultiplied(255, 255, 255, 235));
+            painter.rect_stroke(badge_rect, 3.0, Stroke::new(1.0_f32, text_color));
+            painter.galley(
+                Pos2::new(badge_rect.min.x + 4.0, badge_rect.min.y + 2.0),
+                galley,
+                text_color,
+            );
+        }
     }
 
     // 3. ピーク検出閾値線 (Peak モード時に正負の水平破線を描画)
