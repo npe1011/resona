@@ -117,9 +117,18 @@ impl NmrDataSource for JeolJdfReader {
         let mut acq_time_sec = 0.0;
         let mut relaxation_delay_sec = 0.0;
         let mut pulse_angle_deg = 0.0;
+        let mut pulse_width_us: Option<f64> = None;
+        let mut pulse_power_attenuation_db: Option<f64> = None;
+        let mut pulse_shape = String::new();
+        let mut decoupling = String::new();
+        let mut decoupling_nucleus = String::new();
+        let mut decoupling_sequence = String::new();
         let mut temperature_celsius = 25.0;
+        let mut spin_rate_hz: Option<f64> = None;
         let mut instrument = String::new();
+        let mut probe = String::new();
         let mut experiment = String::new();
+        let mut actual_start_time: Option<f64> = None;
 
         for i in 0..num_params {
             let offset = i * 64;
@@ -164,6 +173,16 @@ impl NmrDataSource for JeolJdfReader {
                     instrument = val_str;
                 } else if name == "experiment" {
                     experiment = val_str;
+                } else if name == "pulse_in_file" {
+                    pulse_shape = val_str;
+                } else if name == "decoupling" {
+                    decoupling = val_str;
+                } else if name == "irr_domain" {
+                    decoupling_nucleus = val_str;
+                } else if name == "irr_noise" {
+                    decoupling_sequence = val_str;
+                } else if name == "probe_attributes" {
+                    probe = val_str;
                 }
             } else {
                 let numeric_val = match val_type {
@@ -203,6 +222,14 @@ impl NmrDataSource for JeolJdfReader {
                         pulse_angle_deg = val;
                     } else if name == "temp_get" {
                         temperature_celsius = val;
+                    } else if name == "actual_start_time" {
+                        actual_start_time = Some(val);
+                    } else if name == "x_pulse" {
+                        pulse_width_us = Some(val);
+                    } else if name == "x_atn" || name == "xatn" {
+                        pulse_power_attenuation_db = Some(val);
+                    } else if name == "spin_get" {
+                        spin_rate_hz = Some(val);
                     }
                 }
             }
@@ -281,8 +308,25 @@ impl NmrDataSource for JeolJdfReader {
             *val -= dc;
         }
 
+        let date_time = if let Some(ts) = actual_start_time {
+            format_jeol_timestamp(ts)
+        } else {
+            let info0 = header_buf[392];
+            let info1 = header_buf[393];
+            let info2 = header_buf[394];
+            let c_year = 1990 + ((info0 >> 1) as i32);
+            let c_month = (((info0 << 3) & 0b00001000) | (info1 >> 5)) as i32;
+            let c_day = (info2 & 0b00011111) as i32;
+            if c_year >= 1990 && c_month >= 1 && c_month <= 12 && c_day >= 1 && c_day <= 31 {
+                format!("{:04}-{:02}-{:02}", c_year, c_month, c_day)
+            } else {
+                String::new()
+            }
+        };
+
         let metadata = AcquisitionMetadata {
             title,
+            date_time,
             experiment,
             solvent,
             nucleus,
@@ -293,8 +337,16 @@ impl NmrDataSource for JeolJdfReader {
             acquisition_time_sec: acq_time_sec,
             relaxation_delay_sec,
             pulse_angle_deg,
+            pulse_width_us,
+            pulse_power_attenuation_db,
+            pulse_shape,
+            decoupling,
+            decoupling_nucleus,
+            decoupling_sequence,
             temperature_celsius,
+            spin_rate_hz,
             instrument,
+            probe,
             digital_filter_delay: group_delay,
             center_ppm,
         };
@@ -352,6 +404,48 @@ pub fn compute_jeol_group_delay(orders_str: &str, factors_str: &str) -> Option<f
     delay /= 2.0;
 
     Some(delay)
+}
+
+/// JEOLエポック (1990-01-01 00:00:00) からの経過秒数を "YYYY-MM-DD HH:MM:SS" 形式にフォーマット
+pub fn format_jeol_timestamp(jeol_seconds: f64) -> String {
+    let total_secs = jeol_seconds as i64;
+    if total_secs <= 0 {
+        return String::new();
+    }
+
+    let days = total_secs / 86400;
+    let rem_secs = total_secs % 86400;
+    let hour = rem_secs / 3600;
+    let min = (rem_secs % 3600) / 60;
+    let sec = rem_secs % 60;
+
+    let mut y = 1990;
+    let mut d = days;
+    loop {
+        let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+        let days_in_year = if is_leap { 366 } else { 365 };
+        if d < days_in_year {
+            break;
+        }
+        d -= days_in_year;
+        y += 1;
+    }
+
+    let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    let days_in_months = [
+        31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30,
+        31, 31, 30, 31, 30, 31,
+    ];
+    let mut m = 1;
+    for &dim in &days_in_months {
+        if d < dim {
+            break;
+        }
+        d -= dim;
+        m += 1;
+    }
+    let day = d + 1;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, day, hour, min, sec)
 }
 
 #[cfg(test)]

@@ -13,7 +13,15 @@ pub fn show_side_panel(
         ui.spacing_mut().item_spacing.y = 8.0;
 
         // -------------------------------------------------------------
-        // 1. FT Settings テーブル (Zebra stripe)
+        // 1. Experimental Parameters テーブル (Python版 ezNMR 完全準拠)
+        // -------------------------------------------------------------
+        ui.label(RichText::new("Experimental Parameters").strong().size(12.0).color(Color32::from_rgb(70, 75, 80)));
+        render_zebra_table(ui, "meta_table", &metadata.to_display_rows());
+
+        ui.separator();
+
+        // -------------------------------------------------------------
+        // 2. FT Settings テーブル (Zebra stripe)
         // -------------------------------------------------------------
         ui.label(RichText::new("FT Settings").strong().size(12.0).color(Color32::from_rgb(70, 75, 80)));
         render_zebra_table(ui, "ft_table", &[
@@ -30,25 +38,6 @@ pub fn show_side_panel(
             ("Group Delay", if ft_settings.remove_digital_filter { "Removed".to_string() } else { "Kept".to_string() }),
             ("Filter Delay", metadata.digital_filter_delay.map(|d| format!("{:.4} pts", d)).unwrap_or_else(|| "-".to_string())),
             ("Auto Phase", if ft_settings.auto_phase { "Yes".to_string() } else { "No".to_string() }),
-        ]);
-
-        ui.separator();
-
-        // -------------------------------------------------------------
-        // 2. Acquisition Metadata テーブル (Zebra stripe)
-        // -------------------------------------------------------------
-        ui.label(RichText::new("Acquisition Metadata").strong().size(12.0).color(Color32::from_rgb(70, 75, 80)));
-        render_zebra_table(ui, "meta_table", &[
-            ("Title", if metadata.title.is_empty() { "-".to_string() } else { metadata.title.clone() }),
-            ("Solvent", if metadata.solvent.is_empty() { "-".to_string() } else { metadata.solvent.clone() }),
-            ("Nucleus", metadata.nucleus.clone()),
-            ("Obs. Freq.", format!("{:.2} MHz", metadata.obs_freq_mhz)),
-            ("Spec. Width", format!("{:.2} Hz", metadata.spectral_width_hz)),
-            ("Obs. Center", format!("{:.2} ppm", metadata.center_ppm)),
-            ("Points", metadata.points.to_string()),
-            ("Scans", metadata.scans.to_string()),
-            ("Acq. Time", format!("{:.4} sec", (metadata.points as f64) / metadata.spectral_width_hz.max(1.0))),
-            ("Pls. Angle", if metadata.pulse_angle_deg > 0.0 { format!("{:.1} deg", metadata.pulse_angle_deg) } else { "-".to_string() }),
         ]);
 
         ui.separator();

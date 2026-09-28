@@ -6,8 +6,8 @@ use crate::core::{
 };
 
 use crate::gui::dialogs::{
-    show_display_dialog, show_ft_dialog, show_jcoupling_dialog, DisplayDialogState, FtDialogState,
-    JCouplingDialogState,
+    show_display_dialog, show_ft_dialog, show_jcoupling_dialog, show_print_dialog,
+    DisplayDialogState, FtDialogState, JCouplingDialogState, PrintDialogState,
 };
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 use crate::gui::panels::{
@@ -194,6 +194,7 @@ pub struct ResonaApp {
     pub ft_dialog_state: FtDialogState,
     pub display_dialog_state: DisplayDialogState,
     pub jcoupling_dialog_state: JCouplingDialogState,
+    pub print_dialog_state: PrintDialogState,
 
     pub plot_style: PlotStyle,
     pub transform: Option<PlotTransform>,
@@ -227,6 +228,7 @@ impl Default for ResonaApp {
             ft_dialog_state: FtDialogState::default(),
             display_dialog_state: DisplayDialogState::default(),
             jcoupling_dialog_state: JCouplingDialogState::default(),
+            print_dialog_state: PrintDialogState::default(),
             plot_style: PlotStyle::default(),
             transform: None,
             zoom_history: Vec::new(),
@@ -721,6 +723,9 @@ impl eframe::App for ResonaApp {
                         self.display_dialog_state.ppm_decimals = self.plot_style.ppm_decimals;
                         self.display_dialog_state.integral_decimals = self.plot_style.integral_decimals;
                         self.display_dialog_state.open = true;
+                    }
+                    ModeBarEvent::OpenPrint => {
+                        self.print_dialog_state.open();
                     }
                 }
             });
@@ -2027,5 +2032,29 @@ impl eframe::App for ResonaApp {
             self.project.push_history();
             self.status_message = "Added J-coupling multiplet to results".to_string();
         }
+
+        let ref_factor = if self.project.state.integration_ref_area > 0.0 {
+            self.project.state.integration_ref_value / self.project.state.integration_ref_area
+        } else {
+            1.0
+        };
+
+        show_print_dialog(
+            ctx,
+            &mut self.print_dialog_state,
+            self.transform.as_ref(),
+            self.project.ppm.as_ref(),
+            self.project.spectrum_real.as_ref(),
+            &self.project.state.peaks,
+            &self.project.state.integrations,
+            self.project.state.integration_scale,
+            self.project.state.integration_offset,
+            ref_factor,
+            &self.project.state.multiviews,
+            &self.project.metadata,
+            &self.project.state.ft_settings,
+            &self.project.state.j_couplings,
+            self.current_file_path.as_deref(),
+        );
     }
 }

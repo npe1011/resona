@@ -1,0 +1,2687 @@
+use std::fs;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use egui::{
+    vec2, Align2, Button, Checkbox, Color32, FontFamily, FontId, Frame, Pos2, Rect,
+    RichText, Stroke, Ui, Window,
+};
+use ndarray::Array1;
+use serde::{Deserialize, Serialize};
+
+use crate::core::{
+    compute_integral, AcquisitionMetadata, FtSettings, IntegrationItem, JCouplingResultItem,
+    MultiviewItem, PeakItem,
+};
+use crate::gui::plot::transform::PlotTransform;
+
+/// 印刷の向き設定
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrintOrientation {
+    Landscape,
+    Portrait,
+}
+
+/// 印刷項目および設定 (Python版 ezNMR 完全準拠)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrintSettings {
+    pub printer_name: String,
+    pub orientation: PrintOrientation,
+    pub spectrum: bool,
+    pub peak: bool,
+    pub integrate: bool,
+    pub multiview: bool,
+    pub info: bool,
+    pub jcoupling: bool,
+    pub filename: bool,
+}
+
+impl Default for PrintSettings {
+    fn default() -> Self {
+        Self {
+            printer_name: String::new(),
+            orientation: PrintOrientation::Landscape,
+            spectrum: true,
+            peak: true,
+            integrate: true,
+            multiview: true,
+            info: true,
+            jcoupling: true,
+            filename: true,
+        }
+    }
+}
+
+/// システムで検出されたプリンター情報
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemPrinter {
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// 印刷ダイアログの状態管理
+pub struct PrintDialogState {
+    pub is_open: bool,
+    pub settings: PrintSettings,
+    pub available_printers: Arc<Mutex<Option<Vec<SystemPrinter>>>>,
+    pub is_loading_printers: bool,
+    pub status_message: Option<(String, bool)>, // (メッセージ, is_error)
+}
+
+impl Default for PrintDialogState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            settings: PrintSettings::default(),
+            available_printers: Arc::new(Mutex::new(None)),
+            is_loading_printers: false,
+            status_message: None,
+        }
+    }
+}
+
+impl PrintDialogState {
+    /// ダイアログを開き、非同期でプリンター一覧を検出する
+    pub fn open(&mut self) {
+        self.is_open = true;
+        self.status_message = None;
+
+        let printers_arc = Arc::clone(&self.available_printers);
+        self.is_loading_printers = true;
+
+        std::thread::spawn(move || {
+            let printers = fetch_system_printers();
+            if let Ok(mut lock) = printers_arc.lock() {
+                *lock = Some(printers);
+            }
+        });
+    }
+
+    /// プリンター一覧のリロード
+    pub fn refresh_printers(&mut self) {
+        let printers_arc = Arc::clone(&self.available_printers);
+        self.is_loading_printers = true;
+        self.status_message = None;
+
+        std::thread::spawn(move || {
+            let printers = fetch_system_printers();
+            if let Ok(mut lock) = printers_arc.lock() {
+                *lock = Some(printers);
+            }
+        });
+    }
+}
+
+/// OSのプリンター詳細設定ダイアログ (Print Preferences) を開く関数
+#[cfg(target_os = "windows")]
+pub fn open_printer_preferences(printer_name: &str) {
+    #[link(name = "winspool")]
+    unsafe extern "system" {
+        fn OpenPrinterW(pPrinterName: *const u16, phPrinter: *mut isize, pDefault: *const std::ffi::c_void) -> i32;
+        fn ClosePrinter(hPrinter: isize) -> i32;
+        fn DocumentPropertiesW(
+            hWnd: isize,
+            hPrinter: isize,
+            pDeviceName: *const u16,
+            pDevModeOutput: *mut std::ffi::c_void,
+            pDevModeInput: *mut std::ffi::c_void,
+            fMode: u32,
+        ) -> i32;
+    }
+    const DM_IN_PROMPT: u32 = 4;
+    let wide_name: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut h_printer: isize = 0;
+    unsafe {
+        if OpenPrinterW(wide_name.as_ptr(), &mut h_printer, std::ptr::null()) != 0 {
+            DocumentPropertiesW(0, h_printer, wide_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(), DM_IN_PROMPT);
+            ClosePrinter(h_printer);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn open_printer_preferences(_printer_name: &str) {}
+
+/// OSネイティブにプリンター一覧を検出する関数
+fn fetch_system_printers() -> Vec<SystemPrinter> {
+    #[cfg(target_os = "windows")]
+    {
+        fetch_windows_printers()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        fetch_macos_printers()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        fetch_linux_printers()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn fetch_windows_printers() -> Vec<SystemPrinter> {
+    let cmd = "Get-CimInstance Win32_Printer | Select-Object Name, Default | ConvertTo-Json";
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", cmd])
+        .output();
+
+    let mut result = Vec::new();
+    if let Ok(out) = output {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            #[derive(Deserialize)]
+            struct WinPrinter {
+                #[serde(rename = "Name")]
+                name: String,
+                #[serde(rename = "Default")]
+                is_default: bool,
+            }
+
+            if let Ok(list) = serde_json::from_str::<Vec<WinPrinter>>(&text) {
+                for p in list {
+                    result.push(SystemPrinter {
+                        name: p.name,
+                        is_default: p.is_default,
+                    });
+                }
+            } else if let Ok(single) = serde_json::from_str::<WinPrinter>(&text) {
+                result.push(SystemPrinter {
+                    name: single.name,
+                    is_default: single.is_default,
+                });
+            }
+        }
+    }
+
+    if result.is_empty() {
+        result.push(SystemPrinter {
+            name: "Default Printer".to_string(),
+            is_default: true,
+        });
+    }
+
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn fetch_macos_printers() -> Vec<SystemPrinter> {
+    let default_name = std::process::Command::new("lpstat")
+        .arg("-d")
+        .output()
+        .ok()
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            s.split(':').nth(1).map(|p| p.trim().to_string())
+        })
+        .unwrap_or_default();
+
+    let output = std::process::Command::new("lpstat")
+        .arg("-p")
+        .output();
+
+    let mut result = Vec::new();
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("printer ") {
+                if let Some(name) = rest.split_whitespace().next() {
+                    let is_default = name == default_name;
+                    result.push(SystemPrinter {
+                        name: name.to_string(),
+                        is_default,
+                    });
+                }
+            }
+        }
+    }
+
+    if result.is_empty() {
+        result.push(SystemPrinter {
+            name: "Default Printer".to_string(),
+            is_default: true,
+        });
+    }
+
+    result
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn fetch_linux_printers() -> Vec<SystemPrinter> {
+    fetch_macos_printers()
+}
+
+/// 印刷ダイアログの表示
+pub fn show_print_dialog(
+    ctx: &egui::Context,
+    state: &mut PrintDialogState,
+    main_transform: Option<&PlotTransform>,
+    ppm: Option<&Array1<f64>>,
+    spectrum: Option<&Array1<f64>>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    metadata: &AcquisitionMetadata,
+    ft_settings: &FtSettings,
+    j_couplings: &[JCouplingResultItem],
+    current_filepath: Option<&Path>,
+) {
+    if !state.is_open {
+        return;
+    }
+
+    // 非同期ロードされたプリンター一覧の反映
+    if let Ok(lock) = state.available_printers.lock() {
+        if let Some(ref printers) = *lock {
+            state.is_loading_printers = false;
+            if state.settings.printer_name.is_empty() {
+                if let Some(def) = printers.iter().find(|p| p.is_default) {
+                    state.settings.printer_name = def.name.clone();
+                } else if let Some(first) = printers.first() {
+                    state.settings.printer_name = first.name.clone();
+                }
+            }
+        }
+    }
+
+    let mut is_open = state.is_open;
+    let mut should_close = false;
+
+    Window::new(RichText::new("Print Settings").strong())
+        .open(&mut is_open)
+        .resizable(true)
+        .default_width(740.0)
+        .default_height(600.0)
+        .min_width(620.0)
+        .min_height(500.0)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+
+            // 1. 上部コントロール (プリンター選択 & ページ設定)
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Printer").strong().size(12.0));
+
+                let current_selection = if state.settings.printer_name.is_empty() {
+                    if state.is_loading_printers {
+                        "Detecting printers..."
+                    } else {
+                        "Select Printer"
+                    }
+                } else {
+                    &state.settings.printer_name
+                };
+
+                egui::ComboBox::from_id_salt("print_printer_select")
+                    .selected_text(current_selection)
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        if let Ok(lock) = state.available_printers.lock() {
+                            if let Some(ref printers) = *lock {
+                                for p in printers {
+                                    let label = if p.is_default {
+                                        format!("{} (Default)", p.name)
+                                    } else {
+                                        p.name.clone()
+                                    };
+                                    ui.selectable_value(
+                                        &mut state.settings.printer_name,
+                                        p.name.clone(),
+                                        label,
+                                    );
+                                }
+                            }
+                        }
+                    });
+
+                let p_name = state.settings.printer_name.clone();
+                if ui.button("Detail...").clicked() && !p_name.is_empty() {
+                    std::thread::spawn(move || {
+                        open_printer_preferences(&p_name);
+                    });
+                }
+
+                if ui.button("Refresh").clicked() {
+                    state.refresh_printers();
+                }
+
+                ui.separator();
+
+                ui.label(RichText::new("Orientation").strong().size(12.0));
+                ui.selectable_value(
+                    &mut state.settings.orientation,
+                    PrintOrientation::Landscape,
+                    "Landscape",
+                );
+                ui.selectable_value(
+                    &mut state.settings.orientation,
+                    PrintOrientation::Portrait,
+                    "Portrait",
+                );
+            });
+
+            // 2. 印刷項目チェックボックス (グリッドで美しく整列)
+            Frame::group(ui.style()).show(ui, |ui| {
+                egui::Grid::new("print_items_grid")
+                    .spacing(vec2(16.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Print Items").strong().size(12.0));
+                        ui.add(Checkbox::new(&mut state.settings.spectrum, "Spectrum"));
+                        ui.add(Checkbox::new(&mut state.settings.peak, "Peak Pick"));
+                        ui.add(Checkbox::new(&mut state.settings.integrate, "Integrals"));
+                        ui.add(Checkbox::new(&mut state.settings.multiview, "Multiview"));
+                        ui.end_row();
+
+                        ui.label("");
+                        ui.add(Checkbox::new(&mut state.settings.info, "Parameters"));
+                        ui.add(Checkbox::new(&mut state.settings.jcoupling, "J Coupling Table"));
+                        ui.add(Checkbox::new(&mut state.settings.filename, "File Name"));
+                        ui.label("");
+                        ui.end_row();
+                    });
+            });
+
+            // 3. リアルタイムプレビュー領域
+            ui.separator();
+
+            let avail_size = ui.available_size() - vec2(0.0, 42.0);
+            render_realtime_preview(
+                ui,
+                avail_size,
+                &state.settings,
+                main_transform,
+                ppm,
+                spectrum,
+                peaks,
+                integrations,
+                integration_scale,
+                integration_offset,
+                integration_ref_factor,
+                multiviews,
+                metadata,
+                ft_settings,
+                j_couplings,
+                current_filepath,
+            );
+
+            // 4. 下部アクションボタン
+            ui.separator();
+            ui.horizontal(|ui| {
+                // 印刷ボタン (完了時にダイアログを自動クローズ)
+                let btn_print = Button::new(RichText::new("Print").strong().size(13.0).color(Color32::WHITE))
+                    .min_size(vec2(90.0, 26.0))
+                    .fill(Color32::from_rgb(13, 110, 253))
+                    .rounding(3.0_f32);
+                if ui.add(btn_print).clicked() {
+                    match execute_native_print(
+                        &state.settings,
+                        main_transform,
+                        ppm,
+                        spectrum,
+                        peaks,
+                        integrations,
+                        integration_scale,
+                        integration_offset,
+                        integration_ref_factor,
+                        multiviews,
+                        metadata,
+                        ft_settings,
+                        j_couplings,
+                        current_filepath,
+                    ) {
+                        Ok(()) => {
+                            should_close = true;
+                        }
+                        Err(e) => {
+                            state.status_message = Some((format!("Print failed: {}", e), true));
+                        }
+                    }
+                }
+
+                // 完全ベクター SVG ファイル保存ボタン
+                if ui.button(RichText::new("Export SVG...").size(13.0)).clicked() {
+                    if let Some(target) = rfd::FileDialog::new()
+                        .set_title("Export Complete Report as Vector SVG")
+                        .add_filter("Scalable Vector Graphics", &["svg"])
+                        .set_file_name("resona_report.svg")
+                        .save_file()
+                    {
+                        let svg = generate_complete_page_svg(
+                            &state.settings,
+                            main_transform,
+                            ppm,
+                            spectrum,
+                            peaks,
+                            integrations,
+                            integration_scale,
+                            integration_offset,
+                            integration_ref_factor,
+                            multiviews,
+                            metadata,
+                            ft_settings,
+                            j_couplings,
+                            current_filepath,
+                        );
+                        if let Err(e) = fs::write(&target, svg) {
+                            state.status_message = Some((format!("Export failed: {}", e), true));
+                        }
+                    }
+                }
+
+                if let Some((ref msg, is_err)) = state.status_message {
+                    if is_err {
+                        ui.label(RichText::new(msg).size(11.0).color(Color32::from_rgb(220, 38, 38)));
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+        });
+
+    if should_close {
+        is_open = false;
+    }
+    state.is_open = is_open;
+}
+
+/// ダイアログ内のリアルタイムプレビュー描画 (画面見た目通りに忠実再現)
+fn render_realtime_preview(
+    ui: &mut Ui,
+    avail_size: egui::Vec2,
+    settings: &PrintSettings,
+    main_transform: Option<&PlotTransform>,
+    ppm: Option<&Array1<f64>>,
+    spectrum: Option<&Array1<f64>>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    metadata: &AcquisitionMetadata,
+    ft_settings: &FtSettings,
+    j_couplings: &[JCouplingResultItem],
+    current_filepath: Option<&Path>,
+) {
+    let page_aspect = match settings.orientation {
+        PrintOrientation::Landscape => 297.0 / 210.0,
+        PrintOrientation::Portrait => 210.0 / 297.0,
+    };
+
+    let mut preview_w = avail_size.x.max(200.0);
+    let mut preview_h = preview_w / page_aspect;
+    if preview_h > avail_size.y {
+        preview_h = avail_size.y.max(150.0);
+        preview_w = preview_h * page_aspect;
+    }
+
+    let (response, painter) = ui.allocate_painter(vec2(preview_w, preview_h), egui::Sense::hover());
+    let page_rect = response.rect;
+
+    // 用紙描画 (白背景 + 影 + 外枠)
+    let shadow_rect = page_rect.translate(vec2(2.0, 2.0));
+    painter.rect_filled(shadow_rect, 2.0, Color32::from_rgba_unmultiplied(0, 0, 0, 18));
+    painter.rect_filled(page_rect, 2.0, Color32::WHITE);
+    painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 218)));
+
+    let mut cur_y = page_rect.min.y + 6.0;
+
+    // 1. ファイル名 (ヘッダー: 高さを固定して File Name の有無でプロットが動かないようにする)
+    let header_h = 16.0_f32;
+    if settings.filename {
+        let name_str = current_filepath
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "No file loaded".to_string());
+        painter.text(
+            Pos2::new(page_rect.min.x + 10.0, cur_y),
+            Align2::LEFT_TOP,
+            &name_str,
+            FontId::new(9.0, FontFamily::Proportional),
+            Color32::from_rgb(108, 117, 125),
+        );
+    }
+    cur_y += header_h;
+
+    // 2. カラム分割 (プロット領域 vs パラメータ領域)
+    let has_side_info = settings.info || (settings.jcoupling && !j_couplings.is_empty());
+    let side_w = if has_side_info {
+        (page_rect.width() * 0.16).clamp(75.0, 110.0)
+    } else {
+        0.0
+    };
+
+    let plot_rect = Rect::from_min_max(
+        Pos2::new(page_rect.min.x + 6.0, cur_y),
+        Pos2::new(page_rect.max.x - side_w - 6.0, page_rect.max.y - 6.0),
+    );
+
+    if let (Some(ppm_arr), Some(spec_arr)) = (ppm, spectrum) {
+        if !ppm_arr.is_empty() && !spec_arr.is_empty() {
+            let (p_min, p_max, y_min, y_max, main_screen_rect) = if let Some(t) = main_transform {
+                (t.ppm_min, t.ppm_max, t.y_min, t.y_max, t.screen_rect)
+            } else {
+                let p_min_data = ppm_arr.iter().cloned().fold(f64::INFINITY, f64::min);
+                let p_max_data = ppm_arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let y_max_data = spec_arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0);
+                (p_min_data, p_max_data, -0.05 * y_max_data, y_max_data * 1.1, plot_rect)
+            };
+
+            let preview_bottom_margin = 32.0_f32;
+            let t = PlotTransform::new(plot_rect, p_min, p_max, y_min, y_max)
+                .with_bottom_margin(preview_bottom_margin);
+            let axis_y = t.axis_y();
+
+            // X軸ベースライン
+            painter.line_segment(
+                [Pos2::new(plot_rect.min.x, axis_y), Pos2::new(plot_rect.max.x, axis_y)],
+                Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 40)),
+            );
+
+            // スペクトル曲線
+            if settings.spectrum {
+                let n_pts = ppm_arr.len().min(spec_arr.len());
+                let p_low = p_min.min(p_max);
+                let p_high = p_min.max(p_max);
+                let mut points = Vec::new();
+
+                for i in 0..n_pts {
+                    let p = ppm_arr[i];
+                    if p >= p_low && p <= p_high {
+                        let pt = t.data_to_screen(p, spec_arr[i]);
+                        points.push(Pos2::new(pt.x, pt.y.min(axis_y)));
+                    }
+                }
+                if points.len() > 1 {
+                    painter.add(egui::epaint::PathShape::line(
+                        points,
+                        Stroke::new(1.0_f32, Color32::BLACK),
+                    ));
+                }
+            }
+
+            // X軸目盛り & PPM ラベル
+            let span = (p_max - p_min).abs();
+            let tick_interval = if span > 100.0 {
+                20.0
+            } else if span > 40.0 {
+                10.0
+            } else if span > 15.0 {
+                5.0
+            } else if span > 6.0 {
+                1.0
+            } else if span > 2.0 {
+                0.5
+            } else {
+                0.1
+            };
+
+            let p_low = p_min.min(p_max);
+            let p_high = p_min.max(p_max);
+            let first_tick = (p_low / tick_interval).ceil() * tick_interval;
+            let mut cur_tick = first_tick;
+            while cur_tick <= p_high {
+                let tx = t.ppm_to_screen_x(cur_tick);
+                if tx >= plot_rect.min.x && tx <= plot_rect.max.x {
+                    painter.line_segment(
+                        [Pos2::new(tx, axis_y), Pos2::new(tx, axis_y + 3.0)],
+                        Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 40)),
+                    );
+                    painter.text(
+                        Pos2::new(tx, axis_y + 4.0),
+                        Align2::CENTER_TOP,
+                        format!("{:.1}", cur_tick),
+                        FontId::new(7.5, FontFamily::Proportional),
+                        Color32::from_rgb(50, 50, 50),
+                    );
+                }
+                cur_tick += tick_interval;
+            }
+
+            // 積分
+            if settings.integrate {
+                for it in integrations {
+                    let p_start = it.start_ppm.max(it.end_ppm);
+                    let p_end = it.start_ppm.min(it.end_ppm);
+                    let sx_start = t.ppm_to_screen_x(p_start);
+                    let sx_end = t.ppm_to_screen_x(p_end);
+
+                    if sx_end > plot_rect.min.x && sx_start < plot_rect.max.x {
+                        let bl_start = t.data_to_screen(it.start_ppm, it.y_start);
+                        let bl_end = t.data_to_screen(it.end_ppm, it.y_end);
+                        painter.line_segment(
+                            [bl_start, bl_end],
+                            Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246)),
+                        );
+
+                        if let Some(res) = compute_integral(spec_arr, ppm_arr, it, integration_scale, integration_ref_factor, integration_offset) {
+                            if res.ppm.len() > 1 && res.ppm.len() == res.curve_y.len() {
+                                let mut pts = Vec::with_capacity(res.ppm.len());
+                                let mut min_y = f32::MAX;
+                                for idx in 0..res.ppm.len() {
+                                    let pt = t.data_to_screen(res.ppm[idx], res.curve_y[idx]);
+                                    pts.push(Pos2::new(pt.x, pt.y.min(axis_y)));
+                                    min_y = min_y.min(pt.y);
+                                }
+                                painter.add(egui::epaint::PathShape::line(
+                                    pts,
+                                    Stroke::new(1.2_f32, Color32::from_rgb(225, 29, 72)),
+                                ));
+
+                                let mid_x = (sx_start + sx_end) * 0.5;
+                                painter.text(
+                                    Pos2::new(mid_x, min_y - 2.0),
+                                    Align2::CENTER_BOTTOM,
+                                    format!("{:.2}", res.normalized_value),
+                                    FontId::new(7.5, FontFamily::Proportional),
+                                    Color32::from_rgb(225, 29, 72),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ピークピック (アンチコリジョン引き出し線)
+            if settings.peak {
+                let mut visible_peaks: Vec<&PeakItem> = peaks
+                    .iter()
+                    .filter(|p| p.ppm >= p_low && p.ppm <= p_high)
+                    .collect();
+                visible_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+
+                if !visible_peaks.is_empty() {
+                    let mut text_x: Vec<f32> = visible_peaks
+                        .iter()
+                        .map(|p| t.ppm_to_screen_x(p.ppm))
+                        .collect();
+
+                    let min_gap = 10.5_f32;
+                    for _ in 0..200 {
+                        let mut moved = false;
+                        for i in 1..text_x.len() {
+                            let diff = text_x[i] - text_x[i - 1];
+                            if diff < min_gap {
+                                let overlap = min_gap - diff;
+                                text_x[i - 1] -= overlap * 0.5;
+                                text_x[i] += overlap * 0.5;
+                                moved = true;
+                            }
+                        }
+                        if !moved { break; }
+                    }
+
+                    let y_elbow = axis_y + 8.0;
+                    let y_text_start = axis_y + 14.0;
+                    let font_peak = FontId::new(6.5, FontFamily::Proportional);
+
+                    for (i, pk) in visible_peaks.iter().enumerate() {
+                        let px = t.ppm_to_screen_x(pk.ppm);
+                        let tx = text_x[i].clamp(plot_rect.min.x + 2.0, plot_rect.max.x - 2.0);
+
+                        let stroke_lead = Stroke::new(0.7_f32, Color32::from_rgb(150, 150, 150));
+                        painter.line_segment([Pos2::new(px, axis_y), Pos2::new(px, y_elbow)], stroke_lead);
+                        painter.line_segment([Pos2::new(px, y_elbow), Pos2::new(tx, y_text_start - 2.0)], stroke_lead);
+                        painter.line_segment([Pos2::new(tx, y_text_start - 2.0), Pos2::new(tx, y_text_start)], stroke_lead);
+
+                        let val_str = format!("{:.3}", pk.ppm);
+                        let galley = painter.layout_no_wrap(val_str, font_peak.clone(), Color32::from_rgb(20, 20, 20));
+                        let text_h = galley.size().y;
+                        let pos = Pos2::new(tx + text_h * 0.5, y_text_start + 1.0);
+                        let ts = egui::epaint::TextShape::new(pos, galley, Color32::from_rgb(20, 20, 20))
+                            .with_angle(std::f32::consts::FRAC_PI_2);
+                        painter.add(ts);
+                    }
+                }
+            }
+
+            // マルチビュー (拡大スペクトル、積分、ピーク引き出し線、X軸目盛り)
+            if settings.multiview && !multiviews.is_empty() {
+                for mv in multiviews {
+                    let rel_x = (mv.geometry.x - main_screen_rect.min.x) / main_screen_rect.width().max(1.0);
+                    let rel_y = (mv.geometry.y - main_screen_rect.min.y) / main_screen_rect.height().max(1.0);
+                    let rel_w = mv.geometry.w / main_screen_rect.width().max(1.0);
+                    let rel_h = mv.geometry.h / main_screen_rect.height().max(1.0);
+
+                    let inset_x = plot_rect.min.x + rel_x * plot_rect.width();
+                    let inset_y = plot_rect.min.y + rel_y * plot_rect.height();
+                    let inset_w = rel_w * plot_rect.width();
+                    let inset_h = rel_h * plot_rect.height();
+
+                    if inset_w > 25.0 && inset_h > 25.0 {
+                        let inset_rect = Rect::from_min_size(Pos2::new(inset_x, inset_y), vec2(inset_w, inset_h));
+                        painter.rect_filled(inset_rect, 0.0, Color32::WHITE);
+                        painter.rect_stroke(inset_rect, 0.0, Stroke::new(1.2_f32, Color32::from_gray(160)));
+
+                        let mv_src_min = mv.src_x_min.min(mv.src_x_max);
+                        let mv_src_max = mv.src_x_min.max(mv.src_x_max);
+
+                        let mut mv_y_min = f64::INFINITY;
+                        let mut mv_y_max = f64::NEG_INFINITY;
+                        for idx in 0..ppm_arr.len().min(spec_arr.len()) {
+                            let p = ppm_arr[idx];
+                            if p >= mv_src_min && p <= mv_src_max {
+                                let v = spec_arr[idx];
+                                if v < mv_y_min { mv_y_min = v; }
+                                if v > mv_y_max { mv_y_max = v; }
+                            }
+                        }
+                        if mv_y_min >= mv_y_max {
+                            mv_y_min = 0.0;
+                            mv_y_max = 1.0;
+                        }
+
+                        let h_diff = (mv_y_max - mv_y_min).max(1e-6);
+                        let y_min_adj = mv_y_min - 0.05 * h_diff;
+                        let y_max_adj = mv_y_max + 0.50 * h_diff;
+
+                        let inset_axis_y = inset_rect.max.y - 12.0;
+                        let inset_plot_h = (inset_axis_y - inset_rect.min.y - 4.0).max(10.0);
+                        let inset_plot_w = (inset_rect.width() - 8.0).max(10.0);
+
+                        let mv_ppm_to_x = |p: f64| -> f32 {
+                            inset_rect.min.x + 4.0 + (((mv_src_max - p) / (mv_src_max - mv_src_min).max(1e-6)) as f32) * inset_plot_w
+                        };
+                        let mv_y_to_y = |y: f64| -> f32 {
+                            inset_axis_y - (((y - y_min_adj) / (y_max_adj - y_min_adj).max(1e-6)) as f32) * inset_plot_h
+                        };
+
+                        // 1. 拡大スペクトル曲線 (GUI準拠の黒色)
+                        let mut mv_points = Vec::new();
+                        for idx in 0..ppm_arr.len().min(spec_arr.len()) {
+                            let p = ppm_arr[idx];
+                            if p >= mv_src_min && p <= mv_src_max {
+                                let sx = mv_ppm_to_x(p);
+                                let sy = mv_y_to_y(spec_arr[idx]);
+                                mv_points.push(Pos2::new(sx, sy.min(inset_axis_y)));
+                            }
+                        }
+                        if mv_points.len() > 1 {
+                            painter.add(egui::epaint::PathShape::line(
+                                mv_points,
+                                Stroke::new(1.2_f32, Color32::BLACK),
+                            ));
+                        }
+
+                        // 2. 積分 (マルチビュー内)
+                        if settings.integrate {
+                            for integ in integrations {
+                                let i_min = integ.min_ppm();
+                                let i_max = integ.max_ppm();
+                                if i_max < mv_src_min || i_min > mv_src_max {
+                                    continue;
+                                }
+                                if let Some(res) = compute_integral(spec_arr, ppm_arr, integ, 1.0, integration_ref_factor, 0.0) {
+                                    if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                                        let mut intg_pts = Vec::new();
+                                        for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
+                                            if p >= mv_src_min && p <= mv_src_max {
+                                                let bl = integ.baseline_y_at(p);
+                                                let cum_area = (cy - bl).max(0.0);
+                                                let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                                                let target_data_y = y_min_adj + 0.20 * h_diff + norm_y * (0.45 * h_diff);
+                                                intg_pts.push(Pos2::new(mv_ppm_to_x(p), mv_y_to_y(target_data_y)));
+                                            }
+                                        }
+                                        if intg_pts.len() > 1 {
+                                            painter.add(egui::epaint::PathShape::line(
+                                                intg_pts,
+                                                Stroke::new(1.0_f32, Color32::from_rgb(225, 29, 72)),
+                                            ));
+                                            let mid_p = (i_min.max(mv_src_min) + i_max.min(mv_src_max)) * 0.5;
+                                            let top_pos = Pos2::new(mv_ppm_to_x(mid_p), mv_y_to_y(y_min_adj + 0.70 * h_diff));
+                                            painter.text(
+                                                top_pos,
+                                                Align2::CENTER_BOTTOM,
+                                                format!("{:.2}", res.normalized_value),
+                                                FontId::new(7.0, FontFamily::Proportional),
+                                                Color32::from_rgb(225, 29, 72),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. ピーク引き出し線 & 縦書き化学シフト値 (マルチビュー内)
+                        if settings.peak {
+                            let sub_peaks: Vec<&PeakItem> = peaks
+                                .iter()
+                                .filter(|pk| pk.ppm >= mv_src_min && pk.ppm <= mv_src_max)
+                                .collect();
+                            if !sub_peaks.is_empty() {
+                                let mut sorted_peaks = sub_peaks.clone();
+                                sorted_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+                                let mut screen_x_list: Vec<f32> = sorted_peaks.iter().map(|p| mv_ppm_to_x(p.ppm)).collect();
+                                let min_gap_px = 7.5_f32;
+                                for _ in 0..100 {
+                                    let mut moved = false;
+                                    for i in 1..screen_x_list.len() {
+                                        let diff = screen_x_list[i] - screen_x_list[i - 1];
+                                        if diff < min_gap_px {
+                                            let overlap = min_gap_px - diff;
+                                            screen_x_list[i - 1] -= overlap * 0.5;
+                                            screen_x_list[i] += overlap * 0.5;
+                                            moved = true;
+                                        }
+                                    }
+                                    if !moved { break; }
+                                }
+
+                                let mv_font_peak = FontId::new(5.5, FontFamily::Proportional);
+                                let mv_text_start_y = inset_rect.min.y + 3.0;
+                                let text_len = 14.0_f32;
+                                let text_bottom_y = mv_text_start_y + text_len;
+                                let mv_elbow_y = (text_bottom_y + 4.0).min(inset_axis_y - 8.0);
+
+                                for (i, pk) in sorted_peaks.iter().enumerate() {
+                                    let px = mv_ppm_to_x(pk.ppm);
+                                    let tx = screen_x_list[i].clamp(inset_rect.min.x + 3.0, inset_rect.max.x - 3.0);
+                                    let py = mv_y_to_y(pk.intensity);
+                                    let clearance = 6.0_f32;
+                                    let line_start_y = (py - clearance).clamp(mv_elbow_y + 2.0, inset_axis_y - 2.0);
+
+                                    if line_start_y > mv_elbow_y + 1.0 {
+                                        let stroke_lead = Stroke::new(0.65_f32, Color32::from_gray(120));
+                                        painter.line_segment([Pos2::new(px, line_start_y), Pos2::new(px, mv_elbow_y)], stroke_lead);
+                                        painter.line_segment([Pos2::new(px, mv_elbow_y), Pos2::new(tx, text_bottom_y + 2.0)], stroke_lead);
+                                        painter.line_segment([Pos2::new(tx, text_bottom_y + 2.0), Pos2::new(tx, text_bottom_y)], stroke_lead);
+                                    }
+
+                                    let val_str = format!("{:.3}", pk.ppm);
+                                    let galley = painter.layout_no_wrap(val_str, mv_font_peak.clone(), Color32::from_rgb(20, 20, 20));
+                                    let text_h = galley.size().y;
+                                    let pos = Pos2::new(tx + text_h * 0.5, mv_text_start_y);
+                                    let ts = egui::epaint::TextShape::new(pos, galley, Color32::from_rgb(20, 20, 20))
+                                        .with_angle(std::f32::consts::FRAC_PI_2);
+                                    painter.add(ts);
+                                }
+                            }
+                        }
+
+                        // 4. X 軸目盛り線 & PPM 数値ラベル (マルチビュー内)
+                        painter.line_segment(
+                            [Pos2::new(inset_rect.min.x + 4.0, inset_axis_y), Pos2::new(inset_rect.max.x - 4.0, inset_axis_y)],
+                            Stroke::new(0.8_f32, Color32::BLACK),
+                        );
+
+                        let ppm_span = mv_src_max - mv_src_min;
+                        let target_ticks = (inset_plot_w / 35.0).clamp(2.0, 5.0) as f64;
+                        let rough_step = (ppm_span / target_ticks).max(1e-6);
+                        let exponent = rough_step.log10().floor();
+                        let frac = rough_step / 10.0_f64.powf(exponent);
+                        let nice_frac = if frac <= 1.5 { 1.0 } else if frac <= 3.0 { 2.0 } else if frac <= 7.0 { 5.0 } else { 10.0 };
+                        let step = nice_frac * 10.0_f64.powf(exponent);
+                        let start_tick = (mv_src_min / step).ceil() as i64;
+                        let end_tick = (mv_src_max / step).floor() as i64;
+                        let decimals = if step < 0.0099 { 3 } else if step < 0.099 { 2 } else if step < 0.99 { 1 } else { 0 };
+
+                        for t_idx in start_tick..=end_tick {
+                            let tick_ppm = t_idx as f64 * step;
+                            let tick_x = mv_ppm_to_x(tick_ppm);
+                            if tick_x >= inset_rect.min.x + 8.0 && tick_x <= inset_rect.max.x - 8.0 {
+                                painter.line_segment(
+                                    [Pos2::new(tick_x, inset_axis_y), Pos2::new(tick_x, inset_axis_y + 2.5)],
+                                    Stroke::new(0.7_f32, Color32::BLACK),
+                                );
+                                painter.text(
+                                    Pos2::new(tick_x, inset_axis_y + 3.0),
+                                    Align2::CENTER_TOP,
+                                    format!("{:.1$}", tick_ppm, decimals),
+                                    FontId::new(6.0, FontFamily::Proportional),
+                                    Color32::BLACK,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        painter.text(
+            plot_rect.center(),
+            Align2::CENTER_CENTER,
+            "No Spectrum Loaded",
+            FontId::proportional(12.0),
+            Color32::from_gray(160),
+        );
+    }
+
+    // 3. 右側パラメータ領域 (画面のサイドパネルと100%同一の全行を表示)
+    if has_side_info {
+        let side_rect = Rect::from_min_max(
+            Pos2::new(page_rect.max.x - side_w, cur_y),
+            Pos2::new(page_rect.max.x - 4.0, page_rect.max.y - 8.0),
+        );
+        let mut text_y = side_rect.min.y;
+
+        if settings.info {
+            // 1. Experimental Parameters (画面一番上と同じ)
+            painter.text(
+                Pos2::new(side_rect.min.x, text_y),
+                Align2::LEFT_TOP,
+                "Experimental Parameters",
+                FontId::new(7.5, FontFamily::Proportional),
+                Color32::from_rgb(33, 37, 41),
+            );
+            text_y += 10.0;
+
+            let exp_rows = metadata.to_display_rows();
+            for (k, v) in exp_rows {
+                let s = format!("{}: {}", k, v);
+                painter.text(
+                    Pos2::new(side_rect.min.x, text_y),
+                    Align2::LEFT_TOP,
+                    s,
+                    FontId::new(6.0, FontFamily::Proportional),
+                    Color32::from_rgb(73, 80, 87),
+                );
+                text_y += 8.0;
+                if text_y > side_rect.max.y - 80.0 { break; }
+            }
+            text_y += 4.0;
+
+            // 2. FT Settings
+            if text_y < side_rect.max.y - 40.0 {
+                painter.text(
+                    Pos2::new(side_rect.min.x, text_y),
+                    Align2::LEFT_TOP,
+                    "FT Settings",
+                    FontId::new(7.5, FontFamily::Proportional),
+                    Color32::from_rgb(33, 37, 41),
+                );
+                text_y += 10.0;
+
+                let eff_points = (metadata.points * ft_settings.zf_factor).max(1);
+                let dig_res = format!("{:.4} Hz/pt", metadata.spectral_width_hz / (eff_points as f64));
+                let ft_items = [
+                    format!("Win: {}", match ft_settings.window {
+                        crate::core::WindowFunction::None => "None".to_string(),
+                        crate::core::WindowFunction::Exponential { lb } => format!("Exp ({}Hz)", lb),
+                        crate::core::WindowFunction::Gaussian { g1, g2, g3 } => format!("G({},{},{})", g1, g2, g3),
+                    }),
+                    format!("ZF: {}x", ft_settings.zf_factor),
+                    format!("Res: {}", dig_res),
+                    format!("GD: {}", if ft_settings.remove_digital_filter { "Removed" } else { "Kept" }),
+                ];
+
+                for item in ft_items {
+                    painter.text(
+                        Pos2::new(side_rect.min.x, text_y),
+                        Align2::LEFT_TOP,
+                        item,
+                        FontId::new(6.0, FontFamily::Proportional),
+                        Color32::from_rgb(73, 80, 87),
+                    );
+                    text_y += 8.0;
+                }
+                text_y += 4.0;
+            }
+        }
+
+        if settings.jcoupling && !j_couplings.is_empty() && text_y < side_rect.max.y - 20.0 {
+            painter.text(
+                Pos2::new(side_rect.min.x, text_y),
+                Align2::LEFT_TOP,
+                "J Coupling",
+                FontId::new(7.5, FontFamily::Proportional),
+                Color32::from_rgb(33, 37, 41),
+            );
+            text_y += 10.0;
+
+            for (i, jc) in j_couplings.iter().take(5).enumerate() {
+                let s = format!("#{}: {}", i + 1, jc.text);
+                painter.text(
+                    Pos2::new(side_rect.min.x, text_y),
+                    Align2::LEFT_TOP,
+                    s,
+                    FontId::new(6.0, FontFamily::Proportional),
+                    Color32::from_rgb(73, 80, 87),
+                );
+                text_y += 8.0;
+            }
+        }
+    }
+}
+
+/// ページ全体の完全なベクター SVG を生成 (プロット + パラメータ表 + ヘッダー)
+/// ユーザーが「Export SVG...」を押した際にファイル保存される完全な出版品質ドキュメント
+pub fn generate_complete_page_svg(
+    settings: &PrintSettings,
+    main_transform: Option<&PlotTransform>,
+    ppm: Option<&Array1<f64>>,
+    spectrum: Option<&Array1<f64>>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    metadata: &AcquisitionMetadata,
+    ft_settings: &FtSettings,
+    j_couplings: &[JCouplingResultItem],
+    current_filepath: Option<&Path>,
+) -> String {
+    let (total_w, total_h) = match settings.orientation {
+        PrintOrientation::Landscape => (1120.0, 792.0), // A4 Landscape比率
+        PrintOrientation::Portrait => (792.0, 1120.0),  // A4 Portrait比率
+    };
+
+    let margin = 20.0;
+    let mut cur_y = margin;
+
+    let mut svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="100%" height="100%">
+<rect width="{w}" height="{h}" fill="#ffffff" />
+"##,
+        w = total_w,
+        h = total_h,
+    );
+
+    // 1. ヘッダー (ファイル名: 高さを固定して File Name の有無でプロットが動かないようにする)
+    let header_h = 24.0;
+    if settings.filename {
+        let name_str = current_filepath
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Untitled Spectrum".to_string());
+        svg.push_str(&format!(
+            r##"<text x="{x}" y="{y}" font-size="10" font-weight="600" font-family="sans-serif" fill="#495057">{title}</text>
+<line x1="{x}" y1="{ly}" x2="{lx2}" y2="{ly}" stroke="#dee2e6" stroke-width="1.0" />
+"##,
+            x = margin,
+            y = cur_y + 10.0,
+            ly = cur_y + 16.0,
+            lx2 = total_w - margin,
+            title = html_escape(&name_str),
+        ));
+    }
+    cur_y += header_h;
+
+    let has_side = settings.info || (settings.jcoupling && !j_couplings.is_empty());
+    let side_w = if has_side { 175.0 } else { 0.0 };
+    let plot_w = total_w - margin * 2.0 - side_w - if has_side { 14.0 } else { 0.0 };
+    let plot_h = total_h - cur_y - margin;
+
+    // 2. プロット部分 (SVG)
+    if let (Some(ppm_arr), Some(spec_arr)) = (ppm, spectrum) {
+        let plot_svg_inner = generate_plot_svg_content(
+            settings,
+            main_transform,
+            ppm_arr,
+            spec_arr,
+            peaks,
+            integrations,
+            integration_scale,
+            integration_offset,
+            integration_ref_factor,
+            multiviews,
+            margin,
+            cur_y,
+            plot_w,
+            plot_h,
+        );
+        svg.push_str(&plot_svg_inner);
+    }
+
+    // 3. 右側パラメータ表 (SVG ベクターテーブル)
+    if has_side {
+        let side_x = total_w - margin - side_w;
+        let mut side_y = cur_y;
+
+        if settings.info {
+            svg.push_str(&format!(
+                r##"<text x="{x}" y="{y}" font-size="9.5" font-weight="bold" font-family="sans-serif" fill="#212529">Experimental Parameters</text>
+<line x1="{x}" y1="{ly}" x2="{lx2}" y2="{ly}" stroke="#0d6efd" stroke-width="1.5" />
+"##,
+                x = side_x,
+                y = side_y + 10.0,
+                ly = side_y + 14.0,
+                lx2 = side_x + side_w,
+            ));
+            side_y += 20.0;
+
+            let exp_rows = metadata.to_display_rows();
+            for (k, v) in exp_rows {
+                svg.push_str(&format!(
+                    r##"<rect x="{x}" y="{y}" width="{w}" height="13" fill="#f8f9fa" stroke="#dee2e6" stroke-width="0.5" />
+<text x="{tx1}" y="{ty}" font-size="7" font-weight="600" font-family="sans-serif" fill="#495057">{key}</text>
+<text x="{tx2}" y="{ty}" font-size="7" font-family="sans-serif" fill="#212529">{val}</text>
+"##,
+                    x = side_x,
+                    y = side_y,
+                    w = side_w,
+                    tx1 = side_x + 4.0,
+                    tx2 = side_x + 68.0,
+                    ty = side_y + 9.5,
+                    key = k,
+                    val = html_escape(&v),
+                ));
+                side_y += 13.0;
+            }
+
+            side_y += 10.0;
+            svg.push_str(&format!(
+                r##"<text x="{x}" y="{y}" font-size="10" font-weight="bold" font-family="sans-serif" fill="#212529">FT Settings</text>
+<line x1="{x}" y1="{ly}" x2="{lx2}" y2="{ly}" stroke="#0d6efd" stroke-width="1.5" />
+"##,
+                x = side_x,
+                y = side_y + 10.0,
+                ly = side_y + 14.0,
+                lx2 = side_x + side_w,
+            ));
+            side_y += 20.0;
+
+            let eff_points = (metadata.points * ft_settings.zf_factor).max(1);
+            let dig_res = format!("{:.4} Hz/pt", metadata.spectral_width_hz / (eff_points as f64));
+            let ft_rows = [
+                ("Window", match ft_settings.window {
+                    crate::core::WindowFunction::None => "None".to_string(),
+                    crate::core::WindowFunction::Exponential { lb } => format!("Exp ({} Hz)", lb),
+                    crate::core::WindowFunction::Gaussian { g1, g2, g3 } => format!("Gauss ({},{},{})", g1, g2, g3),
+                }),
+                ("Zero Fill", format!("{}x", ft_settings.zf_factor)),
+                ("Digital Res.", dig_res),
+                ("Group Delay", if ft_settings.remove_digital_filter { "Removed" } else { "Kept" }.to_string()),
+            ];
+
+            for (k, v) in ft_rows {
+                svg.push_str(&format!(
+                    r##"<rect x="{x}" y="{y}" width="{w}" height="14" fill="#f8f9fa" stroke="#dee2e6" stroke-width="0.5" />
+<text x="{tx1}" y="{ty}" font-size="7.5" font-weight="600" font-family="sans-serif" fill="#495057">{key}</text>
+<text x="{tx2}" y="{ty}" font-size="7.5" font-family="sans-serif" fill="#212529">{val}</text>
+"##,
+                    x = side_x,
+                    y = side_y,
+                    w = side_w,
+                    tx1 = side_x + 4.0,
+                    tx2 = side_x + 75.0,
+                    ty = side_y + 10.0,
+                    key = k,
+                    val = html_escape(&v),
+                ));
+                side_y += 14.0;
+            }
+        }
+
+        if settings.jcoupling && !j_couplings.is_empty() {
+            side_y += 12.0;
+            svg.push_str(&format!(
+                r##"<text x="{x}" y="{y}" font-size="10" font-weight="bold" font-family="sans-serif" fill="#212529">J Coupling</text>
+<line x1="{x}" y1="{ly}" x2="{lx2}" y2="{ly}" stroke="#0d6efd" stroke-width="1.5" />
+"##,
+                x = side_x,
+                y = side_y + 10.0,
+                ly = side_y + 14.0,
+                lx2 = side_x + side_w,
+            ));
+            side_y += 20.0;
+
+            for (i, jc) in j_couplings.iter().enumerate() {
+                svg.push_str(&format!(
+                    r##"<text x="{tx1}" y="{ty}" font-size="8" font-family="sans-serif" fill="#212529">#{idx} {text}</text>
+"##,
+                    tx1 = side_x + 4.0,
+                    ty = side_y + 10.0,
+                    idx = i + 1,
+                    text = html_escape(&jc.text),
+                ));
+                side_y += 14.0;
+            }
+        }
+    }
+
+    svg.push_str("</svg>");
+    svg
+}
+
+/// プロット部分の内部ベクター SVG 生成
+fn generate_plot_svg_content(
+    settings: &PrintSettings,
+    main_transform: Option<&PlotTransform>,
+    ppm: &Array1<f64>,
+    spectrum: &Array1<f64>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    plot_x: f64,
+    plot_y: f64,
+    plot_w: f64,
+    plot_h: f64,
+) -> String {
+    let (p_min, p_max, y_min, y_max, main_screen_w, main_screen_h, main_screen_min_x, main_screen_min_y) = if let Some(t) = main_transform {
+        (
+            t.ppm_min,
+            t.ppm_max,
+            t.y_min,
+            t.y_max,
+            t.screen_rect.width() as f64,
+            t.screen_rect.height() as f64,
+            t.screen_rect.min.x as f64,
+            t.screen_rect.min.y as f64,
+        )
+    } else {
+        let p_min_data = ppm.iter().cloned().fold(f64::INFINITY, f64::min);
+        let p_max_data = ppm.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let y_max_data = spectrum.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0);
+        (p_min_data, p_max_data, -0.05 * y_max_data, y_max_data * 1.1, plot_w, plot_h, 0.0, 0.0)
+    };
+
+    let bottom_margin = 55.0;
+    let actual_plot_h = (plot_h - bottom_margin).max(10.0);
+    let axis_y = plot_y + actual_plot_h;
+
+    let ppm_to_x = |p: f64| -> f64 {
+        plot_x + (p_max - p) / (p_max - p_min).max(1e-6) * plot_w
+    };
+    let y_to_y = |y: f64| -> f64 {
+        axis_y - (y - y_min) / (y_max - y_min).max(1e-6) * actual_plot_h
+    };
+
+    let p_low = p_min.min(p_max);
+    let p_high = p_min.max(p_max);
+
+    let mut svg = String::new();
+
+    // 1. スペクトル曲線
+    if settings.spectrum && !ppm.is_empty() && !spectrum.is_empty() {
+        let n_pts = ppm.len().min(spectrum.len());
+        let mut path_data = String::new();
+        let target_res = (plot_w * 2.0) as usize;
+        let step = (n_pts / target_res).max(1);
+
+        let mut first = true;
+        for i in (0..n_pts).step_by(step) {
+            let p = ppm[i];
+            if p >= p_low && p <= p_high {
+                let sx = ppm_to_x(p);
+                let sy = y_to_y(spectrum[i]).min(axis_y);
+                if first {
+                    path_data.push_str(&format!("M {:.2} {:.2} ", sx, sy));
+                    first = false;
+                } else {
+                    path_data.push_str(&format!("L {:.2} {:.2} ", sx, sy));
+                }
+            }
+        }
+        svg.push_str(&format!(
+            r##"<path d="{}" stroke="#000000" stroke-width="1.2" fill="none" />
+"##,
+            path_data
+        ));
+    }
+
+    // 2. X軸 (PPM軸 & 目盛り & ラベル)
+    svg.push_str(&format!(
+        r##"<line x1="{x1}" y1="{y}" x2="{x2}" y2="{y}" stroke="#212529" stroke-width="1.0" />
+"##,
+        x1 = plot_x,
+        x2 = plot_x + plot_w,
+        y = axis_y,
+    ));
+
+    let span = (p_max - p_min).abs();
+    let tick_interval = if span > 100.0 {
+        20.0
+    } else if span > 40.0 {
+        10.0
+    } else if span > 15.0 {
+        5.0
+    } else if span > 6.0 {
+        1.0
+    } else if span > 2.0 {
+        0.5
+    } else {
+        0.1
+    };
+
+    let first_tick = (p_low / tick_interval).ceil() * tick_interval;
+    let mut cur_tick = first_tick;
+    while cur_tick <= p_high {
+        let tx = ppm_to_x(cur_tick);
+        if tx >= plot_x && tx <= plot_x + plot_w {
+            svg.push_str(&format!(
+                r##"<line x1="{x:.1}" y1="{y1}" x2="{x:.1}" y2="{y2}" stroke="#212529" stroke-width="1.0" />
+<text x="{x:.1}" y="{ty}" font-size="9" text-anchor="middle" font-family="sans-serif" fill="#212529">{val:.1}</text>
+"##,
+                x = tx,
+                y1 = axis_y,
+                y2 = axis_y + 4.0,
+                ty = axis_y + 14.0,
+                val = cur_tick,
+            ));
+        }
+        cur_tick += tick_interval;
+    }
+
+    svg.push_str(&format!(
+        r##"<text x="{x}" y="{y}" font-size="10" font-weight="600" text-anchor="end" font-family="sans-serif" fill="#212529">ppm</text>
+"##,
+        x = plot_x + plot_w,
+        y = axis_y + 24.0,
+    ));
+
+    // 3. ピーク表示 (頭頂部マーク & アンチコリジョン引き出し線 & 縦向きPPM値)
+    if settings.peak {
+        let mut visible_peaks: Vec<&PeakItem> = peaks
+            .iter()
+            .filter(|p| p.ppm >= p_low && p.ppm <= p_high)
+            .collect();
+        visible_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+
+        if !visible_peaks.is_empty() {
+            let mut text_x: Vec<f64> = visible_peaks
+                .iter()
+                .map(|p| ppm_to_x(p.ppm))
+                .collect();
+
+            let min_gap = 12.0;
+            for _ in 0..200 {
+                let mut moved = false;
+                for i in 1..text_x.len() {
+                    let diff = text_x[i] - text_x[i - 1];
+                    if diff < min_gap {
+                        let overlap = min_gap - diff;
+                        text_x[i - 1] -= overlap * 0.5;
+                        text_x[i] += overlap * 0.5;
+                        moved = true;
+                    }
+                }
+                if !moved { break; }
+            }
+
+            let y_elbow = axis_y + 10.0;
+            let y_text_start = axis_y + 18.0;
+
+            for (i, pk) in visible_peaks.iter().enumerate() {
+                let px = ppm_to_x(pk.ppm);
+                let tx = text_x[i].clamp(plot_x + 2.0, plot_x + plot_w - 2.0);
+
+                svg.push_str(&format!(
+                    r##"<line x1="{px:.1}" y1="{axis_y:.1}" x2="{px:.1}" y2="{y_elbow:.1}" stroke="#888888" stroke-width="0.8" />
+<line x1="{px:.1}" y1="{y_elbow:.1}" x2="{tx:.1}" y2="{y_text_start_pre:.1}" stroke="#888888" stroke-width="0.8" />
+<line x1="{tx:.1}" y1="{y_text_start_pre:.1}" x2="{tx:.1}" y2="{y_text_start:.1}" stroke="#888888" stroke-width="0.8" />
+<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.3}</text></g>
+"##,
+                    px = px,
+                    axis_y = axis_y,
+                    y_elbow = y_elbow,
+                    y_text_start_pre = y_text_start - 2.0,
+                    tx = tx,
+                    y_text_start = y_text_start,
+                    ty = y_text_start + 2.0,
+                    val = pk.ppm,
+                ));
+            }
+        }
+    }
+
+    // 4. 積分
+    if settings.integrate {
+        for it in integrations {
+            let p_start = it.start_ppm.max(it.end_ppm);
+            let p_end = it.start_ppm.min(it.end_ppm);
+            let sx_start = ppm_to_x(p_start);
+            let sx_end = ppm_to_x(p_end);
+
+            if sx_end > plot_x && sx_start < plot_x + plot_w {
+                let bl_y1 = y_to_y(it.y_start);
+                let bl_y2 = y_to_y(it.y_end);
+                svg.push_str(&format!(
+                    r##"<line x1="{x1:.1}" y1="{y1:.1}" x2="{x2:.1}" y2="{y2:.1}" stroke="#3b82f6" stroke-width="0.9" stroke-dasharray="3,3" />
+"##,
+                    x1 = sx_start,
+                    y1 = bl_y1,
+                    x2 = sx_end,
+                    y2 = bl_y2,
+                ));
+
+                if let Some(res) = compute_integral(spectrum, ppm, it, integration_scale, integration_ref_factor, integration_offset) {
+                    if res.ppm.len() > 1 && res.ppm.len() == res.curve_y.len() {
+                        let mut curve_d = String::new();
+                        let mut min_sy = f64::MAX;
+                        let mut first = true;
+
+                        for idx in 0..res.ppm.len() {
+                            let p = res.ppm[idx];
+                            let sx = ppm_to_x(p);
+                            let sy = y_to_y(res.curve_y[idx]).min(axis_y);
+                            if sy < min_sy { min_sy = sy; }
+
+                            if first {
+                                curve_d.push_str(&format!("M {:.1} {:.1} ", sx, sy));
+                                first = false;
+                            } else {
+                                curve_d.push_str(&format!("L {:.1} {:.1} ", sx, sy));
+                            }
+                        }
+
+                        svg.push_str(&format!(
+                            r##"<path d="{}" stroke="#e11d48" stroke-width="1.4" fill="none" />
+<text x="{mx:.1}" y="{ty:.1}" font-size="9" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.2}</text>
+"##,
+                            curve_d,
+                            mx = (sx_start + sx_end) * 0.5,
+                            ty = min_sy - 3.0,
+                            val = res.normalized_value,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. マルチビュー (拡大スペクトル、積分、ピーク引き出し線、X軸目盛り)
+    if settings.multiview && !multiviews.is_empty() {
+        for mv in multiviews {
+            let rel_x = (mv.geometry.x as f64 - main_screen_min_x) / main_screen_w.max(1.0);
+            let rel_y = (mv.geometry.y as f64 - main_screen_min_y) / main_screen_h.max(1.0);
+            let rel_w = (mv.geometry.w as f64) / main_screen_w.max(1.0);
+            let rel_h = (mv.geometry.h as f64) / main_screen_h.max(1.0);
+
+            let inset_x = plot_x + rel_x * plot_w;
+            let inset_y = plot_y + rel_y * plot_h;
+            let inset_w = rel_w * plot_w;
+            let inset_h = rel_h * plot_h;
+
+            if inset_w > 30.0 && inset_h > 30.0 {
+                svg.push_str(&format!(
+                    r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" fill="#ffffff" stroke="#a0a0a0" stroke-width="1.2" />
+"##,
+                    x = inset_x,
+                    y = inset_y,
+                    w = inset_w,
+                    h = inset_h,
+                ));
+
+                let mv_src_min = mv.src_x_min.min(mv.src_x_max);
+                let mv_src_max = mv.src_x_min.max(mv.src_x_max);
+
+                let mut mv_y_min = f64::INFINITY;
+                let mut mv_y_max = f64::NEG_INFINITY;
+                for idx in 0..ppm.len().min(spectrum.len()) {
+                    let p = ppm[idx];
+                    if p >= mv_src_min && p <= mv_src_max {
+                        let v = spectrum[idx];
+                        if v < mv_y_min { mv_y_min = v; }
+                        if v > mv_y_max { mv_y_max = v; }
+                    }
+                }
+                if mv_y_min >= mv_y_max {
+                    mv_y_min = 0.0;
+                    mv_y_max = 1.0;
+                }
+
+                let h_diff = (mv_y_max - mv_y_min).max(1e-6);
+                let y_min_adj = mv_y_min - 0.05 * h_diff;
+                let y_max_adj = mv_y_max + 0.50 * h_diff;
+
+                let inset_axis_y = inset_y + inset_h - 16.0;
+                let inset_plot_h = (inset_axis_y - inset_y - 6.0).max(10.0);
+                let inset_plot_w = (inset_w - 12.0).max(10.0);
+
+                let mv_ppm_to_x = |p: f64| -> f64 {
+                    inset_x + 6.0 + (mv_src_max - p) / (mv_src_max - mv_src_min).max(1e-6) * inset_plot_w
+                };
+                let mv_y_to_y = |y: f64| -> f64 {
+                    inset_axis_y - (y - y_min_adj) / (y_max_adj - y_min_adj).max(1e-6) * inset_plot_h
+                };
+
+                // 1. 拡大スペクトル曲線 (黒色)
+                let mut mv_d = String::new();
+                let mut first = true;
+                for idx in 0..ppm.len().min(spectrum.len()) {
+                    let p = ppm[idx];
+                    if p >= mv_src_min && p <= mv_src_max {
+                        let sx = mv_ppm_to_x(p);
+                        let sy = mv_y_to_y(spectrum[idx]);
+                        if first {
+                            mv_d.push_str(&format!("M {:.1} {:.1} ", sx, sy.min(inset_axis_y)));
+                            first = false;
+                        } else {
+                            mv_d.push_str(&format!("L {:.1} {:.1} ", sx, sy.min(inset_axis_y)));
+                        }
+                    }
+                }
+                if !mv_d.is_empty() {
+                    svg.push_str(&format!(
+                        r##"<path d="{}" stroke="#000000" stroke-width="1.2" fill="none" />
+"##,
+                        mv_d
+                    ));
+                }
+
+                // 2. 積分 (マルチビュー内)
+                if settings.integrate {
+                    for integ in integrations {
+                        let i_min = integ.min_ppm();
+                        let i_max = integ.max_ppm();
+                        if i_max < mv_src_min || i_min > mv_src_max {
+                            continue;
+                        }
+                        if let Some(res) = compute_integral(spectrum, ppm, integ, 1.0, integration_ref_factor, 0.0) {
+                            if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                                let mut intg_d = String::new();
+                                let mut first_intg = true;
+                                for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
+                                    if p >= mv_src_min && p <= mv_src_max {
+                                        let bl = integ.baseline_y_at(p);
+                                        let cum_area = (cy - bl).max(0.0);
+                                        let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                                        let target_data_y = y_min_adj + 0.20 * h_diff + norm_y * (0.45 * h_diff);
+                                        let sx = mv_ppm_to_x(p);
+                                        let sy = mv_y_to_y(target_data_y);
+                                        if first_intg {
+                                            intg_d.push_str(&format!("M {:.1} {:.1} ", sx, sy));
+                                            first_intg = false;
+                                        } else {
+                                            intg_d.push_str(&format!("L {:.1} {:.1} ", sx, sy));
+                                        }
+                                    }
+                                }
+                                if !intg_d.is_empty() {
+                                    svg.push_str(&format!(
+                                        r##"<path d="{}" stroke="#e11d48" stroke-width="1.2" fill="none" />
+"##,
+                                        intg_d
+                                    ));
+                                    let mid_p = (i_min.max(mv_src_min) + i_max.min(mv_src_max)) * 0.5;
+                                    let tx = mv_ppm_to_x(mid_p);
+                                    let ty = mv_y_to_y(y_min_adj + 0.70 * h_diff);
+                                    svg.push_str(&format!(
+                                        r##"<text x="{tx:.1}" y="{ty:.1}" font-size="8" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.2}</text>
+"##,
+                                        tx = tx,
+                                        ty = ty,
+                                        val = res.normalized_value,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. ピーク引き出し線 & 縦書き化学シフト値 (マルチビュー内)
+                if settings.peak {
+                    let sub_peaks: Vec<&PeakItem> = peaks
+                        .iter()
+                        .filter(|pk| pk.ppm >= mv_src_min && pk.ppm <= mv_src_max)
+                        .collect();
+                    if !sub_peaks.is_empty() {
+                        let mut sorted_peaks = sub_peaks.clone();
+                        sorted_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+
+                        let mut mv_text_x: Vec<f64> = sorted_peaks.iter().map(|p| mv_ppm_to_x(p.ppm)).collect();
+                        let min_gap = 8.0;
+                        for _ in 0..100 {
+                            let mut moved = false;
+                            for i in 1..mv_text_x.len() {
+                                let diff = mv_text_x[i] - mv_text_x[i - 1];
+                                if diff < min_gap {
+                                    let overlap = min_gap - diff;
+                                    mv_text_x[i - 1] -= overlap * 0.5;
+                                    mv_text_x[i] += overlap * 0.5;
+                                    moved = true;
+                                }
+                            }
+                            if !moved { break; }
+                        }
+
+                        let mv_text_start_y = inset_y + 4.0;
+                        let text_len = 18.0;
+                        let text_bottom_y = mv_text_start_y + text_len;
+                        let mv_elbow_y = (text_bottom_y + 5.0).min(inset_axis_y - 10.0);
+
+                        for (i, pk) in sorted_peaks.iter().enumerate() {
+                            let px = mv_ppm_to_x(pk.ppm);
+                            let tx = mv_text_x[i].clamp(inset_x + 4.0, inset_x + inset_w - 4.0);
+                            let py = mv_y_to_y(pk.intensity);
+                            let clearance = 12.0;
+                            let line_start_y = (py - clearance).clamp(mv_elbow_y + 2.0, inset_axis_y - 2.0);
+
+                            if line_start_y > mv_elbow_y + 1.0 {
+                                svg.push_str(&format!(
+                                    r##"<line x1="{px:.1}" y1="{line_start_y:.1}" x2="{px:.1}" y2="{mv_elbow_y:.1}" stroke="#888888" stroke-width="0.7" />
+<line x1="{px:.1}" y1="{mv_elbow_y:.1}" x2="{tx:.1}" y2="{y_elbow_t:.1}" stroke="#888888" stroke-width="0.7" />
+<line x1="{tx:.1}" y1="{y_elbow_t:.1}" x2="{tx:.1}" y2="{y_start_t:.1}" stroke="#888888" stroke-width="0.7" />
+"##,
+                                    px = px,
+                                    line_start_y = line_start_y,
+                                    mv_elbow_y = mv_elbow_y,
+                                    tx = tx,
+                                    y_elbow_t = text_bottom_y + 2.0,
+                                    y_start_t = text_bottom_y,
+                                ));
+                            }
+
+                            svg.push_str(&format!(
+                                r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="6" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.3}</text></g>
+"##,
+                                tx = tx,
+                                ty = mv_text_start_y,
+                                val = pk.ppm,
+                            ));
+                        }
+                    }
+                }
+
+                // 4. X 軸目盛り線 & PPM 数値ラベル (マルチビュー内)
+                svg.push_str(&format!(
+                    r##"<line x1="{x1:.1}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="#212529" stroke-width="0.8" />
+"##,
+                    x1 = inset_x + 6.0,
+                    x2 = inset_x + inset_w - 6.0,
+                    y = inset_axis_y,
+                ));
+
+                let ppm_span = mv_src_max - mv_src_min;
+                let target_ticks = (inset_plot_w / 40.0).clamp(2.0, 5.0);
+                let rough_step = (ppm_span / target_ticks).max(1e-6);
+                let exponent = rough_step.log10().floor();
+                let frac = rough_step / 10.0_f64.powf(exponent);
+                let nice_frac = if frac <= 1.5 { 1.0 } else if frac <= 3.0 { 2.0 } else if frac <= 7.0 { 5.0 } else { 10.0 };
+                let step = nice_frac * 10.0_f64.powf(exponent);
+                let start_tick = (mv_src_min / step).ceil() as i64;
+                let end_tick = (mv_src_max / step).floor() as i64;
+                let decimals = if step < 0.0099 { 3 } else if step < 0.099 { 2 } else if step < 0.99 { 1 } else { 0 };
+
+                for t_idx in start_tick..=end_tick {
+                    let tick_ppm = t_idx as f64 * step;
+                    let tick_x = mv_ppm_to_x(tick_ppm);
+                    if tick_x >= inset_x + 10.0 && tick_x <= inset_x + inset_w - 10.0 {
+                        svg.push_str(&format!(
+                            r##"<line x1="{tx:.1}" y1="{y1:.1}" x2="{tx:.1}" y2="{y2:.1}" stroke="#212529" stroke-width="0.7" />
+<text x="{tx:.1}" y="{ty:.1}" font-size="7" text-anchor="middle" font-family="sans-serif" fill="#212529">{val:.prec$}</text>
+"##,
+                            tx = tick_x,
+                            y1 = inset_axis_y,
+                            y2 = inset_axis_y + 3.0,
+                            ty = inset_axis_y + 11.0,
+                            val = tick_ppm,
+                            prec = decimals,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    svg
+}
+
+/// OSネイティブ直接印刷の実行 (ブラウザは一切起動せず、OS印刷スプーラーへ直接ジョブ送信)
+fn execute_native_print(
+    settings: &PrintSettings,
+    main_transform: Option<&PlotTransform>,
+    ppm: Option<&Array1<f64>>,
+    spectrum: Option<&Array1<f64>>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    metadata: &AcquisitionMetadata,
+    ft_settings: &FtSettings,
+    j_couplings: &[JCouplingResultItem],
+    current_filepath: Option<&Path>,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        print_windows_native(
+            settings,
+            main_transform,
+            ppm,
+            spectrum,
+            peaks,
+            integrations,
+            integration_scale,
+            integration_offset,
+            integration_ref_factor,
+            multiviews,
+            metadata,
+            ft_settings,
+            j_couplings,
+            current_filepath,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        print_macos_native(
+            settings,
+            main_transform,
+            ppm,
+            spectrum,
+            peaks,
+            integrations,
+            integration_scale,
+            integration_offset,
+            integration_ref_factor,
+            multiviews,
+            metadata,
+            ft_settings,
+            j_couplings,
+            current_filepath,
+        )
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Printing is not supported on this OS"))
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Windows GDI ネイティブ直接印刷エンジン (winspool / gdi32)
+// ----------------------------------------------------------------------------
+#[cfg(target_os = "windows")]
+fn print_windows_native(
+    settings: &PrintSettings,
+    main_transform: Option<&PlotTransform>,
+    ppm: Option<&Array1<f64>>,
+    spectrum: Option<&Array1<f64>>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    metadata: &AcquisitionMetadata,
+    ft_settings: &FtSettings,
+    j_couplings: &[JCouplingResultItem],
+    current_filepath: Option<&Path>,
+) -> std::io::Result<()> {
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct DOCINFOW {
+        cbSize: i32,
+        lpszDocName: *const u16,
+        lpszOutput: *const u16,
+        lpszDatatype: *const u16,
+        fwType: u32,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct POINT {
+        x: i32,
+        y: i32,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct LOGFONTW {
+        lfHeight: i32,
+        lfWidth: i32,
+        lfEscapement: i32,
+        lfOrientation: i32,
+        lfWeight: i32,
+        lfItalic: u8,
+        lfUnderline: u8,
+        lfStrikeOut: u8,
+        lfCharSet: u8,
+        lfOutPrecision: u8,
+        lfClipPrecision: u8,
+        lfQuality: u8,
+        lfPitchAndFamily: u8,
+        lfFaceName: [u16; 32],
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct TEXTMETRICW {
+        tmHeight: i32,
+        tmAscent: i32,
+        tmDescent: i32,
+        tmInternalLeading: i32,
+        tmExternalLeading: i32,
+        tmAveCharWidth: i32,
+        tmMaxCharWidth: i32,
+        tmWeight: i32,
+        tmOverhang: i32,
+        tmDigitizedAspectX: i32,
+        tmDigitizedAspectY: i32,
+        tmFirstChar: u16,
+        tmLastChar: u16,
+        tmDefaultChar: u16,
+        tmBreakChar: u16,
+        tmItalic: u8,
+        tmUnderlined: u8,
+        tmStruckOut: u8,
+        tmPitchAndFamily: u8,
+        tmCharSet: u8,
+    }
+
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        fn CreateDCW(
+            pDriver: *const u16,
+            pDevice: *const u16,
+            pPort: *const u16,
+            pDevMode: *const std::ffi::c_void,
+        ) -> isize;
+        fn DeleteDC(hdc: isize) -> i32;
+        fn StartDocW(hdc: isize, lpdi: *const DOCINFOW) -> i32;
+        fn EndDoc(hdc: isize) -> i32;
+        fn StartPage(hdc: isize) -> i32;
+        fn EndPage(hdc: isize) -> i32;
+        fn GetDeviceCaps(hdc: isize, nIndex: i32) -> i32;
+        fn CreatePen(iStyle: i32, cWidth: i32, color: u32) -> isize;
+        fn CreateSolidBrush(color: u32) -> isize;
+        fn SelectObject(hdc: isize, hgdiobj: isize) -> isize;
+        fn DeleteObject(ho: isize) -> i32;
+        fn MoveToEx(hdc: isize, x: i32, y: i32, lppt: *mut POINT) -> i32;
+        fn LineTo(hdc: isize, x: i32, y: i32) -> i32;
+        fn Polyline(hdc: isize, apt: *const POINT, cpt: i32) -> i32;
+        fn Rectangle(hdc: isize, left: i32, top: i32, right: i32, bottom: i32) -> i32;
+        fn SetTextColor(hdc: isize, color: u32) -> u32;
+        fn SetBkMode(hdc: isize, mode: i32) -> i32;
+        fn SetTextAlign(hdc: isize, fMode: u32) -> u32;
+        fn CreateFontIndirectW(lplf: *const LOGFONTW) -> isize;
+        fn TextOutW(hdc: isize, x: i32, y: i32, lpString: *const u16, c: i32) -> i32;
+        fn GetTextMetricsW(hdc: isize, lptm: *mut TEXTMETRICW) -> i32;
+    }
+
+    const HORZRES: i32 = 8;
+    const VERTRES: i32 = 10;
+    const LOGPIXELSX: i32 = 88;
+    const LOGPIXELSY: i32 = 90;
+    const PS_SOLID: i32 = 0;
+    const PS_DASH: i32 = 1;
+    const TRANSPARENT: i32 = 1;
+    const TA_TOP: u32 = 0;
+    const TA_LEFT: u32 = 0;
+    const TA_CENTER: u32 = 6;
+    const FW_NORMAL: i32 = 400;
+    const FW_BOLD: i32 = 700;
+
+    fn rgb(r: u8, g: u8, b: u8) -> u32 {
+        (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
+    }
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let driver_name = to_wide("WINSPOOL");
+    let printer_name_wide = if !settings.printer_name.is_empty() && settings.printer_name != "Default Printer" {
+        to_wide(&settings.printer_name)
+    } else {
+        // デフォルトプリンター名の取得
+        #[link(name = "winspool")]
+        unsafe extern "system" {
+            fn GetDefaultPrinterW(pszBuffer: *mut u16, pcchBuffer: *mut u32) -> i32;
+        }
+        let mut buf = vec![0u16; 512];
+        let mut len = 512u32;
+        unsafe {
+            if GetDefaultPrinterW(buf.as_mut_ptr(), &mut len) != 0 {
+                buf.truncate(len as usize);
+                buf
+            } else {
+                to_wide("Microsoft Print to PDF")
+            }
+        }
+    };
+
+    let hdc = unsafe {
+        CreateDCW(
+            driver_name.as_ptr(),
+            printer_name_wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+
+    if hdc == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Failed to create printer DC for {}", settings.printer_name),
+        ));
+    }
+
+    let (dev_w, dev_h, dpi_x, dpi_y) = unsafe {
+        (
+            GetDeviceCaps(hdc, HORZRES),
+            GetDeviceCaps(hdc, VERTRES),
+            GetDeviceCaps(hdc, LOGPIXELSX).max(72),
+            GetDeviceCaps(hdc, LOGPIXELSY).max(72),
+        )
+    };
+
+    let doc_name = to_wide("Resona NMR Report");
+    let doc_info = DOCINFOW {
+        cbSize: std::mem::size_of::<DOCINFOW>() as i32,
+        lpszDocName: doc_name.as_ptr(),
+        lpszOutput: std::ptr::null(),
+        lpszDatatype: std::ptr::null(),
+        fwType: 0,
+    };
+
+    unsafe {
+        if StartDocW(hdc, &doc_info) <= 0 {
+            DeleteDC(hdc);
+            return Err(std::io::Error::last_os_error());
+        }
+        if StartPage(hdc) <= 0 {
+            EndDoc(hdc);
+            DeleteDC(hdc);
+            return Err(std::io::Error::last_os_error());
+        }
+
+        SetBkMode(hdc, TRANSPARENT);
+    }
+
+    // フォント作成ヘルパー
+    let make_font = |pt_size: f64, bold: bool, rotation_deg: i32| -> isize {
+        let height = -((pt_size * (dpi_y as f64) / 72.0).round() as i32);
+        let mut lf = LOGFONTW {
+            lfHeight: height,
+            lfWidth: 0,
+            lfEscapement: rotation_deg * 10,
+            lfOrientation: rotation_deg * 10,
+            lfWeight: if bold { FW_BOLD } else { FW_NORMAL },
+            lfItalic: 0,
+            lfUnderline: 0,
+            lfStrikeOut: 0,
+            lfCharSet: 1, // DEFAULT_CHARSET
+            lfOutPrecision: 0,
+            lfClipPrecision: 0,
+            lfQuality: 5, // CLEARTYPE_QUALITY
+            lfPitchAndFamily: 0,
+            lfFaceName: [0; 32],
+        };
+        let font_name = to_wide("Segoe UI");
+        for (i, &c) in font_name.iter().take(31).enumerate() {
+            lf.lfFaceName[i] = c;
+        }
+        unsafe { CreateFontIndirectW(&lf) }
+    };
+
+    let margin_x = ((0.4 * (dpi_x as f64)).round() as i32).max(40);
+    let margin_y = ((0.4 * (dpi_y as f64)).round() as i32).max(40);
+    let mut cur_y = margin_y;
+
+    // 1. ヘッダー (ファイル名: 高さを固定して File Name の有無でプロットが動かないようにする)
+    let header_h = dpi_y * 22 / 72;
+    if settings.filename {
+        let title_font = make_font(9.0, true, 0);
+        let old_font = unsafe { SelectObject(hdc, title_font) };
+        unsafe { SetTextColor(hdc, rgb(73, 80, 87)) };
+
+        let name_str = current_filepath
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Untitled Spectrum".to_string());
+        let wide_str = to_wide(&name_str);
+        unsafe {
+            TextOutW(hdc, margin_x, cur_y, wide_str.as_ptr(), (wide_str.len() - 1) as i32);
+        }
+
+        let line_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(222, 226, 230)) };
+        let old_pen = unsafe { SelectObject(hdc, line_pen) };
+        unsafe {
+            MoveToEx(hdc, margin_x, cur_y + (dpi_y * 14 / 72), std::ptr::null_mut());
+            LineTo(hdc, dev_w - margin_x, cur_y + (dpi_y * 14 / 72));
+            SelectObject(hdc, old_pen);
+            DeleteObject(line_pen);
+            SelectObject(hdc, old_font);
+            DeleteObject(title_font);
+        }
+    }
+    cur_y += header_h;
+
+    let has_side = settings.info || (settings.jcoupling && !j_couplings.is_empty());
+    let side_w = if has_side { dpi_x * 160 / 72 } else { 0 };
+    let plot_w = dev_w - margin_x * 2 - side_w - if has_side { dpi_x * 14 / 72 } else { 0 };
+    let plot_h = dev_h - cur_y - margin_y;
+
+    // 2. プロット描画 (ベクターPolyline / LineTo)
+    if let (Some(ppm_arr), Some(spec_arr)) = (ppm, spectrum) {
+        let (p_min, p_max, y_min, y_max, main_screen_w, main_screen_h, main_screen_min_x, main_screen_min_y) = if let Some(t) = main_transform {
+            (
+                t.ppm_min,
+                t.ppm_max,
+                t.y_min,
+                t.y_max,
+                t.screen_rect.width() as f64,
+                t.screen_rect.height() as f64,
+                t.screen_rect.min.x as f64,
+                t.screen_rect.min.y as f64,
+            )
+        } else {
+            let p_min_data = ppm_arr.iter().cloned().fold(f64::INFINITY, f64::min);
+            let p_max_data = ppm_arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let y_max_data = spec_arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0);
+            (p_min_data, p_max_data, -0.05 * y_max_data, y_max_data * 1.1, plot_w as f64, plot_h as f64, 0.0, 0.0)
+        };
+
+        let bottom_margin = dpi_y * 45 / 72;
+        let actual_plot_h = plot_h - bottom_margin;
+        let axis_y = cur_y + actual_plot_h;
+
+        let ppm_to_x = |p: f64| -> i32 {
+            margin_x + ((p_max - p) / (p_max - p_min).max(1e-6) * (plot_w as f64)).round() as i32
+        };
+        let y_to_y = |y: f64| -> i32 {
+            axis_y - ((y - y_min) / (y_max - y_min).max(1e-6) * (actual_plot_h as f64)).round() as i32
+        };
+
+        let p_low = p_min.min(p_max);
+        let p_high = p_min.max(p_max);
+
+        // スペクトル曲線
+        if settings.spectrum && !ppm_arr.is_empty() && !spec_arr.is_empty() {
+            let spec_pen = unsafe { CreatePen(PS_SOLID, (dpi_y * 1 / 72).max(1), rgb(0, 0, 0)) };
+            let old_pen = unsafe { SelectObject(hdc, spec_pen) };
+
+            let mut pts: Vec<POINT> = Vec::new();
+            for idx in 0..ppm_arr.len().min(spec_arr.len()) {
+                let p = ppm_arr[idx];
+                if p >= p_low && p <= p_high {
+                    let sx = ppm_to_x(p);
+                    let sy = y_to_y(spec_arr[idx]).min(axis_y);
+                    pts.push(POINT { x: sx, y: sy });
+                }
+            }
+
+            if pts.len() > 1 {
+                unsafe {
+                    Polyline(hdc, pts.as_ptr(), pts.len() as i32);
+                }
+            }
+
+            unsafe {
+                SelectObject(hdc, old_pen);
+                DeleteObject(spec_pen);
+            }
+        }
+
+        // X軸
+        let axis_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(33, 37, 41)) };
+        let old_pen = unsafe { SelectObject(hdc, axis_pen) };
+        unsafe {
+            MoveToEx(hdc, margin_x, axis_y, std::ptr::null_mut());
+            LineTo(hdc, margin_x + plot_w, axis_y);
+        }
+
+        // 目盛り & PPM ラベル
+        let tick_font = make_font(8.0, false, 0);
+        let old_font = unsafe { SelectObject(hdc, tick_font) };
+        unsafe { SetTextColor(hdc, rgb(33, 37, 41)) };
+
+        let span = (p_max - p_min).abs();
+        let tick_interval = if span > 100.0 { 20.0 } else if span > 40.0 { 10.0 } else if span > 15.0 { 5.0 } else if span > 6.0 { 1.0 } else if span > 2.0 { 0.5 } else { 0.1 };
+        let first_tick = (p_low / tick_interval).ceil() * tick_interval;
+        let mut cur_tick = first_tick;
+        while cur_tick <= p_high {
+            let tx = ppm_to_x(cur_tick);
+            if tx >= margin_x && tx <= margin_x + plot_w {
+                unsafe {
+                    MoveToEx(hdc, tx, axis_y, std::ptr::null_mut());
+                    LineTo(hdc, tx, axis_y + (dpi_y * 4 / 72));
+                    let val_str = to_wide(&format!("{:.1}", cur_tick));
+                    TextOutW(hdc, tx - (dpi_x * 8 / 72), axis_y + (dpi_y * 6 / 72), val_str.as_ptr(), (val_str.len() - 1) as i32);
+                }
+            }
+            cur_tick += tick_interval;
+        }
+
+        let unit_str = to_wide("ppm");
+        unsafe {
+            TextOutW(hdc, margin_x + plot_w - (dpi_x * 16 / 72), axis_y + (dpi_y * 18 / 72), unit_str.as_ptr(), (unit_str.len() - 1) as i32);
+            SelectObject(hdc, old_pen);
+            DeleteObject(axis_pen);
+            SelectObject(hdc, old_font);
+            DeleteObject(tick_font);
+        }
+
+        // ピーク (引き出し線 & 縦向き PPM 値)
+        if settings.peak {
+            let mut visible_peaks: Vec<&PeakItem> = peaks
+                .iter()
+                .filter(|p| p.ppm >= p_low && p.ppm <= p_high)
+                .collect();
+            visible_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+
+            if !visible_peaks.is_empty() {
+                let mut text_x: Vec<i32> = visible_peaks.iter().map(|p| ppm_to_x(p.ppm)).collect();
+                let min_gap = dpi_x * 10 / 72;
+                for _ in 0..200 {
+                    let mut moved = false;
+                    for i in 1..text_x.len() {
+                        let diff = text_x[i] - text_x[i - 1];
+                        if diff < min_gap {
+                            let overlap = min_gap - diff;
+                            text_x[i - 1] -= overlap / 2;
+                            text_x[i] += overlap / 2;
+                            moved = true;
+                        }
+                    }
+                    if !moved { break; }
+                }
+
+                let y_elbow = axis_y + (dpi_y * 8 / 72);
+                let y_text_start = axis_y + (dpi_y * 14 / 72);
+
+                let lead_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(150, 150, 150)) };
+                let rot_font = make_font(6.5, false, 270);
+                let old_font = unsafe { SelectObject(hdc, rot_font) };
+                let mut tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
+                unsafe {
+                    GetTextMetricsW(hdc, &mut tm);
+                    SetTextColor(hdc, rgb(20, 20, 20));
+                }
+
+                let old_lead = unsafe { SelectObject(hdc, lead_pen) };
+                for (i, pk) in visible_peaks.iter().enumerate() {
+                    let px = ppm_to_x(pk.ppm);
+                    let tx = text_x[i].clamp(margin_x + 2, margin_x + plot_w - 2);
+
+                    unsafe {
+                        MoveToEx(hdc, px, axis_y, std::ptr::null_mut());
+                        LineTo(hdc, px, y_elbow);
+                        LineTo(hdc, tx, y_text_start - 2);
+                        LineTo(hdc, tx, y_text_start);
+                    }
+
+                    let val_str = to_wide(&format!("{:.3}", pk.ppm));
+                    let draw_x = tx + tm.tmHeight / 2;
+                    let draw_y = y_text_start + (dpi_y * 2 / 72);
+                    unsafe {
+                        TextOutW(hdc, draw_x, draw_y, val_str.as_ptr(), (val_str.len() - 1) as i32);
+                    }
+                }
+
+                unsafe {
+                    SelectObject(hdc, old_lead);
+                    SelectObject(hdc, old_font);
+                    DeleteObject(rot_font);
+                    DeleteObject(lead_pen);
+                }
+            }
+        }
+
+        // 積分 (本物の累積積分曲線 & 局所ベースライン)
+        if settings.integrate {
+            let intg_pen = unsafe { CreatePen(PS_SOLID, (dpi_y * 1 / 72).max(1), rgb(225, 29, 72)) };
+            let bl_pen = unsafe { CreatePen(PS_DASH, 1, rgb(59, 130, 246)) };
+            let intg_font = make_font(8.0, true, 0);
+            let old_font = unsafe { SelectObject(hdc, intg_font) };
+            unsafe { SetTextColor(hdc, rgb(225, 29, 72)) };
+
+            for it in integrations {
+                let p_start = it.start_ppm.max(it.end_ppm);
+                let p_end = it.start_ppm.min(it.end_ppm);
+                let sx_start = ppm_to_x(p_start);
+                let sx_end = ppm_to_x(p_end);
+
+                if sx_end > margin_x && sx_start < margin_x + plot_w {
+                    let old_p = unsafe { SelectObject(hdc, bl_pen) };
+                    let bl_y1 = y_to_y(it.y_start);
+                    let bl_y2 = y_to_y(it.y_end);
+                    unsafe {
+                        MoveToEx(hdc, sx_start, bl_y1, std::ptr::null_mut());
+                        LineTo(hdc, sx_end, bl_y2);
+                        SelectObject(hdc, intg_pen);
+                    }
+
+                    if let Some(res) = compute_integral(spec_arr, ppm_arr, it, integration_scale, integration_ref_factor, integration_offset) {
+                        if res.ppm.len() > 1 && res.ppm.len() == res.curve_y.len() {
+                            let mut pts = Vec::with_capacity(res.ppm.len());
+                            let mut min_sy = i32::MAX;
+                            for idx in 0..res.ppm.len() {
+                                let sx = ppm_to_x(res.ppm[idx]);
+                                let sy = y_to_y(res.curve_y[idx]).min(axis_y);
+                                pts.push(POINT { x: sx, y: sy });
+                                min_sy = min_sy.min(sy);
+                            }
+                            unsafe {
+                                Polyline(hdc, pts.as_ptr(), pts.len() as i32);
+                            }
+
+                            let mid_x = (sx_start + sx_end) / 2;
+                            let val_str = to_wide(&format!("{:.2}", res.normalized_value));
+                            unsafe {
+                                TextOutW(hdc, mid_x - (dpi_x * 8 / 72), min_sy - (dpi_y * 10 / 72), val_str.as_ptr(), (val_str.len() - 1) as i32);
+                            }
+                        }
+                    }
+
+                    unsafe { SelectObject(hdc, old_p) };
+                }
+            }
+
+            unsafe {
+                SelectObject(hdc, old_font);
+                DeleteObject(intg_font);
+                DeleteObject(intg_pen);
+                DeleteObject(bl_pen);
+            }
+        }
+
+        // マルチビュー (拡大スペクトル、積分、ピーク引き出し線、X軸目盛り)
+        if settings.multiview && !multiviews.is_empty() {
+            let mv_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(160, 160, 160)) };
+            let white_brush = unsafe { CreateSolidBrush(rgb(255, 255, 255)) };
+
+            for mv in multiviews {
+                let rel_x = (mv.geometry.x as f64 - main_screen_min_x) / main_screen_w.max(1.0);
+                let rel_y = (mv.geometry.y as f64 - main_screen_min_y) / main_screen_h.max(1.0);
+                let rel_w = (mv.geometry.w as f64) / main_screen_w.max(1.0);
+                let rel_h = (mv.geometry.h as f64) / main_screen_h.max(1.0);
+
+                let inset_x = margin_x + (rel_x * (plot_w as f64)).round() as i32;
+                let inset_y = cur_y + (rel_y * (plot_h as f64)).round() as i32;
+                let inset_w = (rel_w * (plot_w as f64)).round() as i32;
+                let inset_h = (rel_h * (plot_h as f64)).round() as i32;
+
+                if inset_w > 30 && inset_h > 30 {
+                    let old_p = unsafe { SelectObject(hdc, mv_pen) };
+                    let old_b = unsafe { SelectObject(hdc, white_brush) };
+                    unsafe {
+                        Rectangle(hdc, inset_x, inset_y, inset_x + inset_w, inset_y + inset_h);
+                        SelectObject(hdc, old_b);
+                    }
+
+                    let mv_src_min = mv.src_x_min.min(mv.src_x_max);
+                    let mv_src_max = mv.src_x_min.max(mv.src_x_max);
+
+                    let mut mv_y_min = f64::INFINITY;
+                    let mut mv_y_max = f64::NEG_INFINITY;
+                    for idx in 0..ppm_arr.len().min(spec_arr.len()) {
+                        let p = ppm_arr[idx];
+                        if p >= mv_src_min && p <= mv_src_max {
+                            let v = spec_arr[idx];
+                            if v < mv_y_min { mv_y_min = v; }
+                            if v > mv_y_max { mv_y_max = v; }
+                        }
+                    }
+                    if mv_y_min >= mv_y_max {
+                        mv_y_min = 0.0;
+                        mv_y_max = 1.0;
+                    }
+
+                    let h_diff = (mv_y_max - mv_y_min).max(1e-6);
+                    let y_min_adj = mv_y_min - 0.05 * h_diff;
+                    let y_max_adj = mv_y_max + 0.50 * h_diff;
+
+                    let inset_axis_y = inset_y + inset_h - (dpi_y * 14 / 72);
+                    let inset_plot_h = (inset_axis_y - inset_y - (dpi_y * 6 / 72)).max(10);
+                    let inset_plot_w = (inset_w - (dpi_x * 12 / 72)).max(10);
+
+                    let mv_ppm_to_x = |p: f64| -> i32 {
+                        inset_x + (dpi_x * 6 / 72) + (((mv_src_max - p) / (mv_src_max - mv_src_min).max(1e-6)) * (inset_plot_w as f64)).round() as i32
+                    };
+                    let mv_y_to_y = |y: f64| -> i32 {
+                        inset_axis_y - (((y - y_min_adj) / (y_max_adj - y_min_adj).max(1e-6)) * (inset_plot_h as f64)).round() as i32
+                    };
+
+                    // 1. 拡大スペクトル曲線 (黒色)
+                    let spec_pen = unsafe { CreatePen(PS_SOLID, (dpi_y * 1 / 72).max(1), rgb(0, 0, 0)) };
+                    let old_spec_pen = unsafe { SelectObject(hdc, spec_pen) };
+
+                    let mut mv_pts = Vec::new();
+                    for idx in 0..ppm_arr.len().min(spec_arr.len()) {
+                        let p = ppm_arr[idx];
+                        if p >= mv_src_min && p <= mv_src_max {
+                            let sx = mv_ppm_to_x(p);
+                            let sy = mv_y_to_y(spec_arr[idx]);
+                            mv_pts.push(POINT { x: sx, y: sy.min(inset_axis_y) });
+                        }
+                    }
+
+                    if mv_pts.len() > 1 {
+                        unsafe {
+                            Polyline(hdc, mv_pts.as_ptr(), mv_pts.len() as i32);
+                        }
+                    }
+
+                    unsafe {
+                        SelectObject(hdc, old_spec_pen);
+                        DeleteObject(spec_pen);
+                    }
+
+                    // 2. 積分 (マルチビュー内)
+                    if settings.integrate {
+                        let mv_intg_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(225, 29, 72)) };
+                        let old_intg_p = unsafe { SelectObject(hdc, mv_intg_pen) };
+                        let mv_intg_font = make_font(6.5, true, 0);
+                        let old_font = unsafe { SelectObject(hdc, mv_intg_font) };
+                        unsafe { SetTextColor(hdc, rgb(225, 29, 72)) };
+
+                        for integ in integrations {
+                            let i_min = integ.min_ppm();
+                            let i_max = integ.max_ppm();
+                            if i_max < mv_src_min || i_min > mv_src_max {
+                                continue;
+                            }
+                            if let Some(res) = compute_integral(spec_arr, ppm_arr, integ, 1.0, integration_ref_factor, 0.0) {
+                                if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                                    let mut intg_pts = Vec::new();
+                                    for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
+                                        if p >= mv_src_min && p <= mv_src_max {
+                                            let bl = integ.baseline_y_at(p);
+                                            let cum_area = (cy - bl).max(0.0);
+                                            let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                                            let target_data_y = y_min_adj + 0.20 * h_diff + norm_y * (0.45 * h_diff);
+                                            intg_pts.push(POINT { x: mv_ppm_to_x(p), y: mv_y_to_y(target_data_y) });
+                                        }
+                                    }
+                                    if intg_pts.len() > 1 {
+                                        unsafe {
+                                            Polyline(hdc, intg_pts.as_ptr(), intg_pts.len() as i32);
+                                        }
+                                        let mid_p = (i_min.max(mv_src_min) + i_max.min(mv_src_max)) * 0.5;
+                                        let tx = mv_ppm_to_x(mid_p);
+                                        let ty = mv_y_to_y(y_min_adj + 0.70 * h_diff);
+                                        let val_str = to_wide(&format!("{:.2}", res.normalized_value));
+                                        unsafe {
+                                            TextOutW(hdc, tx - (dpi_x * 8 / 72), ty, val_str.as_ptr(), (val_str.len() - 1) as i32);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        unsafe {
+                            SelectObject(hdc, old_intg_p);
+                            SelectObject(hdc, old_font);
+                            DeleteObject(mv_intg_font);
+                            DeleteObject(mv_intg_pen);
+                        }
+                    }
+
+                    // 3. ピーク引き出し線 & 縦書き化学シフト値 (マルチビュー内)
+                    if settings.peak {
+                        let sub_peaks: Vec<&PeakItem> = peaks
+                            .iter()
+                            .filter(|pk| pk.ppm >= mv_src_min && pk.ppm <= mv_src_max)
+                            .collect();
+                        if !sub_peaks.is_empty() {
+                            let mut sorted_peaks = sub_peaks.clone();
+                            sorted_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+
+                            let mut mv_text_x: Vec<i32> = sorted_peaks.iter().map(|p| mv_ppm_to_x(p.ppm)).collect();
+                            let min_gap = dpi_x * 6 / 72;
+                            for _ in 0..100 {
+                                let mut moved = false;
+                                for i in 1..mv_text_x.len() {
+                                    let diff = mv_text_x[i] - mv_text_x[i - 1];
+                                    if diff < min_gap {
+                                        let overlap = min_gap - diff;
+                                        mv_text_x[i - 1] -= overlap / 2;
+                                        mv_text_x[i] += overlap / 2;
+                                        moved = true;
+                                    }
+                                }
+                                if !moved { break; }
+                            }
+
+                            let lead_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(150, 150, 150)) };
+                            let old_lead = unsafe { SelectObject(hdc, lead_pen) };
+                            let mv_rot_font = make_font(5.0, false, 270);
+                            let old_font = unsafe { SelectObject(hdc, mv_rot_font) };
+                            let mut mv_tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
+                            unsafe {
+                                GetTextMetricsW(hdc, &mut mv_tm);
+                                SetTextColor(hdc, rgb(20, 20, 20));
+                            }
+
+                            let text_len = dpi_y * 15 / 72;
+                            let mv_text_start_y = inset_y + (dpi_y * 4 / 72);
+                            let text_bottom_y = mv_text_start_y + text_len;
+                            let mv_elbow_y = (text_bottom_y + (dpi_y * 5 / 72)).min(inset_axis_y - (dpi_y * 8 / 72));
+
+                            for (i, pk) in sorted_peaks.iter().enumerate() {
+                                let px = mv_ppm_to_x(pk.ppm);
+                                let tx = mv_text_x[i].clamp(inset_x + 4, inset_x + inset_w - 4);
+                                let py = mv_y_to_y(pk.intensity);
+                                let clearance = dpi_y * 12 / 72;
+                                let line_start_y = (py - clearance).clamp(mv_elbow_y + 2, inset_axis_y - 2);
+
+                                if line_start_y > mv_elbow_y + 1 {
+                                    unsafe {
+                                        MoveToEx(hdc, px, line_start_y, std::ptr::null_mut());
+                                        LineTo(hdc, px, mv_elbow_y);
+                                        LineTo(hdc, tx, text_bottom_y + (dpi_y * 2 / 72));
+                                        LineTo(hdc, tx, text_bottom_y);
+                                    }
+                                }
+
+                                let val_str = to_wide(&format!("{:.3}", pk.ppm));
+                                let draw_x = tx + mv_tm.tmHeight / 2;
+                                let draw_y = mv_text_start_y;
+                                unsafe {
+                                    TextOutW(hdc, draw_x, draw_y, val_str.as_ptr(), (val_str.len() - 1) as i32);
+                                }
+                            }
+
+                            unsafe {
+                                SelectObject(hdc, old_lead);
+                                SelectObject(hdc, old_font);
+                                DeleteObject(mv_rot_font);
+                                DeleteObject(lead_pen);
+                            }
+                        }
+                    }
+
+                    // 4. X 軸目盛り線 & PPM 数値ラベル (マルチビュー内)
+                    let axis_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(33, 37, 41)) };
+                    let old_ax_p = unsafe { SelectObject(hdc, axis_pen) };
+                    unsafe {
+                        MoveToEx(hdc, inset_x + (dpi_x * 6 / 72), inset_axis_y, std::ptr::null_mut());
+                        LineTo(hdc, inset_x + inset_w - (dpi_x * 6 / 72), inset_axis_y);
+                    }
+
+                    let ppm_span = mv_src_max - mv_src_min;
+                    let target_ticks = ((inset_plot_w as f64) / (dpi_x as f64 * 40.0 / 72.0)).clamp(2.0, 5.0);
+                    let rough_step = (ppm_span / target_ticks).max(1e-6);
+                    let exponent = rough_step.log10().floor();
+                    let frac = rough_step / 10.0_f64.powf(exponent);
+                    let nice_frac = if frac <= 1.5 { 1.0 } else if frac <= 3.0 { 2.0 } else if frac <= 7.0 { 5.0 } else { 10.0 };
+                    let step = nice_frac * 10.0_f64.powf(exponent);
+                    let start_tick = (mv_src_min / step).ceil() as i64;
+                    let end_tick = (mv_src_max / step).floor() as i64;
+                    let decimals = if step < 0.0099 { 3 } else if step < 0.099 { 2 } else if step < 0.99 { 1 } else { 0 };
+
+                    let tick_font = make_font(6.0, false, 0);
+                    let old_tick_f = unsafe { SelectObject(hdc, tick_font) };
+                    unsafe {
+                        SetTextAlign(hdc, TA_CENTER | TA_TOP);
+                        SetTextColor(hdc, rgb(33, 37, 41));
+                    }
+
+                    for t_idx in start_tick..=end_tick {
+                        let tick_ppm = t_idx as f64 * step;
+                        let tick_x = mv_ppm_to_x(tick_ppm);
+                        if tick_x >= inset_x + (dpi_x * 8 / 72) && tick_x <= inset_x + inset_w - (dpi_x * 8 / 72) {
+                            unsafe {
+                                MoveToEx(hdc, tick_x, inset_axis_y, std::ptr::null_mut());
+                                LineTo(hdc, tick_x, inset_axis_y + (dpi_y * 2 / 72));
+                            }
+                            let s = to_wide(&format!("{:.1$}", tick_ppm, decimals));
+                            unsafe {
+                                TextOutW(hdc, tick_x, inset_axis_y + (dpi_y * 3 / 72), s.as_ptr(), (s.len() - 1) as i32);
+                            }
+                        }
+                    }
+
+                    unsafe {
+                        SelectObject(hdc, old_tick_f);
+                        SelectObject(hdc, old_ax_p);
+                        SetTextAlign(hdc, TA_LEFT | TA_TOP);
+                        DeleteObject(tick_font);
+                        DeleteObject(axis_pen);
+                    }
+
+                    unsafe { SelectObject(hdc, old_p); }
+                }
+            }
+
+            unsafe {
+                DeleteObject(mv_pen);
+                DeleteObject(white_brush);
+            }
+        }
+    }
+
+    // 3. 右側パラメータ表 (GDI: 画面のサイドパネルと100%同一の全行を表示)
+    if has_side {
+        let side_x = dev_w - margin_x - side_w;
+        let mut text_y = cur_y;
+
+        let hdr_font = make_font(8.0, true, 0);
+        let cell_font = make_font(6.5, false, 0);
+
+        if settings.info {
+            let _old_font = unsafe { SelectObject(hdc, hdr_font) };
+            unsafe { SetTextColor(hdc, rgb(33, 37, 41)) };
+            let title_wide = to_wide("Experimental Parameters");
+            unsafe {
+                TextOutW(hdc, side_x, text_y, title_wide.as_ptr(), (title_wide.len() - 1) as i32);
+                SelectObject(hdc, cell_font);
+            }
+            text_y += dpi_y * 12 / 72;
+
+            let exp_rows = metadata.to_display_rows();
+            for (k, v) in exp_rows {
+                let row_wide = to_wide(&format!("{}: {}", k, v));
+                unsafe {
+                    TextOutW(hdc, side_x, text_y, row_wide.as_ptr(), (row_wide.len() - 1) as i32);
+                }
+                text_y += dpi_y * 9 / 72;
+                if text_y > dev_h - margin_y - (dpi_y * 60 / 72) { break; }
+            }
+
+            text_y += dpi_y * 6 / 72;
+            unsafe { SelectObject(hdc, hdr_font) };
+            let ft_hdr = to_wide("FT Settings");
+            unsafe {
+                TextOutW(hdc, side_x, text_y, ft_hdr.as_ptr(), (ft_hdr.len() - 1) as i32);
+                SelectObject(hdc, cell_font);
+            }
+            text_y += dpi_y * 12 / 72;
+
+            let eff_points = (metadata.points * ft_settings.zf_factor).max(1);
+            let dig_res = format!("{:.4} Hz/pt", metadata.spectral_width_hz / (eff_points as f64));
+            let ft_rows = [
+                format!("Window: {}", match ft_settings.window {
+                    crate::core::WindowFunction::None => "None".to_string(),
+                    crate::core::WindowFunction::Exponential { lb } => format!("Exp ({}Hz)", lb),
+                    crate::core::WindowFunction::Gaussian { g1, g2, g3 } => format!("G({},{},{})", g1, g2, g3),
+                }),
+                format!("Zero Fill: {}x", ft_settings.zf_factor),
+                format!("Res: {}", dig_res),
+                format!("Group Delay: {}", if ft_settings.remove_digital_filter { "Removed" } else { "Kept" }),
+            ];
+
+            for r in ft_rows {
+                let row_wide = to_wide(&r);
+                unsafe {
+                    TextOutW(hdc, side_x, text_y, row_wide.as_ptr(), (row_wide.len() - 1) as i32);
+                }
+                text_y += dpi_y * 9 / 72;
+            }
+        }
+
+        if settings.jcoupling && !j_couplings.is_empty() && text_y < dev_h - margin_y - (dpi_y * 20 / 72) {
+            text_y += dpi_y * 6 / 72;
+            unsafe { SelectObject(hdc, hdr_font) };
+            let jc_hdr = to_wide("J Coupling");
+            unsafe {
+                TextOutW(hdc, side_x, text_y, jc_hdr.as_ptr(), (jc_hdr.len() - 1) as i32);
+                SelectObject(hdc, cell_font);
+            }
+            text_y += dpi_y * 12 / 72;
+
+            for (i, jc) in j_couplings.iter().take(6).enumerate() {
+                let s = to_wide(&format!("#{}: {}", i + 1, jc.text));
+                unsafe {
+                    TextOutW(hdc, side_x, text_y, s.as_ptr(), (s.len() - 1) as i32);
+                }
+                text_y += dpi_y * 9 / 72;
+            }
+        }
+
+        unsafe {
+            DeleteObject(hdr_font);
+            DeleteObject(cell_font);
+        }
+    }
+
+    unsafe {
+        EndPage(hdc);
+        EndDoc(hdc);
+        DeleteDC(hdc);
+    }
+
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// macOS CUPS ネイティブ直接印刷エンジン
+// ----------------------------------------------------------------------------
+#[cfg(target_os = "macos")]
+fn print_macos_native(
+    settings: &PrintSettings,
+    main_transform: Option<&PlotTransform>,
+    ppm: Option<&Array1<f64>>,
+    spectrum: Option<&Array1<f64>>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    metadata: &AcquisitionMetadata,
+    ft_settings: &FtSettings,
+    j_couplings: &[JCouplingResultItem],
+    current_filepath: Option<&Path>,
+) -> std::io::Result<()> {
+    let temp_dir = std::env::temp_dir();
+    let svg_path = temp_dir.join("resona_print_job.svg");
+
+    let svg_content = generate_complete_page_svg(
+        settings,
+        main_transform,
+        ppm,
+        spectrum,
+        peaks,
+        integrations,
+        integration_scale,
+        integration_offset,
+        integration_ref_factor,
+        multiviews,
+        metadata,
+        ft_settings,
+        j_couplings,
+        current_filepath,
+    );
+
+    fs::write(&svg_path, svg_content)?;
+
+    let mut cmd = std::process::Command::new("lp");
+    if !settings.printer_name.is_empty() && settings.printer_name != "Default Printer" {
+        cmd.args(["-d", &settings.printer_name]);
+    }
+    cmd.args(["-o", "fit-to-page", &svg_path.to_string_lossy()]);
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "lp command failed"));
+    }
+    Ok(())
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}

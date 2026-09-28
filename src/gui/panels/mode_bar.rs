@@ -7,6 +7,7 @@ pub enum ModeBarEvent {
     None,
     OpenReFt,
     OpenDisplay,
+    OpenPrint,
 }
 
 /// ezNMRライトテーマ準拠のモードボタン用スタイル
@@ -87,6 +88,16 @@ pub fn show_mode_bar(ui: &mut Ui, current_mode: &mut Option<AppMode>) -> ModeBar
             .rounding(3.0_f32);
         if ui.add(btn_display).clicked() {
             event = ModeBarEvent::OpenDisplay;
+        }
+
+        // 4. Print ボタン (通常ボタン)
+        let btn_print = Button::new(RichText::new("Print").size(13.0).color(txt))
+            .min_size(vec2(50.0, 26.0))
+            .fill(fill)
+            .stroke(strk)
+            .rounding(3.0_f32);
+        if ui.add(btn_print).clicked() {
+            event = ModeBarEvent::OpenPrint;
         }
     });
 
