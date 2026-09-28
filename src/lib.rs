@@ -8,7 +8,10 @@ pub use core::{
         JCouplingResultItem, PeakItem,
     },
     autophase::{acme_score, autophase_acme, nelder_mead_2d},
-    baseline::{apply_baseline_correction, baseline_als},
+    baseline::{
+        apply_baseline_correction, apply_baseline_method, baseline_airpls, baseline_als,
+        baseline_polynomial, BaselineMethod,
+    },
     error::{ResonaError, Result},
     io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource, RawFid},
     pipeline::{process_raw_fid, FtSettings, ProcessedSpectrum},

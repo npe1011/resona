@@ -13,7 +13,10 @@ pub use analysis::{
     JCouplingResultItem, PeakItem,
 };
 pub use autophase::{acme_score, autophase_acme, nelder_mead_2d};
-pub use baseline::{apply_baseline_correction, baseline_als};
+pub use baseline::{
+    apply_baseline_correction, apply_baseline_method, baseline_airpls, baseline_als,
+    baseline_polynomial, BaselineMethod,
+};
 pub use error::{ResonaError, Result};
 pub use io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource, RawFid};
 pub use pipeline::{process_raw_fid, FtSettings, ProcessedSpectrum};

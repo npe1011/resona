@@ -10,6 +10,7 @@ use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
 use crate::core::analysis::{IntegrationItem, JCouplingResultItem, PeakItem};
+use crate::core::baseline::BaselineMethod;
 use crate::core::error::{ResonaError, Result};
 use crate::core::io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource};
 use crate::core::pipeline::{process_raw_fid, FtSettings};
@@ -107,6 +108,8 @@ pub struct ProjectState {
     pub ft_settings: FtSettings,
     #[serde(default)]
     pub display_settings: DisplaySettings,
+    #[serde(default)]
+    pub baseline_method: BaselineMethod,
 }
 
 fn default_scale() -> f64 {
@@ -134,6 +137,7 @@ impl Default for ProjectState {
             j_couplings: Vec::new(),
             ft_settings: FtSettings::default(),
             display_settings: DisplaySettings::default(),
+            baseline_method: BaselineMethod::None,
         }
     }
 }
@@ -303,6 +307,7 @@ impl Project {
 
             // ベースライン補正が適用されていた場合はリセット
             self.baseline_array = None;
+            self.state.baseline_method = BaselineMethod::None;
             self.spectrum_real = Some(spec);
             self.invalidate_cache();
         }
@@ -319,20 +324,46 @@ impl Project {
         }
     }
 
-    /// ALS ベースライン補正を適用する
-    pub fn auto_baseline(&mut self, lam: f64, p: f64) {
-        if let Some(ref spec) = self.spectrum_real {
-            if self.baseline_array.is_none() {
-                let (corrected, bl) = crate::core::baseline::apply_baseline_correction(spec, lam, p);
-                self.spectrum_real = Some(corrected);
-                self.baseline_array = Some(bl);
-                self.invalidate_cache();
-            }
+    /// ベースライン補正を適用する (手法とパラメータを BaselineMethod enum で指定)
+    pub fn apply_baseline(&mut self, method: BaselineMethod) {
+        if method == BaselineMethod::None {
+            self.clear_baseline();
+            return;
         }
+
+        // 未補正の実部スペクトルを取得
+        let base_real = if let Some(ref unphased) = self.complex_spectrum_unphased {
+            apply_phase_and_extract_real(unphased, self.state.p0, self.state.p1)
+        } else if let Some(ref spec) = self.spectrum_real {
+            if let Some(ref bl) = self.baseline_array {
+                spec + bl
+            } else {
+                spec.clone()
+            }
+        } else {
+            return;
+        };
+
+        let (corrected, bl) = crate::core::baseline::apply_baseline_method(&base_real, method);
+        self.spectrum_real = Some(corrected);
+        self.baseline_array = bl;
+        self.state.baseline_method = method;
+        self.invalidate_cache();
+    }
+
+    /// ALS ベースライン補正を適用する (互換用)
+    pub fn auto_baseline(&mut self, lam: f64, p: f64) {
+        let _ = p;
+        let log_lam = lam.log10();
+        self.apply_baseline(BaselineMethod::AirPLS {
+            log_lambda: log_lam,
+            max_iter: 15,
+        });
     }
 
     /// ベースライン補正を取り消す
     pub fn clear_baseline(&mut self) {
+        self.state.baseline_method = BaselineMethod::None;
         if self.baseline_array.is_some() {
             self.update_phase(self.state.p0, self.state.p1);
             self.invalidate_cache();
@@ -536,6 +567,15 @@ impl Project {
             self.state = data.state;
         }
 
+        // 旧バージョンで保存されたプロジェクトの下位互換:
+        // baseline.npy はあるが baseline_method が None の場合、デフォルト airPLS として扱う
+        if self.baseline_array.is_some() && self.state.baseline_method == BaselineMethod::None {
+            self.state.baseline_method = BaselineMethod::AirPLS {
+                log_lambda: 8.0,
+                max_iter: 15,
+            };
+        }
+
         // 実部スペクトルの復元: apply_phase - baseline
         if let Some(ref unphased) = self.complex_spectrum_unphased {
             let mut real = apply_phase_and_extract_real(unphased, self.state.p0, self.state.p1);
@@ -596,5 +636,57 @@ mod tests {
         let new_max = proj.max_intensity();
         assert!((new_max - (-1.0)).abs() < 1e-6);
         assert_eq!(proj.cached_max_intensity.get(), Some(new_max));
+    }
+
+    #[test]
+    fn test_project_baseline_state_and_undo() {
+        let mut proj = Project::new();
+        proj.spectrum_real = Some(Array1::from_vec(vec![10.0, 12.0, 14.0, 16.0, 18.0]));
+        proj.complex_spectrum_unphased = Some(Array1::from_vec(vec![
+            Complex64::new(10.0, 0.0),
+            Complex64::new(12.0, 0.0),
+            Complex64::new(14.0, 0.0),
+            Complex64::new(16.0, 0.0),
+            Complex64::new(18.0, 0.0),
+        ]));
+        proj.push_history();
+
+        // 1. Polynomial baseline 適用
+        let poly_method = BaselineMethod::Polynomial { order: 1, max_iter: 5 };
+        proj.apply_baseline(poly_method);
+        assert_eq!(proj.state.baseline_method, poly_method);
+        assert!(proj.baseline_array.is_some());
+        proj.push_history();
+
+        // 2. airPLS baseline 適用
+        let airpls_method = BaselineMethod::AirPLS { log_lambda: 6.0, max_iter: 10 };
+        proj.apply_baseline(airpls_method);
+        assert_eq!(proj.state.baseline_method, airpls_method);
+        proj.push_history();
+
+        // 3. Clear baseline
+        proj.clear_baseline();
+        assert_eq!(proj.state.baseline_method, BaselineMethod::None);
+        assert!(proj.baseline_array.is_none());
+        proj.push_history();
+
+        // 4. Undo 検証
+        assert!(proj.undo()); // back to airPLS
+        assert_eq!(proj.state.baseline_method, BaselineMethod::AirPLS { log_lambda: 6.0, max_iter: 10 });
+
+        assert!(proj.undo()); // back to Polynomial
+        assert_eq!(proj.state.baseline_method, BaselineMethod::Polynomial { order: 1, max_iter: 5 });
+
+        assert!(proj.undo()); // back to initial (None)
+        assert_eq!(proj.state.baseline_method, BaselineMethod::None);
+
+        // 5. Redo 検証
+        assert!(proj.redo()); // back to Polynomial
+        assert_eq!(proj.state.baseline_method, BaselineMethod::Polynomial { order: 1, max_iter: 5 });
+
+        // 6. JSON シリアライズ・デシリアライズの整合性
+        let serialized = serde_json::to_string(&proj.state).unwrap();
+        let deserialized: ProjectState = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.baseline_method, proj.state.baseline_method);
     }
 }

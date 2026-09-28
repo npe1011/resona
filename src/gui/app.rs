@@ -282,6 +282,7 @@ impl ResonaApp {
                 self.action_state.ref_target_ppm = if is_13c { 77.16 } else { 7.26 };
                 self.action_state.ref_solvent_idx = 0;
                 self.action_state.ref_set_active = false;
+                self.sync_action_bar_from_project();
                 self.zoom_history.clear();
                 self.reset_zoom();
                 self.status_message = format!("Loaded {}", p.display());
@@ -295,6 +296,25 @@ impl ResonaApp {
             }
             Err(e) => {
                 self.status_message = format!("Error loading file {}", e);
+            }
+        }
+    }
+
+    /// プロジェクトの状態 (ベースライン補正等) をアクションバー状態に同期
+    pub fn sync_action_bar_from_project(&mut self) {
+        match self.project.state.baseline_method {
+            crate::core::baseline::BaselineMethod::AirPLS { log_lambda, .. } => {
+                self.action_state.baseline_method_kind = 0;
+                self.action_state.baseline_log_lambda = log_lambda;
+                self.action_state.baseline_applied = true;
+            }
+            crate::core::baseline::BaselineMethod::Polynomial { order, .. } => {
+                self.action_state.baseline_method_kind = 1;
+                self.action_state.baseline_poly_order = order;
+                self.action_state.baseline_applied = true;
+            }
+            crate::core::baseline::BaselineMethod::None => {
+                self.action_state.baseline_applied = false;
             }
         }
     }
@@ -627,6 +647,7 @@ impl ResonaApp {
         // Ctrl + Z: Undo
         if ctrl_or_cmd && !input.modifiers.shift && input.key_pressed(Key::Z) {
             if self.project.undo() {
+                self.sync_action_bar_from_project();
                 self.status_message = "Undo performed".to_string();
             }
         }
@@ -636,6 +657,7 @@ impl ResonaApp {
             || (ctrl_or_cmd && input.modifiers.shift && input.key_pressed(Key::Z))
         {
             if self.project.redo() {
+                self.sync_action_bar_from_project();
                 self.status_message = "Redo performed".to_string();
             }
         }
@@ -728,11 +750,15 @@ impl eframe::App for ResonaApp {
 
                     ui.menu_button("Edit", |ui| {
                         if ui.button("Undo (Ctrl+Z)").clicked() {
-                            self.project.undo();
+                            if self.project.undo() {
+                                self.sync_action_bar_from_project();
+                            }
                             ui.close_menu();
                         }
                         if ui.button("Redo (Ctrl+Y)").clicked() {
-                            self.project.redo();
+                            if self.project.redo() {
+                                self.sync_action_bar_from_project();
+                            }
                             ui.close_menu();
                         }
                         ui.separator();
@@ -802,6 +828,7 @@ impl eframe::App for ResonaApp {
                     &mut int_scale,
                     &self.project.metadata.nucleus,
                     noise_level,
+                    self.project.state.baseline_method,
                 )
             }).inner;
 
@@ -833,15 +860,25 @@ impl eframe::App for ResonaApp {
                 self.project.update_phase(0.0, 0.0);
                 self.project.push_history();
             }
-            ActionEvent::ApplyBaseline { log_lambda, p } => {
-                let lam = 10.0_f64.powf(log_lambda);
-                self.project.auto_baseline(lam, p);
+            ActionEvent::ApplyBaseline { method } => {
+                self.project.apply_baseline(method);
                 self.project.push_history();
-                self.status_message = format!("ALS baseline corrected (λ=1e{:.1}, p={:.4})", log_lambda, p);
+                self.action_state.baseline_applied = true;
+                let method_desc = match method {
+                    crate::core::baseline::BaselineMethod::AirPLS { log_lambda, .. } => {
+                        format!("airPLS (log10 λ = {:.1})", log_lambda)
+                    }
+                    crate::core::baseline::BaselineMethod::Polynomial { order, .. } => {
+                        format!("Polynomial (order = {})", order)
+                    }
+                    crate::core::baseline::BaselineMethod::None => "None".to_string(),
+                };
+                self.status_message = format!("Baseline corrected: {}", method_desc);
             }
             ActionEvent::ClearBaseline => {
                 self.project.clear_baseline();
                 self.project.push_history();
+                self.action_state.baseline_applied = false;
                 self.status_message = "Baseline correction cleared".to_string();
             }
             ActionEvent::AutoReference => {

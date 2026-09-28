@@ -2,6 +2,7 @@ use egui::{
     vec2, Button, Color32, DragValue, Frame, Margin, RichText, Slider, Stroke, Ui,
 };
 
+use crate::core::baseline::BaselineMethod;
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -11,7 +12,7 @@ pub enum ActionEvent {
     UndoZoom,
     AutoPhase,
     ResetPhase,
-    ApplyBaseline { log_lambda: f64, p: f64 },
+    ApplyBaseline { method: BaselineMethod },
     ClearBaseline,
     AutoReference,
     ApplyShiftReference { peak_ppm: f64, target_ppm: f64 },
@@ -37,8 +38,9 @@ pub struct ActionBarState {
     pub non_integer_protons: bool,
 
     // パラメータ
-    pub baseline_log_lambda: f64,
-    pub baseline_p: f64,
+    pub baseline_method_kind: usize, // 0: airPLS, 1: Polynomial
+    pub baseline_log_lambda: f64,    // Stiffness (log10 λ)
+    pub baseline_poly_order: usize,  // 多項式次数
     pub baseline_applied: bool,
 
     // Reference モード
@@ -75,8 +77,9 @@ impl Default for ActionBarState {
             multiview_submode: MultiviewSubMode::None,
             jcoupling_add_active: false,
             non_integer_protons: false,
+            baseline_method_kind: 0,
             baseline_log_lambda: 8.0,
-            baseline_p: 0.005,
+            baseline_poly_order: 3,
             baseline_applied: false,
             ref_solvent_idx: 0,
             ref_target_ppm: 7.26,
@@ -230,6 +233,7 @@ pub fn show_action_bar(
     integration_scale: &mut f64,
     nucleus: &str,
     noise_level: f64,
+    baseline_method: BaselineMethod,
 ) -> ActionEvent {
     let mut event = ActionEvent::None;
 
@@ -357,32 +361,72 @@ pub fn show_action_bar(
                                 }
                             }
                             AppMode::Baseline => {
-                                ui.label(RichText::new("Stiffness (log10 λ)").size(12.0));
-                                ui.add(DragValue::new(&mut state.baseline_log_lambda).speed(0.1).range(3.0..=12.0));
+                                ui.label(RichText::new("Method").size(12.0));
+                                egui::ComboBox::from_id_salt("baseline_method_selector")
+                                    .width(90.0)
+                                    .selected_text(if state.baseline_method_kind == 0 {
+                                        "airPLS"
+                                    } else {
+                                        "Polynomial"
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut state.baseline_method_kind, 0, "airPLS");
+                                        ui.selectable_value(&mut state.baseline_method_kind, 1, "Polynomial");
+                                    });
 
-                                ui.label(RichText::new("Asymmetry (p)").size(12.0));
-                                ui.add(DragValue::new(&mut state.baseline_p).speed(0.001).range(0.0001..=0.5));
+                                ui.separator();
+
+                                if state.baseline_method_kind == 0 {
+                                    ui.label(RichText::new("Stiffness (log10 λ)").size(12.0));
+                                    ui.add(
+                                        DragValue::new(&mut state.baseline_log_lambda)
+                                            .speed(0.1)
+                                            .range(3.0..=12.0),
+                                    );
+                                } else {
+                                    ui.label(RichText::new("Order").size(12.0));
+                                    ui.add(
+                                        DragValue::new(&mut state.baseline_poly_order)
+                                            .speed(0.1)
+                                            .range(1..=6),
+                                    );
+                                }
 
                                 let btn_apply_text = "Apply Correction";
                                 if light_button(ui, btn_apply_text, false, 110.0).clicked() {
                                     *active_zoom = None;
-                                    state.baseline_applied = true;
-                                    event = ActionEvent::ApplyBaseline {
-                                        log_lambda: state.baseline_log_lambda,
-                                        p: state.baseline_p,
+                                    let method = if state.baseline_method_kind == 0 {
+                                        BaselineMethod::AirPLS {
+                                            log_lambda: state.baseline_log_lambda,
+                                            max_iter: 15,
+                                        }
+                                    } else {
+                                        BaselineMethod::Polynomial {
+                                            order: state.baseline_poly_order,
+                                            max_iter: 10,
+                                        }
                                     };
+                                    event = ActionEvent::ApplyBaseline { method };
                                 }
 
                                 if light_button(ui, "Clear", false, 46.0).clicked() {
                                     *active_zoom = None;
-                                    state.baseline_applied = false;
                                     event = ActionEvent::ClearBaseline;
                                 }
 
-                                let (status_txt, status_color) = if state.baseline_applied {
-                                    ("Status Applied", Color32::from_rgb(25, 135, 84)) // Bootstrap green
-                                } else {
-                                    ("Status Not Applied", Color32::from_rgb(108, 117, 125))
+                                let (status_txt, status_color) = match baseline_method {
+                                    BaselineMethod::AirPLS { log_lambda, .. } => (
+                                        format!("Status Applied (airPLS, logλ={:.1})", log_lambda),
+                                        Color32::from_rgb(25, 135, 84), // Bootstrap green
+                                    ),
+                                    BaselineMethod::Polynomial { order, .. } => (
+                                        format!("Status Applied (Poly, order={})", order),
+                                        Color32::from_rgb(25, 135, 84),
+                                    ),
+                                    BaselineMethod::None => (
+                                        "Status Not Applied".to_string(),
+                                        Color32::from_rgb(108, 117, 125),
+                                    ),
                                 };
                                 ui.label(RichText::new(status_txt).size(11.0).strong().color(status_color));
                             }
