@@ -257,36 +257,67 @@ impl ResonaApp {
     /// ファイルまたはディレクトリを開く
     pub fn open_file<P: AsRef<Path>>(&mut self, path: P) {
         let p = path.as_ref();
-        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        let file_name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        let is_bruker_file = file_name == "fid" || file_name == "ser" || file_name == "acqus" || file_name == "acqu";
-        let is_dir = p.is_dir();
+        let abs_path = if p.is_relative() {
+            std::env::current_dir().unwrap_or_default().join(p)
+        } else {
+            p.to_path_buf()
+        };
+
+        let ext = abs_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let file_name = abs_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let is_bruker_file = file_name == "fid"
+            || file_name == "ser"
+            || file_name == "acqus"
+            || file_name == "acqu"
+            || file_name == "audita.txt";
+        let is_dir = abs_path.is_dir();
 
         let is_raw_data = ext == "jdf" || is_bruker_file || is_dir;
 
         let res = if ext == "jdf" {
-            self.project.load_jdf(p, None)
-        } else if ext == "rsn" || ext == "ez" {
-            self.project.load_rsn(p)
-        } else if is_bruker_file || is_dir || p.join("fid").is_file() || p.join("1/fid").is_file() {
-            self.project.load_bruker(p, None)
+            self.project.load_jdf(&abs_path, None)
+        } else if ext == "rsn" {
+            self.project.load_rsn(&abs_path)
+        } else if is_bruker_file || is_dir || abs_path.join("fid").is_file() || abs_path.join("1/fid").is_file() {
+            self.project.load_bruker(&abs_path, None)
         } else {
-            self.status_message = format!("Unsupported file format: {}", p.display());
+            self.status_message = format!("Unsupported file format: {}", abs_path.display());
             return;
         };
 
-
         match res {
             Ok(_) => {
-                self.current_file_path = Some(p.to_path_buf());
-                if let Some(parent) = p.parent() {
-                    let abs_parent = if parent.is_relative() {
-                        std::env::current_dir().unwrap_or_default().join(parent)
+                // ウィンドウタイトル用の current_file_path の決定:
+                // 生データ Bruker の場合はディレクトリパスを保持
+                let current_path = if is_bruker_file {
+                    let parent = abs_path.parent().unwrap_or(&abs_path);
+                    let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    if !parent_name.is_empty() && parent_name.chars().all(|c| c.is_ascii_digit()) {
+                        parent.parent().unwrap_or(parent).to_path_buf()
                     } else {
                         parent.to_path_buf()
-                    };
-                    self.current_directory = Some(abs_parent);
+                    }
+                } else if is_dir {
+                    let dir_name = abs_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    if !dir_name.is_empty() && dir_name.chars().all(|c| c.is_ascii_digit()) {
+                        abs_path.parent().unwrap_or(&abs_path).to_path_buf()
+                    } else {
+                        abs_path.clone()
+                    }
+                } else {
+                    abs_path.clone()
+                };
+                self.current_file_path = Some(current_path.clone());
+
+                // 保存先初期ディレクトリ current_directory:
+                // Bruker の場合は「データディレクトリの親ディレクトリ」
+                // JEOL や RSN の場合は「ファイルの親ディレクトリ」
+                if is_bruker_file || is_dir {
+                    self.current_directory = current_path.parent().map(|p| p.to_path_buf());
+                } else if let Some(parent) = abs_path.parent() {
+                    self.current_directory = Some(parent.to_path_buf());
                 }
+
                 let is_13c = self.project.metadata.nucleus.contains("13C") || self.project.metadata.nucleus.contains("C13");
                 self.action_state.ref_target_ppm = if is_13c { 77.16 } else { 7.26 };
                 self.action_state.ref_solvent_idx = 0;
@@ -294,7 +325,7 @@ impl ResonaApp {
                 self.sync_action_bar_from_project();
                 self.zoom_history.clear();
                 self.reset_zoom();
-                self.status_message = format!("Loaded {}", p.display());
+                self.status_message = format!("Loaded {}", abs_path.display());
 
                 // 生データ読み込み時はFTダイアログを開き、パラメータを選べるようにする
                 if is_raw_data {
@@ -337,14 +368,23 @@ impl ResonaApp {
     /// ファイル保存 (.rsn)
     pub fn save_file<P: AsRef<Path>>(&mut self, path: P) {
         let p = path.as_ref();
-        match self.project.save_rsn(p) {
+        let abs_path = if p.is_relative() {
+            std::env::current_dir().unwrap_or_default().join(p)
+        } else {
+            p.to_path_buf()
+        };
+        match self.project.save_rsn(&abs_path) {
             Ok(_) => {
-                self.current_file_path = Some(p.to_path_buf());
-                self.status_message = format!("Saved project {}", p.display());
+                // 一回でも保存した状態は rsn ファイルのフルパスに切り替える
+                self.current_file_path = Some(abs_path.clone());
+                if let Some(parent) = abs_path.parent() {
+                    self.current_directory = Some(parent.to_path_buf());
+                }
+                self.status_message = format!("Saved project {}", abs_path.display());
             }
             Err(e) => {
                 eprintln!("Error saving project {}", e);
-                self.status_message = format!("Error saving project {} ({})", p.display(), e);
+                self.status_message = format!("Error saving project {} ({})", abs_path.display(), e);
             }
         }
     }
@@ -611,16 +651,14 @@ impl ResonaApp {
         self.display_dialog_state.open = true;
     }
 
-    /// 外部ダイアログ経由でファイルを開く
+    /// 外部ダイアログ経由でデータファイルを開く (Open Data)
     pub fn open_file_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new()
-            .add_filter(
-                "All Supported NMR (*.jdf, *.rsn, *.ez, fid, acqus)",
-                &["jdf", "rsn", "ez", "fid", "acqus", "acqu", "ser"],
-            )
+            // All: JEOL (*.jdf), Resona (*.rsn), および Bruker (fid, acqus, acqu, ser) に厳密に限定
+            .add_filter("All", &["jdf;*.rsn;fid;acqus;acqu;ser"])
             .add_filter("JEOL Raw FID (*.jdf)", &["jdf"])
-            .add_filter("Bruker Raw FID (fid, acqus)", &["fid", "acqus", "acqu", "ser"])
-            .add_filter("Resona Project (*.rsn, *.ez)", &["rsn", "ez"]);
+            .add_filter("Resona Project (*.rsn)", &["rsn"])
+            .add_filter("Bruker Raw FID (fid, acqus)", &["bruker;fid;acqus;acqu;ser"]);
 
         if let Some(ref dir) = self.current_directory {
             let abs_dir = if dir.is_relative() {
@@ -654,35 +692,12 @@ impl ResonaApp {
         }
     }
 
-    /// クイック保存 (現在開いているファイルと同じディレクトリに直接 .rsn として保存)
+    /// 直上書きや確認なしセーブは行わず、常に Save as rsn ダイアログを呼ぶ
     pub fn quick_save(&mut self) {
-        if let Some(ref cur) = self.current_file_path.clone() {
-            let rsn_path = if cur.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("rsn")).unwrap_or(false) {
-                cur.clone()
-            } else {
-                let stem = cur.file_stem().and_then(|s| s.to_str()).unwrap_or("spectrum");
-                let base_name = if stem.eq_ignore_ascii_case("fid")
-                    || stem.eq_ignore_ascii_case("acqus")
-                    || stem.eq_ignore_ascii_case("acqu")
-                    || stem.eq_ignore_ascii_case("ser")
-                {
-                    cur.parent()
-                        .and_then(|p| p.file_stem())
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(stem)
-                } else {
-                    stem
-                };
-                let parent = cur.parent().unwrap_or_else(|| Path::new("."));
-                parent.join(format!("{}.rsn", base_name))
-            };
-            self.save_file(&rsn_path);
-        } else {
-            self.save_rsn_dialog();
-        }
+        self.save_rsn_dialog();
     }
 
-    /// 外部ダイアログ経由でプロジェクトを保存する (Save As)
+    /// 外部ダイアログ経由でプロジェクトを保存する (Save as rsn)
     pub fn save_rsn_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new()
             .add_filter("Resona Project (*.rsn)", &["rsn"]);
@@ -696,22 +711,14 @@ impl ResonaApp {
             dialog = dialog.set_directory(abs_dir);
         }
 
-        // ファイル名の自動プリセット (拡張子なしで渡す)
+        // ファイル名の初期値: 元データと同じ名前 (Brukerの名前はディレクトリ名)
         if let Some(ref cur) = self.current_file_path {
-            let stem = cur.file_stem().and_then(|s| s.to_str()).unwrap_or("spectrum");
-            let base_name = if stem.eq_ignore_ascii_case("fid")
-                || stem.eq_ignore_ascii_case("acqus")
-                || stem.eq_ignore_ascii_case("acqu")
-                || stem.eq_ignore_ascii_case("ser")
-            {
-                cur.parent()
-                    .and_then(|p| p.file_stem())
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(stem)
+            let base_name = if cur.is_dir() {
+                cur.file_name().and_then(|s| s.to_str()).unwrap_or("spectrum")
             } else {
-                stem
+                cur.file_stem().and_then(|s| s.to_str()).unwrap_or("spectrum")
             };
-            dialog = dialog.set_file_name(base_name);
+            dialog = dialog.set_file_name(format!("{}.rsn", base_name));
         }
 
         if let Some(mut path) = dialog.save_file() {
@@ -729,17 +736,14 @@ impl ResonaApp {
 
         let ctrl_or_cmd = input.modifiers.command || input.modifiers.ctrl;
 
-        // Ctrl + O: Open
+        // Ctrl + O: Open Data
         if ctrl_or_cmd && !input.modifiers.shift && input.key_pressed(Key::O) {
             self.open_file_dialog();
         }
 
-        // Ctrl + Shift + S: Save As
-        if ctrl_or_cmd && input.modifiers.shift && input.key_pressed(Key::S) {
+        // Ctrl + S: Save as rsn (常にダイアログ要求)
+        if ctrl_or_cmd && input.key_pressed(Key::S) {
             self.save_rsn_dialog();
-        } else if ctrl_or_cmd && input.key_pressed(Key::S) {
-            // Ctrl + S: Quick Save (ダイアログを出さずに直接保存)
-            self.quick_save();
         }
 
         // Ctrl + Z: Undo
@@ -817,6 +821,13 @@ impl eframe::App for ResonaApp {
         visuals.panel_fill = Color32::from_rgb(248, 249, 250); // #f8f9fa
         ctx.set_visuals(visuals);
 
+        // ウィンドウタイトルの更新: 未ロード時は "Resona"、ロード時は "Resona - (フルパス)"
+        let window_title = match &self.current_file_path {
+            Some(path) => format!("Resona - {}", path.display()),
+            None => "Resona".to_string(),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
+
         self.handle_shortcuts(ctx);
         self.handle_drag_and_drop(ctx);
 
@@ -828,20 +839,11 @@ impl eframe::App for ResonaApp {
             .show(ctx, |ui| {
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
-                        if ui.button("Open File... (Ctrl+O)").clicked() {
+                        if ui.button("Open Data... (Ctrl+O)").clicked() {
                             self.open_file_dialog();
                             ui.close_menu();
                         }
-                        if ui.button("Open Bruker Folder...").clicked() {
-                            self.open_folder_dialog();
-                            ui.close_menu();
-                        }
-                        if ui.button("Save (Ctrl+S)").clicked() {
-
-                            self.quick_save();
-                            ui.close_menu();
-                        }
-                        if ui.button("Save As... (Ctrl+Shift+S)").clicked() {
+                        if ui.button("Save as rsn... (Ctrl+S)").clicked() {
                             self.save_rsn_dialog();
                             ui.close_menu();
                         }
@@ -862,17 +864,6 @@ impl eframe::App for ResonaApp {
                             if self.project.redo() {
                                 self.sync_action_bar_from_project();
                             }
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Fourier Transform Settings...").clicked() {
-                            self.ft_dialog_state.settings = self.project.state.ft_settings.clone();
-                            self.ft_dialog_state.reset_preview();
-                            self.ft_dialog_state.open = true;
-                            ui.close_menu();
-                        }
-                        if ui.button("Display Settings...").clicked() {
-                            self.open_display_dialog();
                             ui.close_menu();
                         }
                     });

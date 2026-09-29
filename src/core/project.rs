@@ -144,7 +144,7 @@ impl Default for ProjectState {
             ft_settings: FtSettings::default(),
             display_settings: DisplaySettings::default(),
             baseline_method: BaselineMethod::None,
-            auto_sensitivity: AutoSensitivity::Middle,
+            auto_sensitivity: AutoSensitivity::default(),
         }
     }
 }

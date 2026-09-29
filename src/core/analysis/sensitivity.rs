@@ -10,7 +10,7 @@ pub enum AutoSensitivity {
 
 impl Default for AutoSensitivity {
     fn default() -> Self {
-        AutoSensitivity::Middle
+        AutoSensitivity::Low
     }
 }
 
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_auto_sensitivity_defaults_and_factors() {
-        assert_eq!(AutoSensitivity::default(), AutoSensitivity::Middle);
+        assert_eq!(AutoSensitivity::default(), AutoSensitivity::Low);
         assert_eq!(AutoSensitivity::Middle.label(), "Middle");
 
         // High: 高感度 (閾値倍率が最小)
