@@ -297,19 +297,35 @@ pub struct ResonaApp {
 
 impl Default for ResonaApp {
     fn default() -> Self {
+        let settings = crate::gui::config::AppSettings::load();
+
+        let mut display_dialog_state = DisplayDialogState::default();
+        display_dialog_state.ppm_decimals = settings.ppm_decimals;
+        display_dialog_state.integral_decimals = settings.integral_decimals;
+
+        let mut plot_style = PlotStyle::default();
+        plot_style.ppm_decimals = settings.ppm_decimals;
+        plot_style.integral_decimals = settings.integral_decimals;
+
+        let mut action_state = ActionBarState::default();
+        action_state.multiview_ratio = settings.multiview_ratio;
+
+        let mut print_dialog_state = PrintDialogState::default();
+        print_dialog_state.settings = settings.print_settings;
+
         Self {
             project: Project::new(),
             current_file_path: None,
-            current_directory: None,
+            current_directory: settings.current_directory,
             mode: None,
             active_zoom: None,
-            action_state: ActionBarState::default(),
+            action_state,
             ft_dialog_state: FtDialogState::default(),
             full_auto_dialog_state: FullAutoDialogState::default(),
-            display_dialog_state: DisplayDialogState::default(),
+            display_dialog_state,
             jcoupling_dialog_state: JCouplingDialogState::default(),
-            print_dialog_state: PrintDialogState::default(),
-            plot_style: PlotStyle::default(),
+            print_dialog_state,
+            plot_style,
             transform: None,
             zoom_history: Vec::new(),
             drag_start: None,
@@ -320,7 +336,7 @@ impl Default for ResonaApp {
             selected_multiview_id: None,
             hovered_multiview_id: None,
             selected_j_idx: None,
-            last_multiview_ratio: 5.0,
+            last_multiview_ratio: settings.multiview_ratio,
             status_message: "Ready. Drag & drop .jdf or .rsn file here.".to_string(),
             y_max_scale: 80.0,
             y_min_scale: -10.0,
@@ -332,6 +348,20 @@ impl Default for ResonaApp {
 impl ResonaApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self::default()
+    }
+
+    /// アプリ設定 (~/.resona/settings.json) を保存
+    pub fn save_app_settings(&self) {
+        let settings = crate::gui::config::AppSettings {
+            current_directory: self.current_directory.clone(),
+            ppm_decimals: self.plot_style.ppm_decimals,
+            integral_decimals: self.plot_style.integral_decimals,
+            multiview_ratio: self.action_state.multiview_ratio,
+            print_settings: self.print_dialog_state.settings.clone(),
+        };
+        if let Err(e) = settings.save() {
+            eprintln!("Warning: Failed to save app settings: {}", e);
+        }
     }
 
     /// いずれかのモーダルダイアログが開いているか判定
@@ -406,6 +436,7 @@ impl ResonaApp {
                 } else if let Some(parent) = abs_path.parent() {
                     self.current_directory = Some(parent.to_path_buf());
                 }
+                self.save_app_settings();
 
                 let is_13c = self.project.metadata.nucleus.contains("13C") || self.project.metadata.nucleus.contains("C13");
                 self.action_state.ref_target_ppm = if is_13c { 77.16 } else { 7.26 };
@@ -469,6 +500,7 @@ impl ResonaApp {
                 if let Some(parent) = abs_path.parent() {
                     self.current_directory = Some(parent.to_path_buf());
                 }
+                self.save_app_settings();
                 self.status_message = format!("Saved project {}", abs_path.display());
             }
             Err(e) => {
@@ -921,6 +953,9 @@ impl ResonaApp {
 
 impl eframe::App for ResonaApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        let prev_print_settings = self.print_dialog_state.settings.clone();
+        let prev_multiview_ratio = self.action_state.multiview_ratio;
+
         // ezNMR / 科学NMR標準の洗練されたライトテーマを設定
         let mut visuals = egui::Visuals::light();
         visuals.window_fill = Color32::WHITE;
@@ -2539,6 +2574,7 @@ impl eframe::App for ResonaApp {
             self.plot_style.auto_ticks = res.auto_ticks;
             self.plot_style.tick_major = res.tick_major;
             self.plot_style.tick_minor = res.tick_minor;
+            self.save_app_settings();
         }
 
         if let Some((text, center_ppm)) = show_jcoupling_dialog(ctx, &mut self.jcoupling_dialog_state) {
@@ -2580,5 +2616,15 @@ impl eframe::App for ResonaApp {
             &self.project.state.j_couplings,
             self.current_file_path.as_deref(),
         );
+
+        if self.print_dialog_state.settings != prev_print_settings
+            || (self.action_state.multiview_ratio - prev_multiview_ratio).abs() > 1e-6
+        {
+            self.save_app_settings();
+        }
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.save_app_settings();
     }
 }

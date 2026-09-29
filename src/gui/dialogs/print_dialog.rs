@@ -296,7 +296,9 @@ pub fn show_print_dialog(
     if let Ok(lock) = state.available_printers.lock() {
         if let Some(ref printers) = *lock {
             state.is_loading_printers = false;
-            if state.settings.printer_name.is_empty() {
+            let current_exists = !state.settings.printer_name.is_empty()
+                && printers.iter().any(|p| p.name == state.settings.printer_name);
+            if !current_exists {
                 if let Some(def) = printers.iter().find(|p| p.is_default) {
                     state.settings.printer_name = def.name.clone();
                 } else if let Some(first) = printers.first() {
@@ -381,31 +383,124 @@ pub fn show_print_dialog(
                 );
             });
 
-            // 2. 印刷項目チェックボックス (グリッドで美しく整列)
-            Frame::group(ui.style()).show(ui, |ui| {
-                egui::Grid::new("print_items_grid")
-                    .spacing(vec2(16.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Print Items").strong().size(12.0));
-                        ui.add(Checkbox::new(&mut state.settings.spectrum, "Spectrum"));
-                        ui.add(Checkbox::new(&mut state.settings.peak, "Peak Pick"));
-                        ui.add(Checkbox::new(&mut state.settings.integrate, "Integrals"));
-                        ui.add(Checkbox::new(&mut state.settings.multiview, "Multiview"));
-                        ui.end_row();
+            // 2. 印刷項目チェックボックス & アクションボタン (横並びでマウス動線を改善)
+            ui.horizontal(|ui| {
+                // 左側: 印刷項目
+                Frame::group(ui.style()).show(ui, |ui| {
+                    egui::Grid::new("print_items_grid")
+                        .spacing(vec2(16.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Print Items").strong().size(12.0));
+                            ui.add(Checkbox::new(&mut state.settings.spectrum, "Spectrum"));
+                            ui.add(Checkbox::new(&mut state.settings.peak, "Peak Pick"));
+                            ui.add(Checkbox::new(&mut state.settings.integrate, "Integrals"));
+                            ui.add(Checkbox::new(&mut state.settings.multiview, "Multiview"));
+                            ui.end_row();
 
-                        ui.label("");
-                        ui.add(Checkbox::new(&mut state.settings.info, "Parameters"));
-                        ui.add(Checkbox::new(&mut state.settings.jcoupling, "J Coupling Table"));
-                        ui.add(Checkbox::new(&mut state.settings.filename, "File Name"));
-                        ui.label("");
-                        ui.end_row();
+                            ui.label("");
+                            ui.add(Checkbox::new(&mut state.settings.info, "Parameters"));
+                            ui.add(Checkbox::new(&mut state.settings.jcoupling, "J Coupling Table"));
+                            ui.add(Checkbox::new(&mut state.settings.filename, "File Name"));
+                            ui.label("");
+                            ui.end_row();
+                        });
+                });
+
+                ui.add_space(8.0);
+
+                // 右側: アクションボタン (Print, Export SVG, Cancel)
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+
+                        // 印刷ボタン (プライマリ: 青背景・白文字)
+                        let btn_print = Button::new(RichText::new("Print").strong().size(13.0).color(Color32::WHITE))
+                            .min_size(vec2(85.0, 26.0))
+                            .fill(Color32::from_rgb(13, 110, 253))
+                            .rounding(3.0_f32);
+                        if ui.add(btn_print).clicked() {
+                            match execute_native_print(
+                                &state.settings,
+                                main_transform,
+                                ppm,
+                                spectrum,
+                                peaks,
+                                integrations,
+                                integration_scale,
+                                integration_offset,
+                                integration_ref_factor,
+                                multiviews,
+                                metadata,
+                                ft_settings,
+                                j_couplings,
+                                current_filepath,
+                            ) {
+                                Ok(()) => {
+                                    should_close = true;
+                                }
+                                Err(e) => {
+                                    state.status_message = Some((format!("Print failed: {}", e), true));
+                                }
+                            }
+                        }
+
+                        // 完全ベクター SVG ファイル保存ボタン
+                        let btn_svg = Button::new(RichText::new("Export SVG...").size(12.5))
+                            .min_size(vec2(95.0, 26.0))
+                            .rounding(3.0_f32);
+                        if ui.add(btn_svg).clicked() {
+                            if let Some(target) = rfd::FileDialog::new()
+                                .set_title("Export Complete Report as Vector SVG")
+                                .add_filter("Scalable Vector Graphics", &["svg"])
+                                .set_file_name("resona_report.svg")
+                                .save_file()
+                            {
+                                let svg = generate_complete_page_svg(
+                                    &state.settings,
+                                    main_transform,
+                                    ppm,
+                                    spectrum,
+                                    peaks,
+                                    integrations,
+                                    integration_scale,
+                                    integration_offset,
+                                    integration_ref_factor,
+                                    multiviews,
+                                    metadata,
+                                    ft_settings,
+                                    j_couplings,
+                                    current_filepath,
+                                );
+                                if let Err(e) = fs::write(&target, svg) {
+                                    state.status_message = Some((format!("Export failed: {}", e), true));
+                                }
+                            }
+                        }
+
+                        // Cancel ボタン
+                        let btn_cancel = Button::new(RichText::new("Cancel").size(12.5))
+                            .min_size(vec2(65.0, 26.0))
+                            .rounding(3.0_f32);
+                        if ui.add(btn_cancel).clicked() {
+                            should_close = true;
+                        }
                     });
+
+                    // ステータス / エラーメッセージ表示
+                    if let Some((ref msg, is_err)) = state.status_message {
+                        if is_err {
+                            ui.label(RichText::new(msg).size(11.0).color(Color32::from_rgb(220, 38, 38)));
+                        }
+                    }
+                });
             });
 
             // 3. リアルタイムプレビュー領域
             ui.separator();
 
-            let avail_size = ui.available_size() - vec2(0.0, 42.0);
+            let avail_size = ui.available_size();
             render_realtime_preview(
                 ui,
                 avail_size,
@@ -424,83 +519,6 @@ pub fn show_print_dialog(
                 j_couplings,
                 current_filepath,
             );
-
-            // 4. 下部アクションボタン
-            ui.separator();
-            ui.horizontal(|ui| {
-                // 印刷ボタン (完了時にダイアログを自動クローズ)
-                let btn_print = Button::new(RichText::new("Print").strong().size(13.0).color(Color32::WHITE))
-                    .min_size(vec2(90.0, 26.0))
-                    .fill(Color32::from_rgb(13, 110, 253))
-                    .rounding(3.0_f32);
-                if ui.add(btn_print).clicked() {
-                    match execute_native_print(
-                        &state.settings,
-                        main_transform,
-                        ppm,
-                        spectrum,
-                        peaks,
-                        integrations,
-                        integration_scale,
-                        integration_offset,
-                        integration_ref_factor,
-                        multiviews,
-                        metadata,
-                        ft_settings,
-                        j_couplings,
-                        current_filepath,
-                    ) {
-                        Ok(()) => {
-                            should_close = true;
-                        }
-                        Err(e) => {
-                            state.status_message = Some((format!("Print failed: {}", e), true));
-                        }
-                    }
-                }
-
-                // 完全ベクター SVG ファイル保存ボタン
-                if ui.button(RichText::new("Export SVG...").size(13.0)).clicked() {
-                    if let Some(target) = rfd::FileDialog::new()
-                        .set_title("Export Complete Report as Vector SVG")
-                        .add_filter("Scalable Vector Graphics", &["svg"])
-                        .set_file_name("resona_report.svg")
-                        .save_file()
-                    {
-                        let svg = generate_complete_page_svg(
-                            &state.settings,
-                            main_transform,
-                            ppm,
-                            spectrum,
-                            peaks,
-                            integrations,
-                            integration_scale,
-                            integration_offset,
-                            integration_ref_factor,
-                            multiviews,
-                            metadata,
-                            ft_settings,
-                            j_couplings,
-                            current_filepath,
-                        );
-                        if let Err(e) = fs::write(&target, svg) {
-                            state.status_message = Some((format!("Export failed: {}", e), true));
-                        }
-                    }
-                }
-
-                if let Some((ref msg, is_err)) = state.status_message {
-                    if is_err {
-                        ui.label(RichText::new(msg).size(11.0).color(Color32::from_rgb(220, 38, 38)));
-                    }
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        should_close = true;
-                    }
-                });
-            });
         });
 
     if should_close {
