@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use crate::core::analysis::{IntegrationItem, JCouplingResultItem, PeakItem};
+use crate::core::analysis::{AutoSensitivity, IntegrationItem, JCouplingResultItem, PeakItem};
 use crate::core::baseline::BaselineMethod;
 use crate::core::error::{ResonaError, Result};
 use crate::core::io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource};
@@ -110,6 +110,8 @@ pub struct ProjectState {
     pub display_settings: DisplaySettings,
     #[serde(default)]
     pub baseline_method: BaselineMethod,
+    #[serde(default)]
+    pub auto_sensitivity: AutoSensitivity,
 }
 
 fn default_scale() -> f64 {
@@ -138,6 +140,7 @@ impl Default for ProjectState {
             ft_settings: FtSettings::default(),
             display_settings: DisplaySettings::default(),
             baseline_method: BaselineMethod::None,
+            auto_sensitivity: AutoSensitivity::Middle,
         }
     }
 }
@@ -686,5 +689,6 @@ mod tests {
         let serialized = serde_json::to_string(&proj.state).unwrap();
         let deserialized: ProjectState = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.baseline_method, proj.state.baseline_method);
+        assert_eq!(deserialized.auto_sensitivity, proj.state.auto_sensitivity);
     }
 }

@@ -1,5 +1,6 @@
 use egui::{vec2, Button, Color32, RichText, Stroke, Ui};
 
+use crate::core::analysis::AutoSensitivity;
 use crate::gui::mode::AppMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +30,12 @@ fn mode_button_style(is_selected: bool) -> (Color32, Color32, Stroke) {
     }
 }
 
-/// メインモード切替ツールバー (1行目: ezNMR完全準拠のライトテーマボタン)
-pub fn show_mode_bar(ui: &mut Ui, current_mode: &mut Option<AppMode>) -> ModeBarEvent {
+/// メインモード切替ツールバー (1行目: ezNMR完全準拠のライトテーマボタン + 右端 Sensitivity 選択)
+pub fn show_mode_bar(
+    ui: &mut Ui,
+    current_mode: &mut Option<AppMode>,
+    sensitivity: &mut AutoSensitivity,
+) -> ModeBarEvent {
     let mut event = ModeBarEvent::None;
 
     ui.horizontal(|ui| {
@@ -99,6 +104,25 @@ pub fn show_mode_bar(ui: &mut Ui, current_mode: &mut Option<AppMode>) -> ModeBar
         if ui.add(btn_print).clicked() {
             event = ModeBarEvent::OpenPrint;
         }
+
+        // 5. 右寄せ: Auto Sensitivity 選択 UI (デフォルト: Middle)
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(4.0);
+            egui::ComboBox::from_id_salt("auto_sensitivity_combo")
+                .width(72.0)
+                .selected_text(RichText::new(sensitivity.label()).size(12.0))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(sensitivity, AutoSensitivity::Low, "Low");
+                    ui.selectable_value(sensitivity, AutoSensitivity::Middle, "Middle");
+                    ui.selectable_value(sensitivity, AutoSensitivity::High, "High");
+                });
+
+            ui.label(
+                RichText::new("Sensitivity")
+                    .size(11.5)
+                    .color(Color32::from_rgb(108, 117, 125)),
+            );
+        });
     });
 
     event

@@ -469,10 +469,41 @@ impl ResonaApp {
         self.status_message = "Aligned multiview insets".to_string();
     }
 
-    /// 既存の積分区間から Multiview インセットを自動生成 (ezNMR lines 508-535準拠)
+    /// 既存の積分区間から Multiview インセットを自動生成 (ezNMR lines 508-535準拠 + 感度フィルタ)
     pub fn auto_create_multiview_from_integrations(&mut self, plot_rect: Rect, view_ppm_span: f64) {
         if self.project.state.integrations.is_empty() {
             self.status_message = "No integrations to create multiviews from".to_string();
+            return;
+        }
+
+        // 各積分区間の面積を計算して、最大面積を算出 (感度に応じた微小除外)
+        let min_ratio = self.project.state.auto_sensitivity.multiview_min_area_ratio();
+        let target_integrations: Vec<_> = if min_ratio > 0.0 {
+            if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                let mut max_area = 0.0_f64;
+                let mut areas = Vec::with_capacity(self.project.state.integrations.len());
+                for integ in &self.project.state.integrations {
+                    let a = compute_integral(spec, ppm, integ, 1.0, 1.0, 0.0)
+                        .map(|r| r.total_area)
+                        .unwrap_or(0.0);
+                    if a > max_area {
+                        max_area = a;
+                    }
+                    areas.push(a);
+                }
+                self.project.state.integrations.iter().enumerate()
+                    .filter(|(idx, _)| areas[*idx] >= max_area * min_ratio)
+                    .map(|(_, item)| item.clone())
+                    .collect()
+            } else {
+                self.project.state.integrations.clone()
+            }
+        } else {
+            self.project.state.integrations.clone()
+        };
+
+        if target_integrations.is_empty() {
+            self.status_message = "No significant integrations to create multiviews from".to_string();
             return;
         }
 
@@ -480,7 +511,7 @@ impl ResonaApp {
         let ratio = self.action_state.multiview_ratio;
         let plot_width = plot_rect.width();
 
-        for (i, integ) in self.project.state.integrations.iter().enumerate() {
+        for (i, integ) in target_integrations.iter().enumerate() {
             let x1 = integ.min_ppm();
             let x2 = integ.max_ppm();
             let pad = ((x2 - x1) * 0.1).max(0.02);
@@ -515,7 +546,11 @@ impl ResonaApp {
         }
 
         self.align_multiviews(plot_rect);
-        self.status_message = format!("Auto-created {} multiview insets from integrals", self.project.state.multiviews.len());
+        self.status_message = format!(
+            "Auto-created {} multiview insets from integrals (sensitivity={})",
+            self.project.state.multiviews.len(),
+            self.project.state.auto_sensitivity.label(),
+        );
     }
 
     /// Display Settings ダイアログを開く (相対パーセント、目盛り設定などを初期化)
@@ -776,14 +811,14 @@ impl eframe::App for ResonaApp {
                 });
             });
 
-        // 2. モード切替ツールバー (1行目: ezNMR完全準拠のライトテーマバー)
+        // 2. モード切替ツールバー (1行目: ezNMR完全準拠のライトテーマバー + 右端 Sensitivity)
         TopBottomPanel::top("mode_toolbar")
             .frame(egui::Frame::none()
                 .fill(Color32::from_rgb(248, 249, 250))
                 .inner_margin(Margin::symmetric(8.0, 5.0))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
-                match show_mode_bar(ui, &mut self.mode) {
+                match show_mode_bar(ui, &mut self.mode, &mut self.project.state.auto_sensitivity) {
                     ModeBarEvent::None => {}
                     ModeBarEvent::OpenReFt => {
                         self.ft_dialog_state.settings = self.project.state.ft_settings.clone();
@@ -807,7 +842,8 @@ impl eframe::App for ResonaApp {
         let noise_level = self.project.noise_level();
 
         if self.mode == Some(AppMode::Peak) && self.action_state.peak_threshold <= 0.0 {
-            let initial_thresh = self.project.state.peak_threshold.unwrap_or(noise_level * 10.0);
+            let factor = self.project.state.auto_sensitivity.peak_noise_factor();
+            let initial_thresh = self.project.state.peak_threshold.unwrap_or(noise_level * factor);
             self.action_state.peak_threshold = initial_thresh;
             self.project.state.peak_threshold = Some(initial_thresh);
         }
@@ -937,12 +973,18 @@ impl eframe::App for ResonaApp {
             ActionEvent::AutoPeak => {
                 if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
                     let noise = self.project.noise_level();
-                    let thresh = noise * 10.0;
+                    let factor = self.project.state.auto_sensitivity.peak_noise_factor();
+                    let thresh = noise * factor;
                     self.action_state.peak_threshold = thresh;
                     self.project.state.peak_threshold = Some(thresh);
                     self.project.state.peaks = pick_peaks(spec, ppm, thresh, &self.project.state.peaks);
                     self.project.push_history();
-                    self.status_message = format!("Auto detected {} peaks (thresh={:.1}, noise={:.2})", self.project.state.peaks.len(), thresh, noise);
+                    self.status_message = format!(
+                        "Auto detected {} peaks (thresh={:.1}, sensitivity={})",
+                        self.project.state.peaks.len(),
+                        thresh,
+                        self.project.state.auto_sensitivity.label(),
+                    );
                 }
             }
             ActionEvent::PickPeaks { threshold } => {
@@ -961,7 +1003,7 @@ impl eframe::App for ResonaApp {
             }
             ActionEvent::AutoIntegrate => {
                 if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
-                    self.project.state.integrations = auto_detect_integrations(spec, ppm);
+                    self.project.state.integrations = auto_detect_integrations(spec, ppm, self.project.state.auto_sensitivity);
                     let mut max_area = 0.0_f64;
                     for intg in &self.project.state.integrations {
                         if let Some(res) = compute_integral(spec, ppm, intg, 1.0, 1.0, 0.03) {
@@ -977,7 +1019,11 @@ impl eframe::App for ResonaApp {
                         self.project.state.integration_ref_value = 1.0;
                     }
                     self.project.push_history();
-                    self.status_message = format!("Auto detected {} integration regions", self.project.state.integrations.len());
+                    self.status_message = format!(
+                        "Auto detected {} integration regions (sensitivity={})",
+                        self.project.state.integrations.len(),
+                        self.project.state.auto_sensitivity.label(),
+                    );
                 }
             }
             ActionEvent::ClearIntegrations => {

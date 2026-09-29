@@ -4,8 +4,8 @@ pub mod gui;
 pub use core::{
     analysis::{
         analyze_multiplet, auto_detect_integrations, compute_integral, estimate_noise_mad,
-        pick_peaks, snap_and_add_peak, add_peak_in_range, IntegralResult, IntegrationItem, JCouplingCandidate,
-        JCouplingResultItem, PeakItem,
+        pick_peaks, snap_and_add_peak, add_peak_in_range, AutoSensitivity, IntegralResult, IntegrationItem,
+        JCouplingCandidate, JCouplingResultItem, PeakItem,
     },
     autophase::{acme_score, autophase_acme, nelder_mead_2d},
     baseline::{

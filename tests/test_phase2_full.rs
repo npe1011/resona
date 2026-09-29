@@ -1,6 +1,6 @@
 use resona::{
     analyze_multiplet, auto_detect_integrations, estimate_noise_mad, pick_peaks,
-    snap_and_add_peak, JCouplingResultItem, MultiviewItem, Project, RectF,
+    snap_and_add_peak, AutoSensitivity, JCouplingResultItem, MultiviewItem, Project, RectF,
 };
 
 #[test]
@@ -45,7 +45,7 @@ fn test_phase2_full_pipeline_and_persistence() {
     project.state.peaks = repicked;
 
     // 5. 自動積分
-    let intg_items = auto_detect_integrations(spec, ppm);
+    let intg_items = auto_detect_integrations(spec, ppm, AutoSensitivity::Middle);
     assert!(!intg_items.is_empty(), "Integrations should be detected");
     project.state.integrations = intg_items;
 

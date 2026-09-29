@@ -2,6 +2,7 @@ use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 
 use super::peak::estimate_noise_mad;
+use super::sensitivity::AutoSensitivity;
 
 /// 積分区間項目
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -168,6 +169,7 @@ pub fn compute_integral(
 pub fn auto_detect_integrations(
     spectrum: &Array1<f64>,
     ppm: &Array1<f64>,
+    sensitivity: AutoSensitivity,
 ) -> Vec<IntegrationItem> {
     let n = spectrum.len();
     if n < 10 || n != ppm.len() {
@@ -180,7 +182,7 @@ pub fn auto_detect_integrations(
     let median = vals[n / 2];
 
     let thresh_low = median + 0.5 * noise;
-    let thresh_high = median + 15.0 * noise;
+    let thresh_high = median + sensitivity.integral_noise_factor() * noise;
 
     let mut items = Vec::new();
     let mut in_region = false;
@@ -219,4 +221,53 @@ pub fn auto_detect_integrations(
     }
 
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auto_detect_integrations_with_sensitivity() {
+        let n = 300;
+        let mut spec = vec![0.0; n];
+        let mut ppm_vec = vec![0.0; n];
+        for i in 0..n {
+            ppm_vec[i] = 10.0 - (i as f64) * 0.05;
+        }
+
+        // ピーク1: 強いピーク (中心 80, 高さ 100.0)
+        for i in 60..=100 {
+            let dx = (i as f64 - 80.0) / 4.0;
+            spec[i] += 100.0 * (-0.5 * dx * dx).exp();
+        }
+
+        // ピーク2: 小中ピーク (中心 200, 高さ 8.0)
+        // ノイズ level ≈ 0.37 なので S/N ≈ 21.6 (Highの15倍は超えるがMiddleの30倍は下回る)
+        for i in 180..=220 {
+            let dx = (i as f64 - 200.0) / 4.0;
+            spec[i] += 8.0 * (-0.5 * dx * dx).exp();
+        }
+
+        // 模擬ノイズ (振幅 ±0.5, MAD ≈ 0.74, noise ≈ 1.0)
+        for i in 0..n {
+            let pseudo_noise = ((i * 17 + 3) % 11) as f64 / 10.0 - 0.5;
+            spec[i] += pseudo_noise;
+        }
+
+        let spectrum = Array1::from_vec(spec);
+        let ppm = Array1::from_vec(ppm_vec);
+
+        // High: 閾値 ~15.0 * noise => 高さ 22.0 も拾う (2区間)
+        let intgs_high = auto_detect_integrations(&spectrum, &ppm, AutoSensitivity::High);
+        assert_eq!(intgs_high.len(), 2, "High sensitivity should detect both peaks");
+
+        // Middle: 閾値 ~30.0 * noise => 高さ 100.0 のみ拾う (1区間)
+        let intgs_mid = auto_detect_integrations(&spectrum, &ppm, AutoSensitivity::Middle);
+        assert_eq!(intgs_mid.len(), 1, "Middle sensitivity should only detect the major peak");
+
+        // Low: 閾値 ~70.0 * noise => 高さ 100.0 のみ拾う (1区間)
+        let intgs_low = auto_detect_integrations(&spectrum, &ppm, AutoSensitivity::Low);
+        assert_eq!(intgs_low.len(), 1, "Low sensitivity should only detect the major peak");
+    }
 }
