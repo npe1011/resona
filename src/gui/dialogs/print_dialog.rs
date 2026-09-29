@@ -46,7 +46,7 @@ pub struct PrintSettings {
 }
 
 fn default_ppm_decimals() -> usize { 3 }
-fn default_integral_decimals() -> usize { 2 }
+fn default_integral_decimals() -> usize { 3 }
 fn default_auto_ticks() -> bool { false }
 fn default_tick_major() -> f64 { 1.0 }
 fn default_tick_minor() -> usize { 10 }
@@ -64,7 +64,7 @@ impl Default for PrintSettings {
             jcoupling: true,
             filename: true,
             ppm_decimals: 3,
-            integral_decimals: 2,
+            integral_decimals: 3,
             auto_ticks: false,
             tick_major: 1.0,
             tick_minor: 10,
@@ -1456,13 +1456,6 @@ fn generate_plot_svg_content(
         cur_tick += tick_interval;
     }
 
-    svg.push_str(&format!(
-        r##"<text x="{x}" y="{y}" font-size="10" font-weight="600" text-anchor="end" font-family="sans-serif" fill="#212529">ppm</text>
-"##,
-        x = plot_x + plot_w,
-        y = axis_y + 24.0,
-    ));
-
     // 3. ピーク表示 (頭頂部マーク & アンチコリジョン引き出し線 & 縦向きPPM値)
     if settings.peak {
         let mut visible_peaks: Vec<&PeakItem> = peaks
@@ -2289,9 +2282,7 @@ fn print_windows_native(
             cur_tick += tick_interval;
         }
 
-        let unit_str = to_wide("ppm");
         unsafe {
-            TextOutW(hdc, margin_x + plot_w - (dpi_x * 16 / 72), axis_y + (dpi_y * 18 / 72), unit_str.as_ptr(), (unit_str.len() - 1) as i32);
             SelectObject(hdc, old_pen);
             DeleteObject(axis_pen);
             SelectObject(hdc, old_font);

@@ -289,6 +289,10 @@ pub struct ResonaApp {
 
     pub last_multiview_ratio: f64,
     pub status_message: String,
+
+    pub y_max_scale: f64,
+    pub y_min_scale: f64,
+    last_transform_y: Option<(f64, f64)>,
 }
 
 impl Default for ResonaApp {
@@ -318,6 +322,9 @@ impl Default for ResonaApp {
             selected_j_idx: None,
             last_multiview_ratio: 5.0,
             status_message: "Ready. Drag & drop .jdf or .rsn file here.".to_string(),
+            y_max_scale: 80.0,
+            y_min_scale: -10.0,
+            last_transform_y: None,
         }
     }
 }
@@ -700,8 +707,18 @@ impl ResonaApp {
         if let Some(ref t) = self.transform {
             self.display_dialog_state.ppm_min = t.ppm_min;
             self.display_dialog_state.ppm_max = t.ppm_max;
-            self.display_dialog_state.y_min_scale = (t.y_min / max_intensity) * 100.0;
-            self.display_dialog_state.y_max_scale = (t.y_max / max_intensity) * 100.0;
+            let top_pct = if t.y_max > 1e-6 {
+                (100.0 * max_intensity / t.y_max).clamp(1.0, 10000.0)
+            } else {
+                80.0
+            };
+            let min_pct = if t.y_max > 1e-6 {
+                (100.0 * t.y_min / t.y_max).clamp(-10000.0, 0.0)
+            } else {
+                -10.0
+            };
+            self.display_dialog_state.y_max_scale = top_pct;
+            self.display_dialog_state.y_min_scale = min_pct;
 
             let span = (t.ppm_max - t.ppm_min).abs();
             if self.plot_style.tick_major <= 0.0 {
@@ -722,7 +739,7 @@ impl ResonaApp {
             }
         } else {
             self.display_dialog_state.y_min_scale = -10.0;
-            self.display_dialog_state.y_max_scale = 110.0;
+            self.display_dialog_state.y_max_scale = 80.0;
         }
 
         self.display_dialog_state.auto_ticks = self.plot_style.auto_ticks;
@@ -889,6 +906,9 @@ impl ResonaApp {
 
     /// ファイル D&D の処理
     fn handle_drag_and_drop(&mut self, ctx: &Context) {
+        if self.has_open_dialog() {
+            return;
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
             if let Some(path) = file.path {
@@ -971,7 +991,11 @@ impl eframe::App for ResonaApp {
                 if is_modal_active {
                     ui.disable();
                 }
-                match show_mode_bar(ui, &mut self.mode, &mut self.project.state.auto_sensitivity) {
+                match show_mode_bar(
+                    ui,
+                    &mut self.mode,
+                    &mut self.project.state.auto_sensitivity,
+                ) {
                     ModeBarEvent::None => {}
                     ModeBarEvent::OpenFullAuto => {
                         self.full_auto_dialog_state.sensitivity = self.project.state.auto_sensitivity;
@@ -992,7 +1016,27 @@ impl eframe::App for ResonaApp {
                 }
             });
 
-        // 3. コンテキスト専用アクションバー (2行目: 左 ZOOM常駐フレーム + 右 コンテキストフレーム)
+        // 3. コンテキスト専用アクションバー (2行目: 左 ZOOM常駐フレーム + 中央 サブツールバー + 右 Y-Axis (scale)常駐フレーム)
+        let has_spectrum = self.project.spectrum_real.is_some();
+        let max_intensity = self.project.spectrum_real.as_ref()
+            .map(|s| s.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1e-6))
+            .unwrap_or(1.0);
+
+        // プロット側（ズームやダイアログ適用など）で transform が変更されていたらツールバーのスケールを逆算同期
+        if let Some(ref t) = self.transform {
+            let current_y = (t.y_min, t.y_max);
+            if self.last_transform_y != Some(current_y) {
+                if t.y_max > 1e-6 {
+                    self.y_max_scale = (100.0 * max_intensity / t.y_max).clamp(1.0, 10000.0);
+                    self.y_min_scale = (100.0 * t.y_min / t.y_max).clamp(-10000.0, 0.0);
+                }
+                self.last_transform_y = Some(current_y);
+            }
+        }
+
+        let old_max_scale = self.y_max_scale;
+        let old_min_scale = self.y_min_scale;
+
         let mut p0 = self.project.state.p0;
         let mut p1 = self.project.state.p1;
         let mut int_scale = self.project.state.integration_scale;
@@ -1026,8 +1070,22 @@ impl eframe::App for ResonaApp {
                     &self.project.metadata.nucleus,
                     noise_level,
                     self.project.state.baseline_method,
+                    &mut self.y_max_scale,
+                    &mut self.y_min_scale,
+                    has_spectrum,
                 )
             }).inner;
+
+        // ツールバーの Y-Axis (scale) が操作された場合、transform を更新
+        if (self.y_max_scale - old_max_scale).abs() > 1e-6 || (self.y_min_scale - old_min_scale).abs() > 1e-6 {
+            if let Some(ref mut t) = self.transform {
+                let base_y = max_intensity;
+                let top_pct = self.y_max_scale.max(1.0);
+                t.y_max = base_y * (100.0 / top_pct);
+                t.y_min = base_y * (self.y_min_scale / top_pct);
+                self.last_transform_y = Some((t.y_min, t.y_max));
+            }
+        }
 
         if (p0 - self.project.state.p0).abs() > 1e-4 || (p1 - self.project.state.p1).abs() > 1e-4 {
             self.project.update_phase(p0, p1);

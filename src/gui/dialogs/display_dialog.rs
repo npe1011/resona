@@ -38,13 +38,13 @@ impl Default for DisplayDialogState {
             ppm_min: 0.0,
             ppm_max: 10.0,
             y_min_scale: -10.0,
-            y_max_scale: 110.0,
+            y_max_scale: 80.0,
             max_peak_intensity: 1.0,
             auto_ticks: false,
             tick_major: 1.0,
             tick_minor: 10,
             ppm_decimals: 3,
-            integral_decimals: 2,
+            integral_decimals: 3,
         }
     }
 }
@@ -63,84 +63,80 @@ pub fn show_display_dialog(
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.heading("Axis & Appearance");
+            // 1. X 軸表示範囲
+            ui.label(egui::RichText::new("X-Axis (range)").strong());
+            ui.horizontal(|ui| {
+                ui.label("Max ppm");
+                ui.add(DragValue::new(&mut state.ppm_max).speed(0.1));
+                ui.label("Min ppm");
+                ui.add(DragValue::new(&mut state.ppm_min).speed(0.1));
+            });
+
             ui.separator();
 
-            // 1. X 軸表示範囲
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("X-Axis (ppm)").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Min ppm");
-                    ui.add(DragValue::new(&mut state.ppm_min).speed(0.1));
-                    ui.label("Max ppm");
-                    ui.add(DragValue::new(&mut state.ppm_max).speed(0.1));
-                });
+            // 2. Y 軸スケール (最大ピークに対する相対パーセンテージ)
+            ui.label(egui::RichText::new("Y-Axis (scale)").strong());
+            ui.label(
+                egui::RichText::new(format!("Peak Top 100% = {:.2e}", state.max_peak_intensity))
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(120)),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Max");
+                ui.add(
+                    DragValue::new(&mut state.y_max_scale)
+                        .speed(2.0)
+                        .range(1.0..=10000.0)
+                        .suffix("%"),
+                );
+                ui.label("Min");
+                ui.add(
+                    DragValue::new(&mut state.y_min_scale)
+                        .speed(1.0)
+                        .range(-10000.0..=0.0)
+                        .suffix("%"),
+                );
             });
 
-            // 2. Y 軸スケール (最大ピークに対する相対パーセンテージ)
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("Y-Axis Scale (% of Peak Top)").strong());
-                ui.label(
-                    egui::RichText::new(format!("Peak Top 100% = {:.2e}", state.max_peak_intensity))
-                        .size(10.5)
-                        .color(egui::Color32::from_gray(120)),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Y Min");
-                    ui.add(
-                        DragValue::new(&mut state.y_min_scale)
-                            .speed(2.0)
-                            .range(-1000.0..=1000.0)
-                            .suffix("%"),
-                    );
-                    ui.label("Y Max");
-                    ui.add(
-                        DragValue::new(&mut state.y_max_scale)
-                            .speed(5.0)
-                            .range(1.0..=10000.0)
-                            .suffix("%"),
-                    );
-                });
-            });
+            ui.separator();
 
             // 3. X 軸目盛り (Ticks)
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("X-Axis Ticks").strong());
-                ui.horizontal(|ui| {
-                    ui.add(Checkbox::new(&mut state.auto_ticks, "Auto Ticks"));
-                    if !state.auto_ticks {
-                        ui.label("Step (ppm)");
-                        ui.add(
-                            DragValue::new(&mut state.tick_major)
-                                .speed(0.1)
-                                .range(0.001..=100.0),
-                        );
-                        ui.label("Subdivisions");
-                        ui.add(
-                            DragValue::new(&mut state.tick_minor)
-                                .range(1..=50),
-                        );
-                    }
-                });
+            ui.label(egui::RichText::new("X-Axis Ticks").strong());
+            ui.horizontal(|ui| {
+                ui.add(Checkbox::new(&mut state.auto_ticks, "Auto Ticks"));
+                if !state.auto_ticks {
+                    ui.label("Step (ppm)");
+                    ui.add(
+                        DragValue::new(&mut state.tick_major)
+                            .speed(0.1)
+                            .range(0.001..=100.0),
+                    );
+                    ui.label("Subdivisions");
+                    ui.add(
+                        DragValue::new(&mut state.tick_minor)
+                            .range(1..=50),
+                    );
+                }
             });
 
+            ui.separator();
+
             // 4. 小数点桁数
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("Precision").strong());
-                ui.horizontal(|ui| {
-                    ui.label("PPM Decimals");
-                    ui.add(DragValue::new(&mut state.ppm_decimals).range(1..=6));
-                    ui.label("Integral Decimals");
-                    ui.add(DragValue::new(&mut state.integral_decimals).range(0..=4));
-                });
+            ui.label(egui::RichText::new("Precision").strong());
+            ui.horizontal(|ui| {
+                ui.label("PPM Decimals");
+                ui.add(DragValue::new(&mut state.ppm_decimals).range(1..=6));
+                ui.label("Integral Decimals");
+                ui.add(DragValue::new(&mut state.integral_decimals).range(0..=4));
             });
 
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Apply").clicked() {
                     let base_y = state.max_peak_intensity.max(1e-6);
-                    let computed_y_min = base_y * (state.y_min_scale / 100.0);
-                    let computed_y_max = base_y * (state.y_max_scale / 100.0);
+                    let top_pct = state.y_max_scale.max(1.0);
+                    let computed_y_max = base_y * (100.0 / top_pct);
+                    let computed_y_min = base_y * (state.y_min_scale / top_pct);
 
                     applied = Some(DisplaySettingsResult {
                         ppm_min: state.ppm_min,

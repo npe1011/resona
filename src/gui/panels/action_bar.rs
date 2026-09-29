@@ -153,9 +153,9 @@ fn auto_button(ui: &mut Ui, text: &str, min_width: f32) -> egui::Response {
     ui.add(btn)
 }
 
-/// スライダー微調整用の連続変化対応ボタン (< / >)
+/// スライダー微調整用の連続変化対応ボタン (< / >, ▲ / ▼ など)
 /// クリック時はbase_step分変化し、押し続けると指定時間で加速したのち等速で動き続ける
-fn continuous_step_button(
+pub fn continuous_step_button(
     ui: &mut Ui,
     id_salt: &str,
     text: &str,
@@ -222,7 +222,98 @@ fn continuous_step_button(
     delta
 }
 
-/// ezNMR 2段目ツールバーの描画 (左: 常駐ZOOMフレーム, 右: コンテキストフレーム)
+/// ステップボタンの幾何学矢印方向
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepDirection {
+    Up,
+    Down,
+}
+
+/// 幾何学三角形を描画する長押し加速対応ステップボタン (文字化けゼロ・全OS完全互換)
+pub fn continuous_step_arrow_button(
+    ui: &mut Ui,
+    id_salt: &str,
+    direction: StepDirection,
+    base_step: f64,
+    min_speed: f64,
+    max_speed: f64,
+    accel_duration: f64,
+) -> f64 {
+    let id = ui.make_persistent_id(id_salt);
+    let size = vec2(18.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+
+    let bg_fill = if response.is_pointer_button_down_on() {
+        Color32::from_rgb(222, 226, 230)
+    } else if response.hovered() {
+        Color32::from_rgb(241, 243, 245)
+    } else {
+        Color32::WHITE
+    };
+    let stroke = Stroke::new(1.0_f32, Color32::from_rgb(206, 212, 218));
+    ui.painter().rect(rect, 3.0_f32, bg_fill, stroke);
+
+    let center = rect.center();
+    let arrow_color = Color32::from_rgb(73, 80, 87);
+    let points = match direction {
+        StepDirection::Up => vec![
+            egui::pos2(center.x, center.y - 3.5),
+            egui::pos2(center.x - 3.5, center.y + 3.0),
+            egui::pos2(center.x + 3.5, center.y + 3.0),
+        ],
+        StepDirection::Down => vec![
+            egui::pos2(center.x - 3.5, center.y - 3.0),
+            egui::pos2(center.x + 3.5, center.y - 3.0),
+            egui::pos2(center.x, center.y + 3.5),
+        ],
+    };
+    ui.painter().add(egui::Shape::convex_polygon(points, arrow_color, Stroke::NONE));
+
+    let active_key = egui::Id::new("continuous_step_active_id");
+    let active_val: Option<u64> = ui.data_mut(|d| d.get_temp(active_key));
+    let my_val = id.value();
+    let is_primary_down = ui.input(|i| i.pointer.primary_down());
+
+    if (response.is_pointer_button_down_on() || (response.hovered() && ui.input(|i| i.pointer.primary_pressed())))
+        && active_val.is_none()
+    {
+        ui.data_mut(|d| d.insert_temp(active_key, my_val));
+    }
+
+    let is_this_active = active_val == Some(my_val);
+    let dt = (ui.input(|i| i.stable_dt) as f64).min(0.1);
+    let mut delta = 0.0_f64;
+
+    if is_this_active && is_primary_down {
+        ui.ctx().request_repaint();
+        let hold_time: f64 = ui.data_mut(|d| d.get_temp::<f64>(id).unwrap_or(0.0));
+
+        if hold_time == 0.0 {
+            delta = base_step;
+            ui.data_mut(|d| d.insert_temp(id, 0.0001_f64));
+        } else {
+            let next_hold = hold_time + dt;
+            ui.data_mut(|d| d.insert_temp(id, next_hold));
+
+            const DELAY: f64 = 0.25;
+            if next_hold > DELAY {
+                let t = next_hold - DELAY;
+                let progress = (t / accel_duration.max(0.001)).clamp(0.0, 1.0);
+                let speed = min_speed + (max_speed - min_speed) * progress;
+                delta = speed * dt;
+            }
+        }
+    } else {
+        if is_this_active {
+            ui.data_mut(|d| d.remove_temp::<u64>(active_key));
+        }
+        ui.data_mut(|d| d.remove_temp::<f64>(id));
+    }
+
+    delta
+}
+
+/// ezNMR 2段目ツールバーの描画 (左: 常駐ZOOMフレーム, 中央: コンテキストフレーム, 右: 常駐Y-Axisスケールフレーム)
 pub fn show_action_bar(
     ui: &mut Ui,
     active_mode: Option<AppMode>,
@@ -234,6 +325,9 @@ pub fn show_action_bar(
     nucleus: &str,
     noise_level: f64,
     baseline_method: BaselineMethod,
+    y_max_scale: &mut f64,
+    y_min_scale: &mut f64,
+    has_spectrum: bool,
 ) -> ActionEvent {
     let mut event = ActionEvent::None;
 
@@ -243,13 +337,127 @@ pub fn show_action_bar(
         .rounding(4.0_f32)
         .inner_margin(Margin::symmetric(6.0, 3.0));
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // -------------------------------------------------------------
-        // 左側: ZOOM フレーム (常駐)
+        // 1. 右端: Y-Scale (%) フレーム (常駐・一行表示)
         // -------------------------------------------------------------
         frame_style.show(ui, |ui| {
+            ui.add_enabled_ui(has_spectrum, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+
+                    // ※ right_to_left レイアウト内のため、右端の要素から順に追加することで
+                    // 画面上では左から右へ
+                    // [Y-Scale (%)]  Max [入力] [▲] [▼]   Min [入力] [▲] [▼]
+                    // と正しく整列する。
+
+                    // 1. Min 下ボタン (▼) [一番右端]
+                    let ymin_dec = continuous_step_arrow_button(
+                        ui,
+                        "ab_ymin_dec",
+                        StepDirection::Down,
+                        1.0,
+                        5.0,
+                        50.0,
+                        1.2,
+                    );
+                    if ymin_dec > 0.0 {
+                        *y_min_scale = (*y_min_scale - ymin_dec).clamp(-10000.0, 0.0);
+                    }
+
+                    // 2. Min 上ボタン (▲)
+                    let ymin_inc = continuous_step_arrow_button(
+                        ui,
+                        "ab_ymin_inc",
+                        StepDirection::Up,
+                        1.0,
+                        5.0,
+                        50.0,
+                        1.2,
+                    );
+                    if ymin_inc > 0.0 {
+                        *y_min_scale = (*y_min_scale + ymin_inc).clamp(-10000.0, 0.0);
+                    }
+
+                    // 3. Min 入力欄
+                    ui.add(
+                        DragValue::new(y_min_scale)
+                            .speed(1.0)
+                            .range(-10000.0..=0.0),
+                    );
+
+                    // 4. Min ラベル
+                    ui.label(
+                        RichText::new("Min")
+                            .size(11.5)
+                            .color(Color32::from_rgb(108, 117, 125)),
+                    );
+
+                    ui.add_space(5.0);
+
+                    // 5. Max 下ボタン (▼)
+                    let ymax_dec = continuous_step_arrow_button(
+                        ui,
+                        "ab_ymax_dec",
+                        StepDirection::Down,
+                        1.0,
+                        5.0,
+                        100.0,
+                        1.2,
+                    );
+                    if ymax_dec > 0.0 {
+                        *y_max_scale = (*y_max_scale - ymax_dec).clamp(1.0, 10000.0);
+                    }
+
+                    // 6. Max 上ボタン (▲)
+                    let ymax_inc = continuous_step_arrow_button(
+                        ui,
+                        "ab_ymax_inc",
+                        StepDirection::Up,
+                        1.0,
+                        5.0,
+                        100.0,
+                        1.2,
+                    );
+                    if ymax_inc > 0.0 {
+                        *y_max_scale = (*y_max_scale + ymax_inc).clamp(1.0, 10000.0);
+                    }
+
+                    // 7. Max 入力欄
+                    ui.add(
+                        DragValue::new(y_max_scale)
+                            .speed(1.0)
+                            .range(1.0..=10000.0),
+                    );
+
+                    // 8. Max ラベル
+                    ui.label(
+                        RichText::new("Max")
+                            .size(11.5)
+                            .color(Color32::from_rgb(108, 117, 125)),
+                    );
+
+                    ui.add_space(3.0);
+
+                    // 9. Y-Scale (%) タイトルラベル [一番左端]
+                    ui.label(
+                        RichText::new("Y-Scale (%)")
+                            .size(11.5)
+                            .strong()
+                            .color(Color32::from_rgb(52, 58, 64)),
+                    );
+                });
+            });
+        });
+
+        // -------------------------------------------------------------
+        // 2. 残り領域: 左から右へ (ZOOM フレーム + モード別サブツールバー)
+        // -------------------------------------------------------------
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+
+            // 左側: ZOOM フレーム (常駐)
+            frame_style.show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
 
@@ -671,6 +879,7 @@ pub fn show_action_bar(
                 });
             });
         }
+        });
     });
 
     event

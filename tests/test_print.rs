@@ -14,7 +14,7 @@ fn test_print_settings_default() {
     assert!(settings.jcoupling);
     assert!(settings.filename);
     assert_eq!(settings.ppm_decimals, 3);
-    assert_eq!(settings.integral_decimals, 2);
+    assert_eq!(settings.integral_decimals, 3);
     assert!(!settings.auto_ticks);
     assert_eq!(settings.tick_major, 1.0);
     assert_eq!(settings.tick_minor, 10);
@@ -58,7 +58,7 @@ fn test_generate_complete_page_svg_minimal() {
     assert!(svg.starts_with("<svg"));
     assert!(svg.ends_with("</svg>"));
     assert!(svg.contains("path"));
-    assert!(svg.contains("ppm"));
+    assert!(!svg.contains(">ppm<"));
 }
 
 #[test]

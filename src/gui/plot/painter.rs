@@ -44,7 +44,7 @@ impl Default for PlotStyle {
             threshold_color: Color32::from_rgb(217, 119, 6),   // 閾値線 (オレンジ)
             rubberband_color: Color32::from_rgba_premultiplied(13, 110, 253, 40),
             ppm_decimals: 3,
-            integral_decimals: 2,
+            integral_decimals: 3,
             auto_ticks: false,
             tick_major: 1.0,
             tick_minor: 10,
@@ -283,15 +283,7 @@ fn paint_ppm_axis(ui: &Ui, transform: &PlotTransform, axis_y: f32, style: &PlotS
         Stroke::new(1.0_f32, style.axis_color),
     );
 
-    // PPM 単位ラベル
     let font_axis = FontId::new(11.0, FontFamily::Proportional);
-    painter.text(
-        Pos2::new(rect.max.x - 28.0, axis_y - 8.0),
-        egui::Align2::RIGHT_BOTTOM,
-        "ppm",
-        font_axis.clone(),
-        style.axis_color,
-    );
 
     let span = (transform.ppm_max - transform.ppm_min).abs();
     if span <= 1e-6 {
