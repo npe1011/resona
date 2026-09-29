@@ -154,7 +154,14 @@ pub fn pick_peaks(
     let prominence_thresh = (noise * 0.3).max(threshold * 0.001).max(1e-6);
 
     // 1. 正のピーク (min_distance = 2 で近接肩ピークを保持)
-    let s_slice = spectrum.as_slice().unwrap_or(&[]);
+    let temp_spec;
+    let s_slice = match spectrum.as_slice() {
+        Some(s) => s,
+        None => {
+            temp_spec = spectrum.to_vec();
+            &temp_spec
+        }
+    };
     let pos_peaks = find_peaks_1d(s_slice, threshold, prominence_thresh, 2);
 
     // 2. 負のピーク (-spectrum)

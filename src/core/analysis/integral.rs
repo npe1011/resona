@@ -112,8 +112,21 @@ pub fn compute_integral(
         return None;
     }
 
-    let region_ppm = &ppm.as_slice()?[idx1..=idx2];
-    let region_spec = &spectrum.as_slice()?[idx1..=idx2];
+    let (ppm_vec, spec_vec);
+    let region_ppm: &[f64] = match ppm.as_slice() {
+        Some(s) => &s[idx1..=idx2],
+        None => {
+            ppm_vec = ppm.to_vec();
+            &ppm_vec[idx1..=idx2]
+        }
+    };
+    let region_spec: &[f64] = match spectrum.as_slice() {
+        Some(s) => &s[idx1..=idx2],
+        None => {
+            spec_vec = spectrum.to_vec();
+            &spec_vec[idx1..=idx2]
+        }
+    };
     let m_points = region_ppm.len();
 
     // 局所線形ベースライン: y_bl = m * ppm + c
@@ -220,6 +233,24 @@ pub fn auto_detect_integrations(
         }
     }
 
+    // 配列終端までピークが続いていた場合の領域確定 (フラッシュ処理)
+    if in_region {
+        let end_idx = n - 1;
+        if has_high_peak && end_idx > start_idx + 5 {
+            let s_margin = start_idx.saturating_sub(5);
+            let e_margin = (end_idx + 5).min(n - 1);
+
+            let id = format!("intg-{}", items.len() + 1);
+            items.push(IntegrationItem {
+                id,
+                start_ppm: ppm[s_margin],
+                end_ppm: ppm[e_margin],
+                y_start: median,
+                y_end: median,
+            });
+        }
+    }
+
     items
 }
 
@@ -300,5 +331,26 @@ mod tests {
         let res = compute_integral(&spectrum, &ppm, &item, 1.0, 1.0, 0.0).expect("Integration should succeed");
         assert!(res.total_area < 0.0, "Negative peak should have negative total_area, got {}", res.total_area);
         assert!(res.normalized_value < 0.0, "Negative peak should have negative normalized_value, got {}", res.normalized_value);
+    }
+
+    #[test]
+    fn test_auto_detect_integrations_trailing_peak() {
+        let n = 100;
+        let mut spec = vec![0.0; n];
+        let mut ppm_vec = vec![0.0; n];
+        for i in 0..n {
+            ppm_vec[i] = 10.0 - (i as f64) * 0.1;
+        }
+
+        // 配列末尾 (90..99) にピーク
+        for i in 90..100 {
+            spec[i] = 50.0;
+        }
+
+        let spectrum = Array1::from_vec(spec);
+        let ppm = Array1::from_vec(ppm_vec);
+
+        let intgs = auto_detect_integrations(&spectrum, &ppm, AutoSensitivity::High);
+        assert_eq!(intgs.len(), 1, "Trailing peak at the very end of spectrum must be detected");
     }
 }

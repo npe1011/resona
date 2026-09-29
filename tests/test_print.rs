@@ -124,7 +124,7 @@ fn test_generate_complete_page_svg_full() {
     assert!(svg.contains("J Coupling"));
     assert!(svg.contains("d, J = 7.2 Hz"));
     assert!(svg.contains("#e11d48")); // 積分曲線またはテキスト
-    assert!(svg.contains("#a0a0a0")); // マルチビュー枠 (GUI準拠のグレー)
+    assert!(svg.contains("#888888")); // マルチビュー枠 (ミディアムグレー)
 }
 
 #[test]
@@ -182,9 +182,9 @@ fn test_parameters_off_expands_plot_and_filename_toggle_fixed_y() {
         Some(std::path::Path::new("test.fid")),
     );
     assert!(!svg_off.contains("Experimental Parameters"));
-    // total_w = 1120.0, margin = 20.0 -> 全幅プロットの幅は 1080.0
-    // X軸ベースライン line x1="20" y1="..." x2="1100" y2="..." (20 + 1080 = 1100)
-    assert!(svg_off.contains(r#"x2="1100""#));
+    // total_w = 1120.0, margin = 14.0 -> 全幅プロットの幅は 1092.0
+    // X軸ベースライン line x1="14" y1="..." x2="1106" y2="..." (14 + 1092 = 1106)
+    assert!(svg_off.contains(r#"x2="1106""#));
 
     // 3. File Name OFF の場合でもプロットの Y 座標が変わらないことの検証
     let mut settings_no_fn = settings_off.clone();
@@ -211,7 +211,7 @@ fn test_parameters_off_expands_plot_and_filename_toggle_fixed_y() {
     // baseline の y1="..." を抽出して比較
     let extract_baseline_y = |svg_str: &str| -> String {
         for line in svg_str.lines() {
-            if line.contains(r#"x1="20""#) && line.contains(r#"x2="1100""#) && line.contains(r##"stroke="#212529""##) {
+            if line.contains(r#"x1="14""#) && line.contains(r#"x2="1106""#) && line.contains(r##"stroke="#212529""##) {
                 return line.to_string();
             }
         }

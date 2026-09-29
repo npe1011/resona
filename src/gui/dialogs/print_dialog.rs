@@ -588,14 +588,16 @@ fn render_realtime_preview(
     // 2. カラム分割 (プロット領域 vs パラメータ領域)
     let has_side_info = settings.info || (settings.jcoupling && !j_couplings.is_empty());
     let side_w = if has_side_info {
-        (page_rect.width() * 0.16).clamp(75.0, 110.0)
+        (page_rect.width() * 0.14).clamp(65.0, 95.0)
     } else {
         0.0
     };
 
+    let margin_side = 4.0_f32;
+    let gap = if has_side_info { 6.0_f32 } else { 0.0_f32 };
     let plot_rect = Rect::from_min_max(
-        Pos2::new(page_rect.min.x + 6.0, cur_y),
-        Pos2::new(page_rect.max.x - side_w - 6.0, page_rect.max.y - 6.0),
+        Pos2::new(page_rect.min.x + margin_side, cur_y),
+        Pos2::new(page_rect.max.x - margin_side - side_w - gap, page_rect.max.y - margin_side),
     );
 
     if let (Some(ppm_arr), Some(spec_arr)) = (ppm, spectrum) {
@@ -637,7 +639,7 @@ fn render_realtime_preview(
                 if points.len() > 1 {
                     painter.add(egui::epaint::PathShape::line(
                         points,
-                        Stroke::new(1.0_f32, Color32::BLACK),
+                        Stroke::new(0.85_f32, Color32::BLACK),
                     ));
                 }
             }
@@ -740,13 +742,17 @@ fn render_realtime_preview(
                                 ));
 
                                 let mid_x = (sx_start + sx_end) * 0.5;
-                                painter.text(
-                                    Pos2::new(mid_x, min_y - 2.0),
-                                    Align2::CENTER_BOTTOM,
-                                    format!("{:.1$}", res.normalized_value, settings.integral_decimals),
-                                    FontId::new(7.5, FontFamily::Proportional),
-                                    Color32::from_rgb(225, 29, 72),
-                                );
+                                let val_text = format!("{:.1$}", res.normalized_value, settings.integral_decimals);
+                                let font_intg = FontId::new(7.0, FontFamily::Proportional);
+                                let color_intg = Color32::from_rgb(217, 27, 66);
+                                let galley = painter.layout_no_wrap(val_text, font_intg, color_intg);
+                                let text_len = galley.size().x;
+                                let text_h = galley.size().y;
+                                let start_y = (min_y - 2.0 - text_len).max(plot_rect.min.y + 2.0);
+                                let text_pos = Pos2::new(mid_x + text_h * 0.5, start_y);
+                                let ts = egui::epaint::TextShape::new(text_pos, galley, color_intg)
+                                    .with_angle(std::f32::consts::FRAC_PI_2);
+                                painter.add(ts);
                             }
                         }
                     }
@@ -799,7 +805,7 @@ fn render_realtime_preview(
                         let pk_sy = t.data_to_screen(pk.ppm, pk.intensity).y;
                         let y_start = (axis_y - 6.0).max(pk_sy + 1.5);
 
-                        let stroke_lead = Stroke::new(0.7_f32, Color32::from_rgb(150, 150, 150));
+                        let stroke_lead = Stroke::new(0.55_f32, Color32::from_rgb(110, 115, 120));
                         painter.line_segment([Pos2::new(px, y_start), Pos2::new(px, y_elbow)], stroke_lead);
                         painter.line_segment([Pos2::new(px, y_elbow), Pos2::new(tx, y_text_start - 2.5)], stroke_lead);
                         painter.line_segment([Pos2::new(tx, y_text_start - 2.5), Pos2::new(tx, y_text_start)], stroke_lead);
@@ -831,7 +837,7 @@ fn render_realtime_preview(
                     if inset_w > 25.0 && inset_h > 25.0 {
                         let inset_rect = Rect::from_min_size(Pos2::new(inset_x, inset_y), vec2(inset_w, inset_h));
                         painter.rect_filled(inset_rect, 0.0, Color32::WHITE);
-                        painter.rect_stroke(inset_rect, 0.0, Stroke::new(1.2_f32, Color32::from_gray(160)));
+                        painter.rect_stroke(inset_rect, 0.0, Stroke::new(1.1_f32, Color32::from_gray(135)));
 
                         let mv_src_min = mv.src_x_min.min(mv.src_x_max);
                         let mv_src_max = mv.src_x_min.max(mv.src_x_max);
@@ -879,7 +885,7 @@ fn render_realtime_preview(
                         if mv_points.len() > 1 {
                             painter.add(egui::epaint::PathShape::line(
                                 mv_points,
-                                Stroke::new(1.2_f32, Color32::BLACK),
+                                Stroke::new(0.85_f32, Color32::BLACK),
                             ));
                         }
 
@@ -906,17 +912,22 @@ fn render_realtime_preview(
                                         if intg_pts.len() > 1 {
                                             painter.add(egui::epaint::PathShape::line(
                                                 intg_pts,
-                                                Stroke::new(1.0_f32, Color32::from_rgb(225, 29, 72)),
+                                                Stroke::new(1.3_f32, Color32::from_rgb(217, 27, 66)),
                                             ));
                                             let mid_p = (i_min.max(mv_src_min) + i_max.min(mv_src_max)) * 0.5;
-                                            let top_pos = Pos2::new(mv_ppm_to_x(mid_p), mv_y_to_y(y_min_adj + 0.70 * h_diff));
-                                            painter.text(
-                                                top_pos,
-                                                Align2::CENTER_BOTTOM,
-                                                format!("{:.1$}", res.normalized_value, settings.integral_decimals),
-                                                FontId::new(7.0, FontFamily::Proportional),
-                                                Color32::from_rgb(225, 29, 72),
-                                            );
+                                            let mid_x = mv_ppm_to_x(mid_p);
+                                            let top_y = mv_y_to_y(y_min_adj + 0.70 * h_diff);
+                                            let val_text = format!("{:.1$}", res.normalized_value, settings.integral_decimals);
+                                            let font_intg = FontId::new(6.5, FontFamily::Proportional);
+                                            let color_intg = Color32::from_rgb(217, 27, 66);
+                                            let galley = painter.layout_no_wrap(val_text, font_intg, color_intg);
+                                            let text_len = galley.size().x;
+                                            let text_h = galley.size().y;
+                                            let start_y = (top_y - text_len).max(inset_rect.min.y + 2.0);
+                                            let text_pos = Pos2::new(mid_x + text_h * 0.5, start_y);
+                                            let ts = egui::epaint::TextShape::new(text_pos, galley, color_intg)
+                                                .with_angle(std::f32::consts::FRAC_PI_2);
+                                            painter.add(ts);
                                         }
                                     }
                                 }
@@ -952,7 +963,8 @@ fn render_realtime_preview(
                                 let mv_text_start_y = inset_rect.min.y + 3.0;
                                 let text_len = 14.0_f32;
                                 let text_bottom_y = mv_text_start_y + text_len;
-                                let mv_elbow_y = (text_bottom_y + 4.0).min(inset_axis_y - 8.0);
+                                let mv_elbow_y = text_bottom_y + 3.0;
+                                let max_lead_y = (inset_rect.min.y + inset_plot_h * 0.25).max(mv_elbow_y + 3.0);
 
                                 for (i, pk) in sorted_peaks.iter().enumerate() {
                                     let px = mv_ppm_to_x(pk.ppm);
@@ -964,14 +976,14 @@ fn render_realtime_preview(
                                     }
 
                                     let py = mv_y_to_y(pk.intensity);
-                                    let clearance = 6.0_f32;
-                                    let line_start_y = (py - clearance).clamp(mv_elbow_y + 2.0, inset_axis_y - 2.0);
+                                    let clearance = 4.0_f32;
+                                    let line_start_y = (py - clearance).min(max_lead_y);
 
                                     if line_start_y > mv_elbow_y + 1.0 {
-                                        let stroke_lead = Stroke::new(0.65_f32, Color32::from_gray(120));
+                                        let stroke_lead = Stroke::new(0.5_f32, Color32::from_gray(115));
                                         painter.line_segment([Pos2::new(px, line_start_y), Pos2::new(px, mv_elbow_y)], stroke_lead);
-                                        painter.line_segment([Pos2::new(px, mv_elbow_y), Pos2::new(tx, text_bottom_y + 2.0)], stroke_lead);
-                                        painter.line_segment([Pos2::new(tx, text_bottom_y + 2.0), Pos2::new(tx, text_bottom_y)], stroke_lead);
+                                        painter.line_segment([Pos2::new(px, mv_elbow_y), Pos2::new(tx, text_bottom_y + 1.5)], stroke_lead);
+                                        painter.line_segment([Pos2::new(tx, text_bottom_y + 1.5), Pos2::new(tx, text_bottom_y)], stroke_lead);
                                     }
 
                                     let val_str = format!("{:.1$}", pk.ppm, settings.ppm_decimals);
@@ -1036,8 +1048,8 @@ fn render_realtime_preview(
     // 3. 右側パラメータ領域 (画面のサイドパネルと100%同一の全行を表示)
     if has_side_info {
         let side_rect = Rect::from_min_max(
-            Pos2::new(page_rect.max.x - side_w, cur_y),
-            Pos2::new(page_rect.max.x - 4.0, page_rect.max.y - 8.0),
+            Pos2::new(page_rect.max.x - margin_side - side_w, cur_y),
+            Pos2::new(page_rect.max.x - margin_side, page_rect.max.y - margin_side),
         );
         let mut text_y = side_rect.min.y;
 
@@ -1153,7 +1165,7 @@ pub fn generate_complete_page_svg(
         PrintOrientation::Portrait => (792.0, 1120.0),  // A4 Portrait比率
     };
 
-    let margin = 20.0;
+    let margin = 14.0;
     let mut cur_y = margin;
 
     let mut svg = format!(
@@ -1184,8 +1196,9 @@ pub fn generate_complete_page_svg(
     cur_y += header_h;
 
     let has_side = settings.info || (settings.jcoupling && !j_couplings.is_empty());
-    let side_w = if has_side { 175.0 } else { 0.0 };
-    let plot_w = total_w - margin * 2.0 - side_w - if has_side { 14.0 } else { 0.0 };
+    let side_w = if has_side { 145.0 } else { 0.0 };
+    let side_gap = if has_side { 10.0 } else { 0.0 };
+    let plot_w = total_w - margin * 2.0 - side_w - side_gap;
     let plot_h = total_h - cur_y - margin;
 
     // 2. プロット部分 (SVG)
@@ -1237,7 +1250,7 @@ pub fn generate_complete_page_svg(
                     y = side_y,
                     w = side_w,
                     tx1 = side_x + 4.0,
-                    tx2 = side_x + 68.0,
+                    tx2 = side_x + 58.0,
                     ty = side_y + 9.5,
                     key = k,
                     val = html_escape(&v),
@@ -1280,7 +1293,7 @@ pub fn generate_complete_page_svg(
                     y = side_y,
                     w = side_w,
                     tx1 = side_x + 4.0,
-                    tx2 = side_x + 75.0,
+                    tx2 = side_x + 58.0,
                     ty = side_y + 10.0,
                     key = k,
                     val = html_escape(&v),
@@ -1393,7 +1406,7 @@ fn generate_plot_svg_content(
             }
         }
         svg.push_str(&format!(
-            r##"<path d="{}" stroke="#000000" stroke-width="1.2" fill="none" />
+            r##"<path d="{}" stroke="#000000" stroke-width="0.85" fill="none" />
 "##,
             path_data
         ));
@@ -1519,10 +1532,10 @@ fn generate_plot_svg_content(
                 let y_start = (axis_y - 8.0).max(pk_sy + 2.0);
 
                 svg.push_str(&format!(
-                    r##"<line x1="{px:.1}" y1="{y_start:.1}" x2="{px:.1}" y2="{y_elbow:.1}" stroke="#888888" stroke-width="0.8" />
-<line x1="{px:.1}" y1="{y_elbow:.1}" x2="{tx:.1}" y2="{y_text_start_pre:.1}" stroke="#888888" stroke-width="0.8" />
-<line x1="{tx:.1}" y1="{y_text_start_pre:.1}" x2="{tx:.1}" y2="{y_text_start:.1}" stroke="#888888" stroke-width="0.8" />
-<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7.5" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.prec$}</text></g>
+                    r##"<line x1="{px:.1}" y1="{y_start:.1}" x2="{px:.1}" y2="{y_elbow:.1}" stroke="#70757a" stroke-width="0.55" />
+<line x1="{px:.1}" y1="{y_elbow:.1}" x2="{tx:.1}" y2="{y_text_start_pre:.1}" stroke="#70757a" stroke-width="0.55" />
+<line x1="{tx:.1}" y1="{y_text_start_pre:.1}" x2="{tx:.1}" y2="{y_text_start:.1}" stroke="#70757a" stroke-width="0.55" />
+<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7.5" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#000000">{val:.prec$}</text></g>
 "##,
                     px = px,
                     y_start = y_start,
@@ -1580,7 +1593,7 @@ fn generate_plot_svg_content(
 
                         svg.push_str(&format!(
                             r##"<path d="{}" stroke="#e11d48" stroke-width="1.4" fill="none" />
-<text x="{mx:.1}" y="{ty:.1}" font-size="9" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.prec$}</text>
+<g transform="translate({mx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="8.0" text-anchor="end" dominant-baseline="central" font-family="sans-serif" fill="#e11d48">{val:.prec$}</text></g>
 "##,
                             curve_d,
                             mx = (sx_start + sx_end) * 0.5,
@@ -1609,7 +1622,7 @@ fn generate_plot_svg_content(
 
             if inset_w > 30.0 && inset_h > 30.0 {
                 svg.push_str(&format!(
-                    r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" fill="#ffffff" stroke="#a0a0a0" stroke-width="1.2" />
+                    r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" fill="#ffffff" stroke="#888888" stroke-width="1.1" />
 "##,
                     x = inset_x,
                     y = inset_y,
@@ -1668,7 +1681,7 @@ fn generate_plot_svg_content(
                 }
                 if !mv_d.is_empty() {
                     svg.push_str(&format!(
-                        r##"<path d="{}" stroke="#000000" stroke-width="1.2" fill="none" />
+                        r##"<path d="{}" stroke="#000000" stroke-width="0.85" fill="none" />
 "##,
                         mv_d
                     ));
@@ -1704,7 +1717,7 @@ fn generate_plot_svg_content(
                                 }
                                 if !intg_d.is_empty() {
                                     svg.push_str(&format!(
-                                        r##"<path d="{}" stroke="#e11d48" stroke-width="1.2" fill="none" />
+                                        r##"<path d="{}" stroke="#d91b42" stroke-width="1.4" fill="none" />
 "##,
                                         intg_d
                                     ));
@@ -1712,7 +1725,7 @@ fn generate_plot_svg_content(
                                     let tx = mv_ppm_to_x(mid_p);
                                     let ty = mv_y_to_y(y_min_adj + 0.70 * h_diff);
                                     svg.push_str(&format!(
-                                        r##"<text x="{tx:.1}" y="{ty:.1}" font-size="8" font-weight="600" text-anchor="middle" font-family="sans-serif" fill="#e11d48">{val:.prec$}</text>
+                                        r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7.5" text-anchor="end" dominant-baseline="central" font-family="sans-serif" fill="#d91b42">{val:.prec$}</text></g>
 "##,
                                         tx = tx,
                                         ty = ty,
@@ -1752,9 +1765,10 @@ fn generate_plot_svg_content(
                         }
 
                         let mv_text_start_y = inset_y + 4.0;
-                        let text_len = 18.0;
+                        let text_len = 16.0;
                         let text_bottom_y = mv_text_start_y + text_len;
-                        let mv_elbow_y = (text_bottom_y + 5.0).min(inset_axis_y - 10.0);
+                        let mv_elbow_y = text_bottom_y + 3.0;
+                        let max_lead_y = (inset_y + inset_plot_h * 0.25).max(mv_elbow_y + 3.0);
 
                         for (i, pk) in sorted_peaks.iter().enumerate() {
                             let px = mv_ppm_to_x(pk.ppm);
@@ -1766,26 +1780,26 @@ fn generate_plot_svg_content(
                             }
 
                             let py = mv_y_to_y(pk.intensity);
-                            let clearance = 12.0;
-                            let line_start_y = (py - clearance).clamp(mv_elbow_y + 2.0, inset_axis_y - 2.0);
+                            let clearance = 6.0;
+                            let line_start_y = (py - clearance).min(max_lead_y);
 
                             if line_start_y > mv_elbow_y + 1.0 {
                                 svg.push_str(&format!(
-                                    r##"<line x1="{px:.1}" y1="{line_start_y:.1}" x2="{px:.1}" y2="{mv_elbow_y:.1}" stroke="#888888" stroke-width="0.7" />
-<line x1="{px:.1}" y1="{mv_elbow_y:.1}" x2="{tx:.1}" y2="{y_elbow_t:.1}" stroke="#888888" stroke-width="0.7" />
-<line x1="{tx:.1}" y1="{y_elbow_t:.1}" x2="{tx:.1}" y2="{y_start_t:.1}" stroke="#888888" stroke-width="0.7" />
+                                    r##"<line x1="{px:.1}" y1="{line_start_y:.1}" x2="{px:.1}" y2="{mv_elbow_y:.1}" stroke="#70757a" stroke-width="0.5" />
+<line x1="{px:.1}" y1="{mv_elbow_y:.1}" x2="{tx:.1}" y2="{y_elbow_t:.1}" stroke="#70757a" stroke-width="0.5" />
+<line x1="{tx:.1}" y1="{y_elbow_t:.1}" x2="{tx:.1}" y2="{y_start_t:.1}" stroke="#70757a" stroke-width="0.5" />
 "##,
                                     px = px,
                                     line_start_y = line_start_y,
                                     mv_elbow_y = mv_elbow_y,
                                     tx = tx,
-                                    y_elbow_t = text_bottom_y + 2.0,
+                                    y_elbow_t = text_bottom_y + 1.5,
                                     y_start_t = text_bottom_y,
                                 ));
                             }
 
                             svg.push_str(&format!(
-                                r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="6" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#212529">{val:.prec$}</text></g>
+                                r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="6" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#000000">{val:.prec$}</text></g>
 "##,
                                 tx = tx,
                                 ty = mv_text_start_y,
@@ -2130,8 +2144,8 @@ fn print_windows_native(
         unsafe { CreateFontIndirectW(&lf) }
     };
 
-    let margin_x = ((0.4 * (dpi_x as f64)).round() as i32).max(40);
-    let margin_y = ((0.4 * (dpi_y as f64)).round() as i32).max(40);
+    let margin_x = ((0.25 * (dpi_x as f64)).round() as i32).max(25);
+    let margin_y = ((0.25 * (dpi_y as f64)).round() as i32).max(25);
     let mut cur_y = margin_y;
 
     // 1. ヘッダー (ファイル名: 高さを固定して File Name の有無でプロットが動かないようにする)
@@ -2163,8 +2177,9 @@ fn print_windows_native(
     cur_y += header_h;
 
     let has_side = settings.info || (settings.jcoupling && !j_couplings.is_empty());
-    let side_w = if has_side { dpi_x * 160 / 72 } else { 0 };
-    let plot_w = dev_w - margin_x * 2 - side_w - if has_side { dpi_x * 14 / 72 } else { 0 };
+    let side_w = if has_side { dpi_x * 125 / 72 } else { 0 };
+    let side_gap = if has_side { dpi_x * 8 / 72 } else { 0 };
+    let plot_w = dev_w - margin_x * 2 - side_w - side_gap;
     let plot_h = dev_h - cur_y - margin_y;
 
     // 2. プロット描画 (ベクターPolyline / LineTo)
@@ -2203,7 +2218,7 @@ fn print_windows_native(
 
         // スペクトル曲線
         if settings.spectrum && !ppm_arr.is_empty() && !spec_arr.is_empty() {
-            let spec_pen = unsafe { CreatePen(PS_SOLID, (dpi_y * 1 / 72).max(1), rgb(0, 0, 0)) };
+            let spec_pen = unsafe { CreatePen(PS_SOLID, ((dpi_y as f64 * 0.85 / 72.0).round() as i32).max(1), rgb(0, 0, 0)) };
             let old_pen = unsafe { SelectObject(hdc, spec_pen) };
 
             let mut pts: Vec<POINT> = Vec::new();
@@ -2335,13 +2350,14 @@ fn print_windows_native(
                 let y_elbow = axis_y + (dpi_y * 15 / 72);
                 let y_text_start = axis_y + (dpi_y * 28 / 72);
 
-                let lead_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(150, 150, 150)) };
+                let lead_width = ((dpi_y as f64 * 0.55 / 72.0).round() as i32).max(1);
+                let lead_pen = unsafe { CreatePen(PS_SOLID, lead_width, rgb(112, 117, 122)) };
                 let rot_font = make_font(6.5, false, 270);
                 let old_font = unsafe { SelectObject(hdc, rot_font) };
                 let mut tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
                 unsafe {
                     GetTextMetricsW(hdc, &mut tm);
-                    SetTextColor(hdc, rgb(20, 20, 20));
+                    SetTextColor(hdc, rgb(0, 0, 0));
                 }
 
                 let old_lead = unsafe { SelectObject(hdc, lead_pen) };
@@ -2385,9 +2401,13 @@ fn print_windows_native(
         if settings.integrate {
             let intg_pen = unsafe { CreatePen(PS_SOLID, (dpi_y * 1 / 72).max(1), rgb(225, 29, 72)) };
             let bl_pen = unsafe { CreatePen(PS_DASH, 1, rgb(59, 130, 246)) };
-            let intg_font = make_font(8.0, true, 0);
+            let intg_font = make_font(6.5, false, 270);
             let old_font = unsafe { SelectObject(hdc, intg_font) };
-            unsafe { SetTextColor(hdc, rgb(225, 29, 72)) };
+            let mut intg_tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
+            unsafe {
+                GetTextMetricsW(hdc, &mut intg_tm);
+                SetTextColor(hdc, rgb(217, 27, 66));
+            }
 
             for it in integrations {
                 let p_start = it.start_ppm.max(it.end_ppm);
@@ -2421,8 +2441,11 @@ fn print_windows_native(
 
                             let mid_x = (sx_start + sx_end) / 2;
                             let val_str = to_wide(&format!("{:.1$}", res.normalized_value, settings.integral_decimals));
+                            let text_len = (dpi_y as f64 * (val_str.len() as f64) * 4.2 / 72.0).round() as i32;
+                            let draw_x = mid_x + intg_tm.tmHeight / 2;
+                            let draw_y = min_sy - text_len - (dpi_y * 3 / 72);
                             unsafe {
-                                TextOutW(hdc, mid_x - (dpi_x * 8 / 72), min_sy - (dpi_y * 10 / 72), val_str.as_ptr(), (val_str.len() - 1) as i32);
+                                TextOutW(hdc, draw_x, draw_y, val_str.as_ptr(), (val_str.len() - 1) as i32);
                             }
                         }
                     }
@@ -2441,7 +2464,8 @@ fn print_windows_native(
 
         // マルチビュー (拡大スペクトル、積分、ピーク引き出し線、X軸目盛り)
         if settings.multiview && !multiviews.is_empty() {
-            let mv_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(160, 160, 160)) };
+            let mv_border_width = ((dpi_y as f64 * 1.1 / 72.0).round() as i32).max(1);
+            let mv_pen = unsafe { CreatePen(PS_SOLID, mv_border_width, rgb(136, 136, 136)) };
             let white_brush = unsafe { CreateSolidBrush(rgb(255, 255, 255)) };
 
             for mv in multiviews {
@@ -2497,7 +2521,7 @@ fn print_windows_native(
                     };
 
                     // 1. 拡大スペクトル曲線 (黒色)
-                    let spec_pen = unsafe { CreatePen(PS_SOLID, (dpi_y * 1 / 72).max(1), rgb(0, 0, 0)) };
+                    let spec_pen = unsafe { CreatePen(PS_SOLID, ((dpi_y as f64 * 0.85 / 72.0).round() as i32).max(1), rgb(0, 0, 0)) };
                     let old_spec_pen = unsafe { SelectObject(hdc, spec_pen) };
 
                     let mut mv_pts = Vec::new();
@@ -2523,11 +2547,15 @@ fn print_windows_native(
 
                     // 2. 積分 (マルチビュー内)
                     if settings.integrate {
-                        let mv_intg_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(225, 29, 72)) };
+                        let mv_intg_pen = unsafe { CreatePen(PS_SOLID, ((dpi_y as f64 * 1.4 / 72.0).round() as i32).max(1), rgb(217, 27, 66)) };
                         let old_intg_p = unsafe { SelectObject(hdc, mv_intg_pen) };
-                        let mv_intg_font = make_font(6.5, true, 0);
+                        let mv_intg_font = make_font(5.5, false, 270);
                         let old_font = unsafe { SelectObject(hdc, mv_intg_font) };
-                        unsafe { SetTextColor(hdc, rgb(225, 29, 72)) };
+                        let mut mv_intg_tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
+                        unsafe {
+                            GetTextMetricsW(hdc, &mut mv_intg_tm);
+                            SetTextColor(hdc, rgb(217, 27, 66));
+                        }
 
                         for integ in integrations {
                             let i_min = integ.min_ppm();
@@ -2555,8 +2583,11 @@ fn print_windows_native(
                                         let tx = mv_ppm_to_x(mid_p);
                                         let ty = mv_y_to_y(y_min_adj + 0.70 * h_diff);
                                         let val_str = to_wide(&format!("{:.1$}", res.normalized_value, settings.integral_decimals));
+                                        let text_len = (dpi_y as f64 * (val_str.len() as f64) * 3.6 / 72.0).round() as i32;
+                                        let draw_x = tx + mv_intg_tm.tmHeight / 2;
+                                        let draw_y = ty - text_len;
                                         unsafe {
-                                            TextOutW(hdc, tx - (dpi_x * 8 / 72), ty, val_str.as_ptr(), (val_str.len() - 1) as i32);
+                                            TextOutW(hdc, draw_x, draw_y, val_str.as_ptr(), (val_str.len() - 1) as i32);
                                         }
                                     }
                                 }
@@ -2597,20 +2628,22 @@ fn print_windows_native(
                                 if !moved { break; }
                             }
 
-                            let lead_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(150, 150, 150)) };
+                            let lead_width = ((dpi_y as f64 * 0.5 / 72.0).round() as i32).max(1);
+                            let lead_pen = unsafe { CreatePen(PS_SOLID, lead_width, rgb(112, 117, 122)) };
                             let old_lead = unsafe { SelectObject(hdc, lead_pen) };
                             let mv_rot_font = make_font(5.0, false, 270);
                             let old_font = unsafe { SelectObject(hdc, mv_rot_font) };
                             let mut mv_tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
                             unsafe {
                                 GetTextMetricsW(hdc, &mut mv_tm);
-                                SetTextColor(hdc, rgb(20, 20, 20));
+                                SetTextColor(hdc, rgb(0, 0, 0));
                             }
 
-                            let text_len = dpi_y * 15 / 72;
-                            let mv_text_start_y = inset_y + (dpi_y * 4 / 72);
+                            let text_len = dpi_y * 14 / 72;
+                            let mv_text_start_y = inset_y + (dpi_y * 3 / 72);
                             let text_bottom_y = mv_text_start_y + text_len;
-                            let mv_elbow_y = (text_bottom_y + (dpi_y * 5 / 72)).min(inset_axis_y - (dpi_y * 8 / 72));
+                            let mv_elbow_y = text_bottom_y + (dpi_y * 3 / 72);
+                            let max_lead_y = (inset_y + inset_plot_h * 25 / 100).max(mv_elbow_y + (dpi_y * 2 / 72));
 
                             for (i, pk) in sorted_peaks.iter().enumerate() {
                                 let px = mv_ppm_to_x(pk.ppm);
@@ -2622,14 +2655,14 @@ fn print_windows_native(
                                 }
 
                                 let py = mv_y_to_y(pk.intensity);
-                                let clearance = dpi_y * 12 / 72;
-                                let line_start_y = (py - clearance).clamp(mv_elbow_y + 2, inset_axis_y - 2);
+                                let clearance = dpi_y * 6 / 72;
+                                let line_start_y = (py - clearance).min(max_lead_y);
 
                                 if line_start_y > mv_elbow_y + 1 {
                                     unsafe {
                                         MoveToEx(hdc, px, line_start_y, std::ptr::null_mut());
                                         LineTo(hdc, px, mv_elbow_y);
-                                        LineTo(hdc, tx, text_bottom_y + (dpi_y * 2 / 72));
+                                        LineTo(hdc, tx, text_bottom_y + (dpi_y * 1 / 72));
                                         LineTo(hdc, tx, text_bottom_y);
                                     }
                                 }

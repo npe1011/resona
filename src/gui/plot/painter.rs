@@ -551,22 +551,17 @@ fn paint_integrations(
                         ));
                     }
 
-                    // 3. 積分値テキスト (ezNMR仕様: カーブの真上、中央よりやや左寄り)
+                    // 3. 積分値テキスト (化学シフト値と同様に時計回り90度回転の縦書き配置)
                     let mid_x = (sx_start + sx_end) * 0.5;
-                    let text_x = mid_x - (sx_end - sx_start).abs() * 0.15; // やや左
-                    let text_y = (min_screen_y - 12.0).max(rect.min.y + 10.0);
-
                     let val_text = format!("{:.1$}", res.normalized_value, style.integral_decimals);
-
-                    // 読みやすさのための背景白抜き
-                    let text_pos = Pos2::new(text_x, text_y);
-                    painter.text(
-                        text_pos,
-                        egui::Align2::CENTER_CENTER,
-                        val_text,
-                        font_intg.clone(),
-                        style.integral_color,
-                    );
+                    let galley = painter.layout_no_wrap(val_text, font_intg.clone(), style.integral_color);
+                    let text_len = galley.size().x;
+                    let text_h = galley.size().y;
+                    let start_y = (min_screen_y - 4.0 - text_len).max(rect.min.y + 4.0);
+                    let text_pos = Pos2::new(mid_x + text_h * 0.5, start_y);
+                    let ts = egui::epaint::TextShape::new(text_pos, galley, style.integral_color)
+                        .with_angle(std::f32::consts::FRAC_PI_2);
+                    painter.add(ts);
                 }
             }
         }
@@ -698,17 +693,20 @@ fn paint_multiviews(
                             Stroke::new(1.5_f32, style.integral_color),
                         ));
 
-                        // プロトン数テキスト
-                        let mid_p = (i_min + i_max) * 0.5 + 0.15 * (i_max - i_min);
+                        // 積分値テキスト (時計回り90度回転の縦書き配置)
+                        let mid_p = (i_min.max(src_min) + i_max.min(src_max)) * 0.5;
+                        let text_x = inset_transform.ppm_to_screen_x(mid_p);
                         let top_pos = inset_transform.data_to_screen(mid_p, y_min_adj + 0.68 * h);
                         let val_text = format!("{:.1$}", res.normalized_value, style.integral_decimals);
-                        plot_painter.text(
-                            top_pos,
-                            egui::Align2::CENTER_BOTTOM,
-                            val_text,
-                            egui::FontId::proportional(10.0),
-                            style.integral_color,
-                        );
+                        let font_intg = egui::FontId::proportional(9.5);
+                        let galley = plot_painter.layout_no_wrap(val_text, font_intg, style.integral_color);
+                        let text_len = galley.size().x;
+                        let text_h = galley.size().y;
+                        let start_y = (top_pos.y - text_len).max(plot_rect.min.y + 4.0);
+                        let text_pos = Pos2::new(text_x + text_h * 0.5, start_y);
+                        let ts = egui::epaint::TextShape::new(text_pos, galley, style.integral_color)
+                            .with_angle(std::f32::consts::FRAC_PI_2);
+                        plot_painter.add(ts);
                     }
                 }
             }
@@ -752,11 +750,15 @@ fn paint_multiviews(
                 }
             }
 
-            // テキスト上端と折れ曲がり Y 座標 (プロット領域の上部)
+            // テキスト上端と折れ曲がり Y 座標 (画面上25%以内で引出線を完結させる)
             let font_peak = FontId::new(9.0, FontFamily::Proportional);
             let peak_color = Color32::from_rgb(20, 20, 20);
-            let elbow_y = (plot_rect.min.y + 36.0).min(axis_y - 20.0);
+            let plot_h = axis_y - plot_rect.min.y;
             let text_start_y = plot_rect.min.y + 4.0;
+            let text_len = 24.0_f32;
+            let text_bottom_y = text_start_y + text_len;
+            let elbow_y = text_bottom_y + 3.0;
+            let max_lead_y = (plot_rect.min.y + plot_h * 0.25).max(elbow_y + 4.0);
 
             for (i, pk) in sorted_peaks.iter().enumerate() {
                 let px = inset_transform.ppm_to_screen_x(pk.ppm);
@@ -768,16 +770,16 @@ fn paint_multiviews(
                 }
 
                 let peak_screen = inset_transform.data_to_screen(pk.ppm, pk.intensity);
-                // ピーク頭頂部から 24px 離した位置から引き出し線を開始 (スペクトルの山からしっかりと空間をあける)
-                let clearance = 24.0_f32;
-                let line_start_y = (peak_screen.y - clearance).clamp(elbow_y + 4.0, axis_y - 6.0);
+                let clearance = 8.0_f32;
+                // ピークが上部25%より上にある場合はピーク直前で止め、低いピークの場合は上部25%位置からスタート
+                let line_start_y = (peak_screen.y - clearance).min(max_lead_y);
 
                 // 引き出し線 (スペクトル上方 -> 折れ曲がりY -> テキスト位置)
-                if line_start_y > elbow_y + 2.0 {
+                if line_start_y > elbow_y + 1.0 {
                     let stroke = Stroke::new(0.85_f32, Color32::from_gray(100));
                     plot_painter.line_segment([Pos2::new(px, line_start_y), Pos2::new(px, elbow_y)], stroke);
-                    plot_painter.line_segment([Pos2::new(px, elbow_y), Pos2::new(tx, text_start_y + 28.0)], stroke);
-                    plot_painter.line_segment([Pos2::new(tx, text_start_y + 28.0), Pos2::new(tx, text_start_y + 30.0)], stroke);
+                    plot_painter.line_segment([Pos2::new(px, elbow_y), Pos2::new(tx, text_bottom_y + 1.5)], stroke);
+                    plot_painter.line_segment([Pos2::new(tx, text_bottom_y + 1.5), Pos2::new(tx, text_bottom_y)], stroke);
                 }
 
                 // 時計回り90度回転の縦書き化学シフト値ラベル (style.ppm_decimals を反映)

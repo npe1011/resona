@@ -227,9 +227,26 @@ where
 
 /// 未補正の複素数スペクトルに対して ACME 法を実行し、最適な (p0, p1) を算出する
 pub fn autophase_acme(unphased_complex: &Array1<Complex64>) -> (f64, f64) {
+    let mut initial_p0 = 0.0;
+    let initial_score = acme_score(unphased_complex, 0.0, 0.0);
+
+    // [0.0, 0.0] で全ペナルティ領域 (max_r <= 0 など) に入っている場合、
+    // 粗い p0 グリッド走査で有効な初期位相を探索
+    if initial_score >= 1e9 {
+        let mut best_score = initial_score;
+        for step in 1..12 {
+            let p0_test = (step as f64) * 30.0;
+            let score = acme_score(unphased_complex, p0_test, 0.0);
+            if score < best_score {
+                best_score = score;
+                initial_p0 = p0_test;
+            }
+        }
+    }
+
     let opt = nelder_mead_2d(
         |p| acme_score(unphased_complex, p[0], p[1]),
-        [0.0, 0.0],
+        [initial_p0, 0.0],
         1e-4,
         1e-4,
         500,

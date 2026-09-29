@@ -129,7 +129,14 @@ pub fn baseline_airpls(y: &Array1<f64>, lam: f64, max_iter: usize) -> Array1<f64
         return Array1::zeros(n);
     }
 
-    let y_slice = y.as_slice().unwrap_or(&[]);
+    let temp_y;
+    let y_slice = match y.as_slice() {
+        Some(s) => s,
+        None => {
+            temp_y = y.to_vec();
+            &temp_y
+        }
+    };
     let sum_abs_y: f64 = y_slice.iter().map(|v| v.abs()).sum::<f64>().max(1e-12);
 
     let mut w = vec![1.0; n];
@@ -181,8 +188,6 @@ pub fn baseline_polynomial(y: &Array1<f64>, order: usize, max_iter: usize) -> Ar
         return Array1::zeros(n);
     }
 
-    let y_slice = y.as_slice().unwrap_or(&[]);
-
     // 数値安定化のため x を [-1.0, 1.0] に正規化
     let mut x_norm = vec![0.0; n];
     for i in 0..n {
@@ -210,7 +215,8 @@ pub fn baseline_polynomial(y: &Array1<f64>, order: usize, max_iter: usize) -> Ar
     }
 
     // 現在の信号 (初回は生スペクトル)
-    let mut current_y = y_slice.to_vec();
+    let raw_y = y.to_vec();
+    let mut current_y = raw_y.clone();
     let mut coeffs = vec![0.0; dim];
 
     for _ in 0..max_iter {
@@ -248,7 +254,7 @@ pub fn baseline_polynomial(y: &Array1<f64>, order: usize, max_iter: usize) -> Ar
             }
             poly_vals[i] = p_val;
 
-            let diff = y_slice[i] - p_val;
+            let diff = raw_y[i] - p_val;
             if diff < 0.0 {
                 neg_diff_sq_sum += diff * diff;
                 neg_count += 1;
@@ -265,10 +271,10 @@ pub fn baseline_polynomial(y: &Array1<f64>, order: usize, max_iter: usize) -> Ar
         // 次の反復用の信号更新: ピーク部分 (y > P(x) + sigma) をクリップ
         let mut max_change = 0.0_f64;
         for i in 0..n {
-            let target = if y_slice[i] > poly_vals[i] + sigma {
+            let target = if raw_y[i] > poly_vals[i] + sigma {
                 poly_vals[i] + sigma
             } else {
-                y_slice[i]
+                raw_y[i]
             };
             max_change = max_change.max((current_y[i] - target).abs());
             current_y[i] = target;

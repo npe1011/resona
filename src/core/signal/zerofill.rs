@@ -10,7 +10,11 @@ pub fn apply_zerofill(fid: &Array1<Complex64>, target_size: usize) -> Array1<Com
     }
 
     let mut padded = Vec::with_capacity(target_size);
-    padded.extend_from_slice(fid.as_slice().unwrap_or(&[]));
+    if let Some(slice) = fid.as_slice() {
+        padded.extend_from_slice(slice);
+    } else {
+        padded.extend(fid.iter().cloned());
+    }
     padded.resize(target_size, Complex64::new(0.0, 0.0));
 
     Array1::from_vec(padded)

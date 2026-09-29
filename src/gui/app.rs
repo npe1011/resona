@@ -33,10 +33,22 @@ enum IntgEditTarget {
     Offset,
 }
 
+/// 点 p から線分 ab への画面上での最短距離
+fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_sq();
+    if len_sq <= 1e-6 {
+        return (p - a).length();
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    let proj = a + ab * t;
+    (p - proj).length()
+}
+
 /// 積分曲線のホバー／ドラッグ対象判定
 /// - 積分曲線の上端付近: Scale (拡大率変更)
 /// - 積分曲線の線上付近: Offset (平行移動)
-/// - 積分曲線より下～ベースラインの間: None (判定なし、誤操作防止)
+/// - 線分への最短距離ベースで判定し、急峻な立ち上がり部や端点付近でも余裕を持って掴めるようにする
 fn detect_integrate_edit_target(
     pos: Pos2,
     ppm: f64,
@@ -48,54 +60,72 @@ fn detect_integrate_edit_target(
     offset: f64,
     ref_factor: f64,
 ) -> Option<IntgEditTarget> {
-    if !intg.contains_ppm(ppm) {
-        return None;
-    }
-    let res = compute_integral(spec, ppm_arr, intg, scale, ref_factor, offset)?;
-    if res.ppm.is_empty() || res.curve_y.is_empty() {
+    // 画面 X 座標での範囲判定 (左右に 16px の余裕マージンを持たせる)
+    let s_x = t.ppm_to_screen_x(intg.start_ppm);
+    let e_x = t.ppm_to_screen_x(intg.end_ppm);
+    let min_x = s_x.min(e_x) - 16.0;
+    let max_x = s_x.max(e_x) + 16.0;
+    if pos.x < min_x || pos.x > max_x {
         return None;
     }
 
-    // マウス PPM に最も近い曲線の画面 Y
-    let mut best_i = 0;
-    let mut min_dp = f64::INFINITY;
-    for (i, &p) in res.ppm.iter().enumerate() {
-        let dp = (p - ppm).abs();
-        if dp < min_dp {
-            min_dp = dp;
-            best_i = i;
+    let res = compute_integral(spec, ppm_arr, intg, scale, ref_factor, offset)?;
+    if res.ppm.len() < 2 || res.curve_y.len() < 2 {
+        return None;
+    }
+
+    // 曲線の画面座標点列
+    let curve_pts: Vec<Pos2> = res.ppm
+        .iter()
+        .zip(res.curve_y.iter())
+        .map(|(&p, &y)| t.data_to_screen(p, y))
+        .collect();
+
+    // 曲線全体への最短距離 & 頂点画面位置
+    let mut min_dist = f32::INFINITY;
+    let mut min_curve_screen_y = f32::INFINITY;
+    let mut top_pos = curve_pts[0];
+
+    for i in 0..curve_pts.len() {
+        let pt = curve_pts[i];
+        if pt.y < min_curve_screen_y {
+            min_curve_screen_y = pt.y;
+            top_pos = pt;
+        }
+        if i + 1 < curve_pts.len() {
+            let d = dist_to_segment(pos, curve_pts[i], curve_pts[i + 1]);
+            if d < min_dist {
+                min_dist = d;
+            }
         }
     }
-    let curve_screen_y = t.data_to_screen(res.ppm[best_i], res.curve_y[best_i]).y;
-
-    // 区間全体の曲線の頂点画面 Y (画面上では Y が最小)
-    let min_curve_screen_y = res.curve_y.iter()
-        .map(|&y| t.data_to_screen(ppm, y).y)
-        .fold(f32::INFINITY, f32::min);
 
     let bl_screen_y = t.data_to_screen(ppm, intg.baseline_y_at(ppm)).y;
 
-    // 1. 積分曲線より下～ベースラインの間、およびベースラインより下は「判定なし」
-    // (誤操作防止のため、曲線の下部マージン 12px より下は一切反応させない)
-    if pos.y > curve_screen_y + 12.0 || pos.y > bl_screen_y + 14.0 {
+    // 1. ベースラインより大幅に下（18px以上下）は判定外（誤操作防止）
+    if pos.y > bl_screen_y + 18.0 {
         return None;
     }
 
-    // 2. 曲線より遥か上（上空 20px 以上）も判定なし
-    if pos.y < min_curve_screen_y - 20.0 {
+    // 2. 曲線より遥か上空（28px以上上）も判定外
+    if pos.y < min_curve_screen_y - 28.0 {
         return None;
     }
 
-    // 3. 積分曲線の上端判定 (頂点付近、またはマウス位置でのカーブが頂点近傍)
-    if (pos.y - min_curve_screen_y).abs() <= 16.0
-        || (curve_screen_y <= min_curve_screen_y + 10.0 && (pos.y - curve_screen_y).abs() <= 16.0)
+    // 3. 掴む許容距離 (22px: 従来の14pxから大幅に拡大し掴みやすくする)
+    let hit_tolerance = 22.0_f32;
+    if min_dist > hit_tolerance && (pos - top_pos).length() > hit_tolerance {
+        return None;
+    }
+
+    // 4. 積分曲線の上端判定 (頂点付近、または上部近傍) -> Scale
+    if (pos - top_pos).length() <= hit_tolerance + 4.0
+        || (pos.y <= min_curve_screen_y + 16.0 && min_dist <= hit_tolerance)
     {
         Some(IntgEditTarget::Scale)
-    } else if (pos.y - curve_screen_y).abs() <= 14.0 {
-        // 4. それ以外の積分曲線付近は平行移動 (Offset)
-        Some(IntgEditTarget::Offset)
     } else {
-        None
+        // 5. それ以外の積分曲線付近 -> Offset
+        Some(IntgEditTarget::Offset)
     }
 }
 
@@ -1741,8 +1771,8 @@ impl eframe::App for ResonaApp {
                             for intg in &self.project.state.integrations {
                                 let s_pos = t.data_to_screen(intg.start_ppm, intg.y_start);
                                 let e_pos = t.data_to_screen(intg.end_ppm, intg.y_end);
-                                let hit_s = (pos - s_pos).length() <= 14.0 || ((pos.x - s_pos.x).abs() <= 12.0 && (pos.y - s_pos.y).abs() <= 18.0);
-                                let hit_e = (pos - e_pos).length() <= 14.0 || ((pos.x - e_pos.x).abs() <= 12.0 && (pos.y - e_pos.y).abs() <= 18.0);
+                                let hit_s = (pos - s_pos).length() <= 18.0 || ((pos.x - s_pos.x).abs() <= 16.0 && (pos.y - s_pos.y).abs() <= 20.0);
+                                let hit_e = (pos - e_pos).length() <= 18.0 || ((pos.x - e_pos.x).abs() <= 16.0 && (pos.y - e_pos.y).abs() <= 20.0);
                                 if hit_s || hit_e {
                                     hit_handle = true;
                                     break;
@@ -1875,8 +1905,8 @@ impl eframe::App for ResonaApp {
                                 for (idx, intg) in self.project.state.integrations.iter().enumerate() {
                                     let s_pos = t.data_to_screen(intg.start_ppm, intg.y_start);
                                     let e_pos = t.data_to_screen(intg.end_ppm, intg.y_end);
-                                    let hit_s = (pos - s_pos).length() <= 14.0 || ((pos.x - s_pos.x).abs() <= 12.0 && (pos.y - s_pos.y).abs() <= 18.0);
-                                    let hit_e = (pos - e_pos).length() <= 14.0 || ((pos.x - e_pos.x).abs() <= 12.0 && (pos.y - e_pos.y).abs() <= 18.0);
+                                    let hit_s = (pos - s_pos).length() <= 18.0 || ((pos.x - s_pos.x).abs() <= 16.0 && (pos.y - s_pos.y).abs() <= 20.0);
+                                    let hit_e = (pos - e_pos).length() <= 18.0 || ((pos.x - e_pos.x).abs() <= 16.0 && (pos.y - e_pos.y).abs() <= 20.0);
                                     if hit_s {
                                         hit_handle = Some(IntegrateDragTarget::StartHandle(idx));
                                         break;

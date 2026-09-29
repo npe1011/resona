@@ -1,7 +1,5 @@
 use ndarray::Array1;
 
-use super::peak::estimate_noise_mad;
-
 /// 一般的な NMR 溶媒情報
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolventInfo {
@@ -109,7 +107,7 @@ pub fn auto_detect_reference_peak(
     let search_min = target_ppm - search_delta_ppm;
     let search_max = target_ppm + search_delta_ppm;
 
-    let mut best_p = None;
+    let mut best_i = None;
     let mut max_val = f64::NEG_INFINITY;
 
     for i in 0..n {
@@ -118,15 +116,41 @@ pub fn auto_detect_reference_peak(
             let v = spectrum[i];
             if v > max_val {
                 max_val = v;
-                best_p = Some(p);
+                best_i = Some(i);
             }
         }
     }
 
-    let noise = estimate_noise_mad(spectrum);
-    if let Some(peak_ppm) = best_p {
-        if max_val > noise * min_snr {
-            return Some(peak_ppm);
+    let mut vals: Vec<f64> = spectrum.to_vec();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = vals[n / 2];
+
+    let mut abs_diffs: Vec<f64> = spectrum.iter().map(|&v| (v - median).abs()).collect();
+    abs_diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mad = abs_diffs[n / 2];
+    let noise = if mad > 0.0 { mad / 0.6745 } else { 1.0 };
+
+    if let Some(idx) = best_i {
+        // ベースライン中央値からの正味のピーク高さがノイズの min_snr 倍以上か判定
+        if (max_val - median) > noise * min_snr {
+            // 3点放物線補間によるサブサンプリング精度のピーク化学シフト算出
+            if idx > 0 && idx < n - 1 {
+                let y0 = spectrum[idx - 1];
+                let y1 = spectrum[idx];
+                let y2 = spectrum[idx + 1];
+                let denom = y0 - 2.0 * y1 + y2;
+                if denom < -1e-12 {
+                    // 放物線の頂点インデックスの変位 delta_idx ([-1.0, 1.0])
+                    let delta_idx = 0.5 * (y0 - y2) / denom;
+                    if delta_idx.abs() <= 1.0 {
+                        // ppm配列は一般に降順 (ppm[idx+1] < ppm[idx] < ppm[idx-1])
+                        // インデックス増加方向のppm変化率 dppm/didx
+                        let dppm_didx = (ppm[idx + 1] - ppm[idx - 1]) * 0.5;
+                        return Some(ppm[idx] + delta_idx * dppm_didx);
+                    }
+                }
+            }
+            return Some(ppm[idx]);
         }
     }
 
@@ -202,10 +226,36 @@ mod tests {
         let detected = auto_detect_reference_peak(&spectrum, &ppm, target_ppm, 0.15, 2.0);
         assert!(detected.is_some());
         let peak_p = detected.unwrap();
-        assert!((peak_p - 7.25).abs() < 1e-4);
+        assert!((peak_p - 7.25).abs() < 0.02);
 
         // 範囲外 (例えば 2.50 ppm) では検出されない
         let not_found = auto_detect_reference_peak(&spectrum, &ppm, 2.50, 0.15, 2.0);
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_parabolic_interpolation_subsample_precision() {
+        // 離散点 (step = -0.02 ppm) の間に真のピークがあるケース
+        let n = 50;
+        let mut ppm_vec = vec![0.0; n];
+        let mut spec_vec = vec![0.0; n];
+        for i in 0..n {
+            ppm_vec[i] = 7.70 - (i as f64) * 0.02;
+        }
+        // index 22 (ppm = 7.26) の近傍に放物線ピーク (頂点は u = 0.25, ppm = 7.255)
+        // y = -(u - 0.25)^2 + 100 where u = i - 22
+        // u = -1 (idx 21): -( -1.25 )^2 + 100 = 98.4375
+        // u =  0 (idx 22): -( -0.25 )^2 + 100 = 99.9375
+        // u =  1 (idx 23): -(  0.75 )^2 + 100 = 99.4375
+        spec_vec[21] = 98.4375;
+        spec_vec[22] = 99.9375;
+        spec_vec[23] = 99.4375;
+
+        let ppm = Array1::from_vec(ppm_vec);
+        let spec = Array1::from_vec(spec_vec);
+
+        let detected = auto_detect_reference_peak(&spec, &ppm, 7.26, 0.05, 2.0).unwrap();
+        // 期待値: u = 0.25 なので、ppm = 7.26 + 0.25 * (-0.02) = 7.255
+        assert!((detected - 7.255).abs() < 1e-6);
     }
 }
