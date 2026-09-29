@@ -2158,6 +2158,10 @@ impl eframe::App for ResonaApp {
                 };
                 match crate::core::process_raw_fid(&raw_fid, &ft_settings, 0.0, 0.0) {
                     Ok(processed) => {
+                        // Re-FT 時はすべての既存解析 (Peak, Integrate, Multiview, J-Coupling, Refシフト, Baseline) をリセット
+                        self.project.clear_all_processing();
+                        self.action_state.clear_submodes();
+
                         self.project.ppm = Some(processed.ppm);
                         self.project.complex_spectrum_unphased = Some(processed.complex_spectrum_unphased);
                         self.project.state.ft_settings = ft_settings;
@@ -2169,7 +2173,7 @@ impl eframe::App for ResonaApp {
                         let (p0, p1) = self.project.auto_phase();
                         self.project.push_history();
                         self.reset_zoom();
-                        self.status_message = format!("Fourier Transform applied (Autophased: P0={:.2}°, P1={:.2}°)", p0, p1);
+                        self.status_message = format!("Fourier Transform applied (All analyses reset; Autophased: P0={:.2}°, P1={:.2}°)", p0, p1);
                     }
                     Err(e) => {
                         self.status_message = format!("FT error {}", e);

@@ -874,13 +874,13 @@ fn render_realtime_preview(
                                     continue;
                                 }
                                 if let Some(res) = compute_integral(spec_arr, ppm_arr, integ, 1.0, integration_ref_factor, 0.0) {
-                                    if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                                    if res.ppm.len() > 1 && res.total_area.abs() > 1e-12 {
                                         let mut intg_pts = Vec::new();
                                         for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
                                             if p >= mv_src_min && p <= mv_src_max {
                                                 let bl = integ.baseline_y_at(p);
-                                                let cum_area = (cy - bl).max(0.0);
-                                                let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                                                let cum = cy - bl;
+                                                let norm_y = (cum / res.total_area).clamp(0.0, 1.0);
                                                 let target_data_y = y_min_adj + 0.20 * h_diff + norm_y * (0.45 * h_diff);
                                                 intg_pts.push(Pos2::new(mv_ppm_to_x(p), mv_y_to_y(target_data_y)));
                                             }
@@ -1672,14 +1672,14 @@ fn generate_plot_svg_content(
                             continue;
                         }
                         if let Some(res) = compute_integral(spectrum, ppm, integ, 1.0, integration_ref_factor, 0.0) {
-                            if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                            if res.ppm.len() > 1 && res.total_area.abs() > 1e-12 {
                                 let mut intg_d = String::new();
                                 let mut first_intg = true;
                                 for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
                                     if p >= mv_src_min && p <= mv_src_max {
                                         let bl = integ.baseline_y_at(p);
-                                        let cum_area = (cy - bl).max(0.0);
-                                        let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                                        let cum = cy - bl;
+                                        let norm_y = (cum / res.total_area).clamp(0.0, 1.0);
                                         let target_data_y = y_min_adj + 0.20 * h_diff + norm_y * (0.45 * h_diff);
                                         let sx = mv_ppm_to_x(p);
                                         let sy = mv_y_to_y(target_data_y);
@@ -2527,13 +2527,13 @@ fn print_windows_native(
                                 continue;
                             }
                             if let Some(res) = compute_integral(spec_arr, ppm_arr, integ, 1.0, integration_ref_factor, 0.0) {
-                                if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                                if res.ppm.len() > 1 && res.total_area.abs() > 1e-12 {
                                     let mut intg_pts = Vec::new();
                                     for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
                                         if p >= mv_src_min && p <= mv_src_max {
                                             let bl = integ.baseline_y_at(p);
-                                            let cum_area = (cy - bl).max(0.0);
-                                            let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                                            let cum = cy - bl;
+                                            let norm_y = (cum / res.total_area).clamp(0.0, 1.0);
                                             let target_data_y = y_min_adj + 0.20 * h_diff + norm_y * (0.45 * h_diff);
                                             intg_pts.push(POINT { x: mv_ppm_to_x(p), y: mv_y_to_y(target_data_y) });
                                         }

@@ -505,7 +505,7 @@ fn paint_integrations(
     scale: f64,
     offset: f64,
     ref_factor: f64,
-    axis_y: f32,
+    _axis_y: f32,
     is_edit_mode: bool,
     style: &PlotStyle,
 ) {
@@ -546,7 +546,7 @@ fn paint_integrations(
 
                     for i in 0..res.ppm.len() {
                         let pos = transform.data_to_screen(res.ppm[i], res.curve_y[i]);
-                        let clamped_pos = Pos2::new(pos.x, pos.y.min(axis_y));
+                        let clamped_pos = Pos2::new(pos.x, pos.y.clamp(rect.min.y, rect.max.y));
                         pts.push(clamped_pos);
                         min_screen_y = min_screen_y.min(pos.y);
                     }
@@ -687,14 +687,14 @@ fn paint_multiviews(
             }
 
             if let Some(res) = compute_integral(spectrum, ppm, integ, 1.0, integration_ref_factor, 0.0) {
-                if res.ppm.len() > 1 && res.total_area > 1e-12 {
+                if res.ppm.len() > 1 && res.total_area.abs() > 1e-12 {
                     // 局所スケーリング: インセットの 25% 〜 70% に収める
                     let mut intg_pts: Vec<Pos2> = Vec::new();
                     for (&p, &cy) in res.ppm.iter().zip(res.curve_y.iter()) {
                         if p >= src_min && p <= src_max {
                             let bl = integ.baseline_y_at(p);
-                            let cum_area = (cy - bl).max(0.0);
-                            let norm_y = (cum_area / res.total_area).clamp(0.0, 1.0);
+                            let cum = cy - bl;
+                            let norm_y = (cum / res.total_area).clamp(0.0, 1.0);
                             let target_data_y = y_min_adj + 0.20 * h + norm_y * (0.45 * h);
                             intg_pts.push(inset_transform.data_to_screen(p, target_data_y));
                         }

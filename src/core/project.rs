@@ -327,6 +327,7 @@ impl Project {
             self.state.baseline_method = BaselineMethod::None;
             self.spectrum_real = Some(spec);
             self.invalidate_cache();
+            self.sync_analysis_to_spectrum();
         }
     }
 
@@ -338,6 +339,56 @@ impl Project {
             (p0, p1)
         } else {
             (0.0, 0.0)
+        }
+    }
+
+    /// スペクトル (spectrum_real) が Phase や Baseline の変更によって更新された際、
+    /// 既存のピークの強度 (intensity) および積分の局所ベースライン端点 (y_start, y_end) を
+    /// 新しいスペクトルに合わせて自動同期する
+    pub fn sync_analysis_to_spectrum(&mut self) {
+        if let (Some(ppm), Some(spec)) = (self.ppm.as_ref(), self.spectrum_real.as_ref()) {
+            let n = ppm.len().min(spec.len());
+            if n < 2 {
+                return;
+            }
+
+            // 1. 各ピークの強度 (intensity) を現在のスペクトルから再サンプリング
+            for peak in &mut self.state.peaks {
+                let mut best_idx = 0;
+                let mut min_diff = f64::MAX;
+                for i in 0..n {
+                    let diff = (ppm[i] - peak.ppm).abs();
+                    if diff < min_diff {
+                        min_diff = diff;
+                        best_idx = i;
+                    }
+                }
+                peak.intensity = spec[best_idx];
+            }
+
+            // 2. 各積分の局所ベースライン端点 (y_start, y_end) を現在のスペクトルレベルに同期
+            for intg in &mut self.state.integrations {
+                let mut idx_start = 0;
+                let mut diff_start = f64::MAX;
+                let mut idx_end = 0;
+                let mut diff_end = f64::MAX;
+
+                for i in 0..n {
+                    let ds = (ppm[i] - intg.start_ppm).abs();
+                    if ds < diff_start {
+                        diff_start = ds;
+                        idx_start = i;
+                    }
+                    let de = (ppm[i] - intg.end_ppm).abs();
+                    if de < diff_end {
+                        diff_end = de;
+                        idx_end = i;
+                    }
+                }
+
+                intg.y_start = spec[idx_start];
+                intg.y_end = spec[idx_end];
+            }
         }
     }
 
@@ -366,6 +417,7 @@ impl Project {
         self.baseline_array = bl;
         self.state.baseline_method = method;
         self.invalidate_cache();
+        self.sync_analysis_to_spectrum();
     }
 
     /// ALS ベースライン補正を適用する (互換用)
@@ -914,6 +966,43 @@ mod tests {
         assert!(proj.undo()); // Undo で current_idx = 0 に戻る
         assert!(proj.state.peaks.is_empty());
         assert!(proj.state.integrations.is_empty());
+    }
+
+    #[test]
+    fn test_sync_analysis_to_spectrum() {
+        let mut proj = Project::new();
+        let ppm = Array1::from_vec(vec![3.0, 2.0, 1.0]);
+        // 初期スペクトル: [10.0, 50.0, 10.0]
+        let spec_initial = Array1::from_vec(vec![10.0, 50.0, 10.0]);
+        let unphased = Array1::from_vec(vec![
+            Complex64::new(10.0, 0.0),
+            Complex64::new(50.0, 0.0),
+            Complex64::new(10.0, 0.0),
+        ]);
+
+        proj.ppm = Some(ppm);
+        proj.complex_spectrum_unphased = Some(unphased);
+        proj.spectrum_real = Some(spec_initial);
+
+        // ピークと積分区間を登録
+        proj.state.peaks.push(PeakItem { ppm: 2.0, intensity: 50.0, is_auto: true });
+        proj.state.integrations.push(IntegrationItem {
+            id: "intg-1".to_string(),
+            start_ppm: 3.0,
+            end_ppm: 1.0,
+            y_start: 10.0,
+            y_end: 10.0,
+        });
+
+        // ベースライン補正を適用 (平坦なオフセット補正相当: spec が [0.0, 40.0, 0.0] に変化)
+        let poly_method = BaselineMethod::Polynomial { order: 0, max_iter: 10 };
+        proj.apply_baseline(poly_method);
+
+        // ピーク強度と積分の y_start, y_end が更新されたスペクトルに自動同期されているか
+        let new_spec = proj.spectrum_real.as_ref().unwrap();
+        assert_eq!(proj.state.peaks[0].intensity, new_spec[1], "Peak intensity should sync to new spectrum");
+        assert_eq!(proj.state.integrations[0].y_start, new_spec[0], "Integration y_start should sync");
+        assert_eq!(proj.state.integrations[0].y_end, new_spec[2], "Integration y_end should sync");
     }
 }
 

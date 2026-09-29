@@ -160,8 +160,8 @@ pub fn compute_integral(
     Some(IntegralResult {
         ppm: region_ppm.to_vec(),
         curve_y,
-        total_area: total_area.abs(),
-        normalized_value: total_area.abs() * ref_factor,
+        total_area,
+        normalized_value: total_area * ref_factor,
     })
 }
 
@@ -269,5 +269,36 @@ mod tests {
         // Low: 閾値 ~70.0 * noise => 高さ 100.0 のみ拾う (1区間)
         let intgs_low = auto_detect_integrations(&spectrum, &ppm, AutoSensitivity::Low);
         assert_eq!(intgs_low.len(), 1, "Low sensitivity should only detect the major peak");
+    }
+
+    #[test]
+    fn test_compute_integral_negative_peak() {
+        let n = 100;
+        let mut spec = vec![0.0; n];
+        let mut ppm_vec = vec![0.0; n];
+        for i in 0..n {
+            ppm_vec[i] = 5.0 - (i as f64) * 0.05;
+        }
+
+        // 負のピーク (反転シグナル): 中心 50, 高さ -20.0
+        for i in 40..=60 {
+            let dx = (i as f64 - 50.0) / 3.0;
+            spec[i] = -20.0 * (-0.5 * dx * dx).exp();
+        }
+
+        let spectrum = Array1::from_vec(spec);
+        let ppm = Array1::from_vec(ppm_vec);
+
+        let item = IntegrationItem {
+            id: "intg-neg".to_string(),
+            start_ppm: 3.5,
+            end_ppm: 1.5,
+            y_start: 0.0,
+            y_end: 0.0,
+        };
+
+        let res = compute_integral(&spectrum, &ppm, &item, 1.0, 1.0, 0.0).expect("Integration should succeed");
+        assert!(res.total_area < 0.0, "Negative peak should have negative total_area, got {}", res.total_area);
+        assert!(res.normalized_value < 0.0, "Negative peak should have negative normalized_value, got {}", res.normalized_value);
     }
 }
