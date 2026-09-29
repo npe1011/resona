@@ -6,8 +6,9 @@ use crate::core::{
 };
 
 use crate::gui::dialogs::{
-    show_display_dialog, show_ft_dialog, show_jcoupling_dialog, show_print_dialog,
-    DisplayDialogState, FtDialogState, JCouplingDialogState, PrintDialogState,
+    show_display_dialog, show_ft_dialog, show_full_auto_dialog, show_jcoupling_dialog,
+    show_print_dialog, DisplayDialogState, FtDialogState, FullAutoBaselineChoice,
+    FullAutoDialogState, JCouplingDialogState, PrintDialogState,
 };
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 use crate::gui::panels::{
@@ -192,6 +193,7 @@ pub struct ResonaApp {
     pub active_zoom: Option<ZoomTool>,
     pub action_state: ActionBarState,
     pub ft_dialog_state: FtDialogState,
+    pub full_auto_dialog_state: FullAutoDialogState,
     pub display_dialog_state: DisplayDialogState,
     pub jcoupling_dialog_state: JCouplingDialogState,
     pub print_dialog_state: PrintDialogState,
@@ -226,6 +228,7 @@ impl Default for ResonaApp {
             active_zoom: None,
             action_state: ActionBarState::default(),
             ft_dialog_state: FtDialogState::default(),
+            full_auto_dialog_state: FullAutoDialogState::default(),
             display_dialog_state: DisplayDialogState::default(),
             jcoupling_dialog_state: JCouplingDialogState::default(),
             print_dialog_state: PrintDialogState::default(),
@@ -316,6 +319,12 @@ impl ResonaApp {
             crate::core::baseline::BaselineMethod::None => {
                 self.action_state.baseline_applied = false;
             }
+        }
+        if let Some(th) = self.project.state.peak_threshold {
+            self.action_state.peak_threshold = th;
+        }
+        if let Some(target) = self.project.state.reference_point {
+            self.action_state.ref_target_ppm = target;
         }
     }
 
@@ -820,6 +829,11 @@ impl eframe::App for ResonaApp {
             .show(ctx, |ui| {
                 match show_mode_bar(ui, &mut self.mode, &mut self.project.state.auto_sensitivity) {
                     ModeBarEvent::None => {}
+                    ModeBarEvent::OpenFullAuto => {
+                        self.full_auto_dialog_state.sensitivity = self.project.state.auto_sensitivity;
+                        self.full_auto_dialog_state.baseline_choice = FullAutoBaselineChoice::None;
+                        self.full_auto_dialog_state.open = true;
+                    }
                     ModeBarEvent::OpenReFt => {
                         self.ft_dialog_state.settings = self.project.state.ft_settings.clone();
                         self.ft_dialog_state.reset_preview();
@@ -2162,6 +2176,32 @@ impl eframe::App for ResonaApp {
                     }
                 }
             }
+        }
+
+        if let Some(full_auto_res) = show_full_auto_dialog(ctx, &mut self.full_auto_dialog_state) {
+            // 1. Sensitivity を全体設定に反映
+            self.project.state.auto_sensitivity = full_auto_res.sensitivity;
+
+            // 2. Full Auto パイプラインを実行 (Phase -> Baseline -> Reference -> Peak -> Integrate)
+            let report = self.project.execute_full_auto(full_auto_res.baseline_method);
+
+            // 3. アクションバー状態をプロジェクトに合わせて同期
+            self.sync_action_bar_from_project();
+            self.action_state.clear_submodes();
+
+            // 4. Undo 履歴にコミット
+            self.project.push_history();
+
+            // 5. ステータスメッセージを更新
+            self.status_message = format!(
+                "Full Auto completed: Phase (P0={:.1}°, P1={:.1}°), Baseline ({}), Ref ({}), Peaks ({}), Integrations ({})",
+                report.p0,
+                report.p1,
+                report.baseline_desc,
+                report.reference_desc,
+                report.peaks_count,
+                report.integrations_count,
+            );
         }
 
         if let Some(res) = show_display_dialog(ctx, &mut self.display_dialog_state) {

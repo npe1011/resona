@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use crate::core::analysis::{AutoSensitivity, IntegrationItem, JCouplingResultItem, PeakItem};
+use crate::core::analysis::{
+    auto_detect_integrations, auto_detect_reference_peak, compute_integral, pick_peaks,
+    resolve_solvent_target_ppm, AutoSensitivity, IntegrationItem, JCouplingResultItem, PeakItem,
+};
 use crate::core::baseline::BaselineMethod;
 use crate::core::error::{ResonaError, Result};
 use crate::core::io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource};
@@ -222,6 +225,19 @@ pub struct Project {
     pub cached_max_intensity: Cell<Option<f64>>,
 }
 
+/// Full Auto パイプライン処理の実行サマリ
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FullAutoReport {
+    pub p0: f64,
+    pub p1: f64,
+    pub baseline_applied: bool,
+    pub baseline_desc: String,
+    pub reference_applied: bool,
+    pub reference_desc: String,
+    pub peaks_count: usize,
+    pub integrations_count: usize,
+}
+
 impl Project {
     pub fn new() -> Self {
         Self {
@@ -400,6 +416,142 @@ impl Project {
             for jc in &mut self.state.j_couplings {
                 jc.ppm += shift;
             }
+        }
+    }
+
+    /// 全ての解析処理 (Referenceシフト, Phase, Baseline, Peak, Integrate, Multiview, JCoupling) を初期状態にリセットする
+    pub fn clear_all_processing(&mut self) {
+        // 1. Reference シフトの巻き戻し
+        if self.state.shift_reference.abs() > 1e-12 {
+            if let Some(ref mut ppm) = self.ppm {
+                *ppm -= self.state.shift_reference;
+            }
+        }
+        self.state.shift_reference = 0.0;
+        self.state.reference_point = None;
+
+        // 2. Baseline のクリア
+        self.baseline_array = None;
+        self.state.baseline_method = BaselineMethod::None;
+
+        // 3. Phase のリセット (P0=0, P1=0)
+        if let Some(ref unphased) = self.complex_spectrum_unphased {
+            self.state.p0 = 0.0;
+            self.state.p1 = 0.0;
+            self.spectrum_real = Some(apply_phase_and_extract_real(unphased, 0.0, 0.0));
+        }
+
+        // 4. 解析項目のクリア
+        self.state.peaks.clear();
+        self.state.peak_threshold = None;
+        self.state.integrations.clear();
+        self.state.integration_scale = 1.0;
+        self.state.integration_offset = 0.03;
+        self.state.integration_ref_area = 1.0;
+        self.state.integration_ref_value = 1.0;
+        self.state.multiviews.clear();
+        self.state.j_couplings.clear();
+
+        self.invalidate_cache();
+    }
+
+    /// Full Auto パイプラインを実行する
+    ///
+    /// 順序:
+    /// 1. 全処理をクリア (clear_all_processing)
+    /// 2. Phase-Auto (ACME)
+    /// 3. Baseline-Auto (None でなければ適用)
+    /// 4. Reference-Auto (メタデータの溶媒情報から解決し、有意なピークがあればシフト。見つからない/失敗したらスキップ)
+    /// 5. Peak Pick-Auto (auto_sensitivity の閾値で検出)
+    /// 6. Integrate-Auto (auto_sensitivity で領域検出 & スケール初期化)
+    pub fn execute_full_auto(&mut self, baseline_method: BaselineMethod) -> FullAutoReport {
+        // 1. 全処理クリア
+        self.clear_all_processing();
+
+        // 2. Phase-Auto
+        let (p0, p1) = self.auto_phase();
+
+        // 3. Baseline
+        let (baseline_applied, baseline_desc) = if baseline_method != BaselineMethod::None {
+            self.apply_baseline(baseline_method);
+            let desc = match baseline_method {
+                BaselineMethod::AirPLS { log_lambda, .. } => format!("airPLS (logλ={:.1})", log_lambda),
+                BaselineMethod::Polynomial { order, .. } => format!("Polynomial (order={})", order),
+                BaselineMethod::None => "None".to_string(),
+            };
+            (true, desc)
+        } else {
+            (false, "None".to_string())
+        };
+
+        // 4. Reference-Auto
+        let (reference_applied, reference_desc) = {
+            let solvent_str = &self.metadata.solvent;
+            let nuc = &self.metadata.nucleus;
+            let is_13c = nuc.contains("13C") || nuc.contains("C13");
+            let delta = if is_13c { 1.00 } else { 0.10 };
+
+            if let Some((solvent_name, target_ppm)) = resolve_solvent_target_ppm(solvent_str, nuc) {
+                if let (Some(ppm), Some(spec)) = (&self.ppm, &self.spectrum_real) {
+                    if let Some(peak_ppm) = auto_detect_reference_peak(spec, ppm, target_ppm, delta, 2.0) {
+                        self.set_shift_reference(peak_ppm, target_ppm);
+                        (true, format!("{}: {:.3} -> {:.3} ppm", solvent_name, peak_ppm, target_ppm))
+                    } else {
+                        (false, format!("{} peak not found in window ±{:.2} ppm (skipped)", solvent_name, delta))
+                    }
+                } else {
+                    (false, "No spectrum data (skipped)".to_string())
+                }
+            } else if !solvent_str.is_empty() {
+                (false, format!("Unknown solvent '{}' (skipped)", solvent_str))
+            } else {
+                (false, "No solvent in metadata (skipped)".to_string())
+            }
+        };
+
+        // 5. Peak Pick-Auto
+        let peaks_count = if let (Some(spec), Some(ppm)) = (&self.spectrum_real, &self.ppm) {
+            let noise = self.noise_level();
+            let factor = self.state.auto_sensitivity.peak_noise_factor();
+            let thresh = noise * factor;
+            self.state.peak_threshold = Some(thresh);
+            self.state.peaks = pick_peaks(spec, ppm, thresh, &self.state.peaks);
+            self.state.peaks.len()
+        } else {
+            0
+        };
+
+        // 6. Integrate-Auto
+        let integrations_count = if let (Some(spec), Some(ppm)) = (&self.spectrum_real, &self.ppm) {
+            self.state.integrations = auto_detect_integrations(spec, ppm, self.state.auto_sensitivity);
+            let mut max_area = 0.0_f64;
+            for intg in &self.state.integrations {
+                if let Some(res) = compute_integral(spec, ppm, intg, 1.0, 1.0, 0.03) {
+                    if res.total_area > max_area {
+                        max_area = res.total_area;
+                    }
+                }
+            }
+            let max_spec = self.max_intensity();
+            if max_area > 1e-12 && max_spec > 0.0 {
+                self.state.integration_scale = (max_spec * 0.35) / max_area;
+                self.state.integration_ref_area = max_area;
+                self.state.integration_ref_value = 1.0;
+            }
+            self.state.integrations.len()
+        } else {
+            0
+        };
+
+        FullAutoReport {
+            p0,
+            p1,
+            baseline_applied,
+            baseline_desc,
+            reference_applied,
+            reference_desc,
+            peaks_count,
+            integrations_count,
         }
     }
 
@@ -691,4 +843,77 @@ mod tests {
         assert_eq!(deserialized.baseline_method, proj.state.baseline_method);
         assert_eq!(deserialized.auto_sensitivity, proj.state.auto_sensitivity);
     }
+
+    #[test]
+    fn test_project_clear_all_processing_and_full_auto() {
+        let mut proj = Project::new();
+        let n = 256;
+        let mut ppm_vec = vec![0.0; n];
+        let mut unphased_vec = vec![Complex64::new(0.0, 0.0); n];
+        for i in 0..n {
+            ppm_vec[i] = 12.0 - (i as f64) * (14.0 / n as f64);
+        }
+
+        // 7.26 ppm 付近に CDCl3 ピーク (i ≈ 86)
+        let cdcl3_idx = 86;
+        for i in 75..=97 {
+            let dx = (i as f64 - cdcl3_idx as f64) / 2.0;
+            let val = 100.0 * (-0.5 * dx * dx).exp();
+            unphased_vec[i] = Complex64::new(val, 0.0);
+        }
+
+        // 2.0 ppm 付近にサンプルピーク (i ≈ 182)
+        let sample_idx = 182;
+        for i in 170..=195 {
+            let dx = (i as f64 - sample_idx as f64) / 3.0;
+            let val = 60.0 * (-0.5 * dx * dx).exp();
+            unphased_vec[i] += Complex64::new(val, 0.0);
+        }
+
+        proj.ppm = Some(Array1::from_vec(ppm_vec.clone()));
+        proj.complex_spectrum_unphased = Some(Array1::from_vec(unphased_vec.clone()));
+        proj.spectrum_real = Some(Array1::from_vec(unphased_vec.iter().map(|c| c.re).collect()));
+        proj.metadata.solvent = "CDCl3".to_string();
+        proj.metadata.nucleus = "1H".to_string();
+
+        // 1. ダミーの処理状態を設定
+        proj.state.peaks.push(PeakItem { ppm: 2.0, intensity: 60.0, is_auto: false });
+        proj.state.integrations.push(IntegrationItem {
+            id: "intg-1".to_string(),
+            start_ppm: 2.5,
+            end_ppm: 1.5,
+            y_start: 0.0,
+            y_end: 0.0,
+        });
+        proj.set_shift_reference(7.20, 7.26); // +0.06 ppm shift
+        assert!((proj.state.shift_reference - 0.06).abs() < 1e-4);
+
+        // 2. clear_all_processing の検証
+        proj.clear_all_processing();
+        assert_eq!(proj.state.shift_reference, 0.0);
+        assert!(proj.state.peaks.is_empty());
+        assert!(proj.state.integrations.is_empty());
+        assert_eq!(proj.state.baseline_method, BaselineMethod::None);
+        assert_eq!(proj.state.p0, 0.0);
+        assert_eq!(proj.state.p1, 0.0);
+
+        // 3. execute_full_auto の実行検証
+        proj.push_history(); // 実行前の状態を履歴に保存
+        let report = proj.execute_full_auto(BaselineMethod::AirPLS {
+            log_lambda: 8.0,
+            max_iter: 15,
+        });
+
+        assert!(report.baseline_applied);
+        assert!(report.reference_applied, "CDCl3 reference should be detected and applied");
+        assert!(report.peaks_count >= 2, "Both CDCl3 and sample peaks should be picked");
+        assert!(report.integrations_count >= 1, "At least one region should be integrated");
+
+        // 4. Full Auto 適用状態をコミットし、Undo で実行前のまっさらな状態に復元できるか
+        proj.push_history(); // 実行後の状態をコミット (current_idx = 1)
+        assert!(proj.undo()); // Undo で current_idx = 0 に戻る
+        assert!(proj.state.peaks.is_empty());
+        assert!(proj.state.integrations.is_empty());
+    }
 }
+

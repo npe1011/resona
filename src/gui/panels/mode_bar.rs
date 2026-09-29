@@ -6,6 +6,7 @@ use crate::gui::mode::AppMode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeBarEvent {
     None,
+    OpenFullAuto,
     OpenReFt,
     OpenDisplay,
     OpenPrint,
@@ -40,6 +41,21 @@ pub fn show_mode_bar(
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
+
+        // 0. Auto ボタン (一番左・サブモードAutoと同色のパープル強調)
+        let rich_auto = RichText::new("Auto").strong().size(13.0).color(Color32::WHITE);
+        let btn_auto = Button::new(rich_auto)
+            .min_size(vec2(52.0, 26.0))
+            .fill(Color32::from_rgb(126, 34, 206)) // #7e22ce
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(107, 33, 168))) // #6b21a8
+            .rounding(3.0_f32);
+        if ui
+            .add(btn_auto)
+            .on_hover_text("Open Full Auto Process Pipeline (Phase -> Baseline -> Reference -> Peak -> Integrate)")
+            .clicked()
+        {
+            event = ModeBarEvent::OpenFullAuto;
+        }
 
         // 1. Re-FT ボタン (通常ボタン)
         let (txt, fill, strk) = mode_button_style(false);

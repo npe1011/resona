@@ -8,9 +8,10 @@ pub mod project;
 pub mod signal;
 
 pub use analysis::{
-    analyze_multiplet, auto_detect_integrations, compute_integral, estimate_noise_mad,
-    pick_peaks, snap_and_add_peak, add_peak_in_range, AutoSensitivity, IntegralResult, IntegrationItem,
-    JCouplingCandidate, JCouplingResultItem, PeakItem,
+    add_peak_in_range, analyze_multiplet, auto_detect_integrations, auto_detect_reference_peak,
+    compute_integral, estimate_noise_mad, pick_peaks, resolve_solvent_target_ppm, snap_and_add_peak,
+    AutoSensitivity, IntegralResult, IntegrationItem, JCouplingCandidate, JCouplingResultItem,
+    PeakItem, SolventInfo, KNOWN_SOLVENTS,
 };
 pub use autophase::{acme_score, autophase_acme, nelder_mead_2d};
 pub use baseline::{
@@ -20,7 +21,9 @@ pub use baseline::{
 pub use error::{ResonaError, Result};
 pub use io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource, RawFid};
 pub use pipeline::{process_raw_fid, FtSettings, ProcessedSpectrum};
-pub use project::{DisplaySettings, HistoryManager, MultiviewItem, Project, ProjectState, RectF};
+pub use project::{
+    DisplaySettings, FullAutoReport, HistoryManager, MultiviewItem, Project, ProjectState, RectF,
+};
 pub use signal::{
     apply_phase_and_extract_real, apply_phase_complex, apply_window, apply_zerofill,
     compute_ppm_scale, compute_window_curve, forward_fft, remove_fractional_delay, WindowFunction,
