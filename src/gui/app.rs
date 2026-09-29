@@ -25,6 +25,79 @@ pub enum IntegrateDragTarget {
     Offset { start_offset: f64, start_y: f32 },
 }
 
+/// Integrate Edit モードでの曲線の操作種別
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IntgEditTarget {
+    Scale,
+    Offset,
+}
+
+/// 積分曲線のホバー／ドラッグ対象判定
+/// - 積分曲線の上端付近: Scale (拡大率変更)
+/// - 積分曲線の線上付近: Offset (平行移動)
+/// - 積分曲線より下～ベースラインの間: None (判定なし、誤操作防止)
+fn detect_integrate_edit_target(
+    pos: Pos2,
+    ppm: f64,
+    intg: &IntegrationItem,
+    t: &PlotTransform,
+    spec: &ndarray::Array1<f64>,
+    ppm_arr: &ndarray::Array1<f64>,
+    scale: f64,
+    offset: f64,
+    ref_factor: f64,
+) -> Option<IntgEditTarget> {
+    if !intg.contains_ppm(ppm) {
+        return None;
+    }
+    let res = compute_integral(spec, ppm_arr, intg, scale, ref_factor, offset)?;
+    if res.ppm.is_empty() || res.curve_y.is_empty() {
+        return None;
+    }
+
+    // マウス PPM に最も近い曲線の画面 Y
+    let mut best_i = 0;
+    let mut min_dp = f64::INFINITY;
+    for (i, &p) in res.ppm.iter().enumerate() {
+        let dp = (p - ppm).abs();
+        if dp < min_dp {
+            min_dp = dp;
+            best_i = i;
+        }
+    }
+    let curve_screen_y = t.data_to_screen(res.ppm[best_i], res.curve_y[best_i]).y;
+
+    // 区間全体の曲線の頂点画面 Y (画面上では Y が最小)
+    let min_curve_screen_y = res.curve_y.iter()
+        .map(|&y| t.data_to_screen(ppm, y).y)
+        .fold(f32::INFINITY, f32::min);
+
+    let bl_screen_y = t.data_to_screen(ppm, intg.baseline_y_at(ppm)).y;
+
+    // 1. 積分曲線より下～ベースラインの間、およびベースラインより下は「判定なし」
+    // (誤操作防止のため、曲線の下部マージン 12px より下は一切反応させない)
+    if pos.y > curve_screen_y + 12.0 || pos.y > bl_screen_y + 14.0 {
+        return None;
+    }
+
+    // 2. 曲線より遥か上（上空 20px 以上）も判定なし
+    if pos.y < min_curve_screen_y - 20.0 {
+        return None;
+    }
+
+    // 3. 積分曲線の上端判定 (頂点付近、またはマウス位置でのカーブが頂点近傍)
+    if (pos.y - min_curve_screen_y).abs() <= 16.0
+        || (curve_screen_y <= min_curve_screen_y + 10.0 && (pos.y - curve_screen_y).abs() <= 16.0)
+    {
+        Some(IntgEditTarget::Scale)
+    } else if (pos.y - curve_screen_y).abs() <= 14.0 {
+        // 4. それ以外の積分曲線付近は平行移動 (Offset)
+        Some(IntgEditTarget::Offset)
+    } else {
+        None
+    }
+}
+
 /// Multiview Edit モードでのドラッグ対象
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MultiviewDragMode {
@@ -252,6 +325,15 @@ impl Default for ResonaApp {
 impl ResonaApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self::default()
+    }
+
+    /// いずれかのモーダルダイアログが開いているか判定
+    pub fn has_open_dialog(&self) -> bool {
+        self.ft_dialog_state.open
+            || self.full_auto_dialog_state.open
+            || self.display_dialog_state.open
+            || self.jcoupling_dialog_state.open
+            || self.print_dialog_state.is_open
     }
 
     /// ファイルまたはディレクトリを開く
@@ -732,6 +814,10 @@ impl ResonaApp {
 
     /// キーボードショートカットの処理
     fn handle_shortcuts(&mut self, ctx: &Context) {
+        if self.has_open_dialog() {
+            return;
+        }
+
         let input = ctx.input(|i| i.clone());
 
         let ctrl_or_cmd = input.modifiers.command || input.modifiers.ctrl;
@@ -831,12 +917,17 @@ impl eframe::App for ResonaApp {
         self.handle_shortcuts(ctx);
         self.handle_drag_and_drop(ctx);
 
+        let is_modal_active = self.has_open_dialog();
+
         // 1. トップメニューバー
         TopBottomPanel::top("top_menu")
             .frame(egui::Frame::none()
                 .fill(Color32::WHITE)
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
+                if is_modal_active {
+                    ui.disable();
+                }
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
                         if ui.button("Open Data... (Ctrl+O)").clicked() {
@@ -877,6 +968,9 @@ impl eframe::App for ResonaApp {
                 .inner_margin(Margin::symmetric(8.0, 5.0))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
+                if is_modal_active {
+                    ui.disable();
+                }
                 match show_mode_bar(ui, &mut self.mode, &mut self.project.state.auto_sensitivity) {
                     ModeBarEvent::None => {}
                     ModeBarEvent::OpenFullAuto => {
@@ -918,6 +1012,9 @@ impl eframe::App for ResonaApp {
                 .inner_margin(Margin::symmetric(8.0, 4.0))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
+                if is_modal_active {
+                    ui.disable();
+                }
                 show_action_bar(
                     ui,
                     self.mode,
@@ -1135,6 +1232,9 @@ impl eframe::App for ResonaApp {
                 .inner_margin(Margin::symmetric(8.0, 8.0))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
+                if is_modal_active {
+                    ui.disable();
+                }
                 show_side_panel(
                     ui,
                     &self.project.metadata,
@@ -1151,6 +1251,9 @@ impl eframe::App for ResonaApp {
                 .inner_margin(Margin::symmetric(8.0, 3.0))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
+                if is_modal_active {
+                    ui.disable();
+                }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&self.status_message).size(11.0).color(Color32::from_rgb(108, 117, 125)));
                 });
@@ -1160,6 +1263,9 @@ impl eframe::App for ResonaApp {
         CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::WHITE))
             .show(ctx, |ui| {
+                if is_modal_active {
+                    ui.disable();
+                }
                 let available_rect = ui.available_rect_before_wrap();
                 let plot_rect = Rect::from_min_max(
                     available_rect.min,
@@ -1275,31 +1381,42 @@ impl eframe::App for ResonaApp {
                     let response = ui.allocate_rect(plot_rect, egui::Sense::click_and_drag());
                     let pointer_pos = response.hover_pos().or_else(|| ctx.input(|i| i.pointer.latest_pos()));
                     let axis_y = t.axis_y();
-                    // ダブルクリックで拡大を1つ前に戻す (Zoom モード時)
-                    if response.double_clicked() && self.active_zoom.is_some() {
-                        if let Some((p_min, p_max, y_min, y_max)) = self.zoom_history.pop() {
-                            t.ppm_min = p_min;
-                            t.ppm_max = p_max;
-                            t.y_min = y_min;
-                            t.y_max = y_max;
-                            self.status_message = "Zoom undone (double-click)".to_string();
-                        } else {
-                            do_reset_zoom = true;
-                            self.status_message = "Zoom reset (double-click)".to_string();
-                        }
-                    }
 
-                    // スレッショルドバーのホバー／ドラッグ判定 (Peak pick モード時)
-                    let is_peak_mode = self.mode == Some(AppMode::Peak) && self.active_zoom.is_none();
-                    let is_thresh_submode = is_peak_mode && self.action_state.peak_submode == PeakSubMode::Threshold;
-                    let is_integrate_edit_mode = self.mode == Some(AppMode::Integrate)
-                        && self.action_state.integrate_submode == IntegrateSubMode::Edit
-                        && self.active_zoom.is_none();
-                    let is_multiview_mode = self.mode == Some(AppMode::Multiview) && self.active_zoom.is_none();
-                    let is_multiview_edit_mode = is_multiview_mode && self.action_state.multiview_submode == MultiviewSubMode::Edit;
-                    let is_multiview_delete_mode = is_multiview_mode && self.action_state.multiview_submode == MultiviewSubMode::Delete;
-                    let thresh_val = self.action_state.peak_threshold;
-                    let mut near_threshold = false;
+                    if is_modal_active {
+                        self.drag_start = None;
+                        self.drag_current = None;
+                        self.integrate_drag = None;
+                        self.multiview_drag = None;
+                        self.is_dragging_threshold = false;
+                    } else {
+                        // ダブルクリックで拡大を1つ前に戻す (Zoom モード時)
+                        if response.double_clicked() && self.active_zoom.is_some() {
+                            if let Some((p_min, p_max, y_min, y_max)) = self.zoom_history.pop() {
+                                t.ppm_min = p_min;
+                                t.ppm_max = p_max;
+                                t.y_min = y_min;
+                                t.y_max = y_max;
+                                self.status_message = "Zoom undone (double-click)".to_string();
+                            } else {
+                                do_reset_zoom = true;
+                                self.status_message = "Zoom reset (double-click)".to_string();
+                            }
+                        }
+
+                        // スレッショルドバーのホバー／ドラッグ判定 (Peak pick モード時)
+                        let is_peak_mode = self.mode == Some(AppMode::Peak) && self.active_zoom.is_none();
+                        let is_thresh_submode = is_peak_mode && self.action_state.peak_submode == PeakSubMode::Threshold;
+                        let is_integrate_edit_mode = self.mode == Some(AppMode::Integrate)
+                            && self.action_state.integrate_submode == IntegrateSubMode::Edit
+                            && self.active_zoom.is_none();
+                        let is_integrate_delete_mode = self.mode == Some(AppMode::Integrate)
+                            && self.action_state.integrate_submode == IntegrateSubMode::Delete
+                            && self.active_zoom.is_none();
+                        let is_multiview_mode = self.mode == Some(AppMode::Multiview) && self.active_zoom.is_none();
+                        let is_multiview_edit_mode = is_multiview_mode && self.action_state.multiview_submode == MultiviewSubMode::Edit;
+                        let is_multiview_delete_mode = is_multiview_mode && self.action_state.multiview_submode == MultiviewSubMode::Delete;
+                        let thresh_val = self.action_state.peak_threshold;
+                        let mut near_threshold = false;
 
                     // Multiview ホバー判定 (外側8px枠線ゾーンまで検知)
                     self.hovered_multiview_id = None;
@@ -1493,6 +1610,65 @@ impl eframe::App for ResonaApp {
                     if let Some(pos) = pointer_pos {
                         let (cur_ppm, cur_y) = t.screen_to_data(pos);
                         self.status_message = format!("PPM {:.3}   Intensity {:.1}", cur_ppm, cur_y);
+
+                        // Delete サブモード時のホバー判定
+                        if is_integrate_delete_mode && plot_rect.contains(pos) && pos.y <= axis_y {
+                            if let Some(item) = self.project.state.integrations.iter().find(|it| it.contains_ppm(cur_ppm)) {
+                                ctx.set_cursor_icon(egui::CursorIcon::NoDrop);
+                                let p_min = item.start_ppm.min(item.end_ppm);
+                                let p_max = item.start_ppm.max(item.end_ppm);
+                                self.status_message = format!("Click to delete integration [{:.2} ~ {:.2} ppm]", p_min, p_max);
+                            }
+                        }
+
+                        // Edit サブモード時のホバー判定
+                        if is_integrate_edit_mode && !self.is_dragging_threshold && self.integrate_drag.is_none() && plot_rect.contains(pos) && pos.y <= axis_y {
+                            let mut hit_handle = false;
+                            for intg in &self.project.state.integrations {
+                                let s_pos = t.data_to_screen(intg.start_ppm, intg.y_start);
+                                let e_pos = t.data_to_screen(intg.end_ppm, intg.y_end);
+                                let hit_s = (pos - s_pos).length() <= 14.0 || ((pos.x - s_pos.x).abs() <= 12.0 && (pos.y - s_pos.y).abs() <= 18.0);
+                                let hit_e = (pos - e_pos).length() <= 14.0 || ((pos.x - e_pos.x).abs() <= 12.0 && (pos.y - e_pos.y).abs() <= 18.0);
+                                if hit_s || hit_e {
+                                    hit_handle = true;
+                                    break;
+                                }
+                            }
+                            if hit_handle {
+                                ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                self.status_message = "Drag to adjust baseline handle position".to_string();
+                            } else if let (Some(spec), Some(ppm_arr)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                let ref_factor = self.project.state.integration_ref_value / self.project.state.integration_ref_area.max(1e-12);
+                                let mut detected = None;
+                                for intg in &self.project.state.integrations {
+                                    if let Some(target) = detect_integrate_edit_target(
+                                        pos,
+                                        cur_ppm,
+                                        intg,
+                                        t,
+                                        spec,
+                                        ppm_arr,
+                                        self.project.state.integration_scale,
+                                        self.project.state.integration_offset,
+                                        ref_factor,
+                                    ) {
+                                        detected = Some(target);
+                                        break;
+                                    }
+                                }
+                                match detected {
+                                    Some(IntgEditTarget::Scale) => {
+                                        ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                        self.status_message = "Drag up/down to adjust integration scale (height)".to_string();
+                                    }
+                                    Some(IntgEditTarget::Offset) => {
+                                        ctx.set_cursor_icon(egui::CursorIcon::Move);
+                                        self.status_message = "Drag up/down to adjust integration vertical offset".to_string();
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
                     }
 
                     // 非ドラッグ時: Split サブモードではマウス位置に縦の青色ガイド線を表示
@@ -1503,6 +1679,19 @@ impl eframe::App for ResonaApp {
                                 painter.line_segment(
                                     [Pos2::new(pos.x, plot_rect.min.y), Pos2::new(pos.x, axis_y)],
                                     Stroke::new(1.5_f32, Color32::from_rgb(13, 110, 253)),
+                                );
+                            }
+                        }
+                    }
+
+                    // 非ドラッグ時: Delete サブモードではマウス位置に縦の赤色ガイド線を表示
+                    if is_integrate_delete_mode && self.drag_start.is_none() {
+                        if let Some(pos) = pointer_pos {
+                            if plot_rect.contains(pos) && pos.y <= axis_y {
+                                let painter = ui.painter_at(plot_rect);
+                                painter.line_segment(
+                                    [Pos2::new(pos.x, plot_rect.min.y), Pos2::new(pos.x, axis_y)],
+                                    Stroke::new(1.2_f32, Color32::from_rgb(239, 68, 68)),
                                 );
                             }
                         }
@@ -1545,37 +1734,53 @@ impl eframe::App for ResonaApp {
                                 for (idx, intg) in self.project.state.integrations.iter().enumerate() {
                                     let s_pos = t.data_to_screen(intg.start_ppm, intg.y_start);
                                     let e_pos = t.data_to_screen(intg.end_ppm, intg.y_end);
-                                    if (pos - s_pos).length() < 12.0 {
+                                    let hit_s = (pos - s_pos).length() <= 14.0 || ((pos.x - s_pos.x).abs() <= 12.0 && (pos.y - s_pos.y).abs() <= 18.0);
+                                    let hit_e = (pos - e_pos).length() <= 14.0 || ((pos.x - e_pos.x).abs() <= 12.0 && (pos.y - e_pos.y).abs() <= 18.0);
+                                    if hit_s {
                                         hit_handle = Some(IntegrateDragTarget::StartHandle(idx));
                                         break;
-                                    } else if (pos - e_pos).length() < 12.0 {
+                                    } else if hit_e {
                                         hit_handle = Some(IntegrateDragTarget::EndHandle(idx));
                                         break;
                                     }
                                 }
                                 if let Some(target) = hit_handle {
                                     self.integrate_drag = Some(target);
-                                } else {
+                                } else if let (Some(spec), Some(ppm_arr)) = (&self.project.spectrum_real, &self.project.ppm) {
                                     let (ppm, _) = t.screen_to_data(pos);
-                                    let mut in_intg = false;
+                                    let ref_factor = self.project.state.integration_ref_value / self.project.state.integration_ref_area.max(1e-12);
+                                    let mut detected = None;
                                     for intg in &self.project.state.integrations {
-                                        if intg.contains_ppm(ppm) {
-                                            in_intg = true;
+                                        if let Some(target) = detect_integrate_edit_target(
+                                            pos,
+                                            ppm,
+                                            intg,
+                                            t,
+                                            spec,
+                                            ppm_arr,
+                                            self.project.state.integration_scale,
+                                            self.project.state.integration_offset,
+                                            ref_factor,
+                                        ) {
+                                            detected = Some(target);
                                             break;
                                         }
                                     }
-                                    if in_intg {
-                                        let mid_y = (plot_rect.min.y + axis_y) * 0.5;
-                                        if pos.y < mid_y {
+                                    match detected {
+                                        Some(IntgEditTarget::Scale) => {
                                             self.integrate_drag = Some(IntegrateDragTarget::Scale {
                                                 start_scale: self.project.state.integration_scale,
                                                 start_y: pos.y,
                                             });
-                                        } else {
+                                        }
+                                        Some(IntgEditTarget::Offset) => {
                                             self.integrate_drag = Some(IntegrateDragTarget::Offset {
                                                 start_offset: self.project.state.integration_offset,
                                                 start_y: pos.y,
                                             });
+                                        }
+                                        None => {
+                                            self.integrate_drag = None;
                                         }
                                     }
                                 }
@@ -1657,17 +1862,21 @@ impl eframe::App for ResonaApp {
                             if let Some(pos) = pointer_pos {
                                 match target {
                                     IntegrateDragTarget::StartHandle(idx) => {
+                                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                                         if idx < self.project.state.integrations.len() {
                                             let (p, y) = t.screen_to_data(pos);
                                             self.project.state.integrations[idx].start_ppm = p;
                                             self.project.state.integrations[idx].y_start = y;
+                                            self.status_message = format!("Adjusting start handle: {:.3} ppm", p);
                                         }
                                     }
                                     IntegrateDragTarget::EndHandle(idx) => {
+                                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                                         if idx < self.project.state.integrations.len() {
                                             let (p, y) = t.screen_to_data(pos);
                                             self.project.state.integrations[idx].end_ppm = p;
                                             self.project.state.integrations[idx].y_end = y;
+                                            self.status_message = format!("Adjusting end handle: {:.3} ppm", p);
                                         }
                                     }
                                     IntegrateDragTarget::Scale { start_scale, start_y } => {
@@ -1675,14 +1884,14 @@ impl eframe::App for ResonaApp {
                                         let dy = start_y - pos.y;
                                         let factor = ((dy / (plot_rect.height() * 0.25)) as f64).exp();
                                         self.project.state.integration_scale = (start_scale * factor).max(1e-12);
-                                        self.status_message = format!("Scale {:.2e}", self.project.state.integration_scale);
+                                        self.status_message = format!("Integration Scale: {:.2e}", self.project.state.integration_scale);
                                     }
                                     IntegrateDragTarget::Offset { start_offset, start_y } => {
-                                        ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                        ctx.set_cursor_icon(egui::CursorIcon::Move);
                                         let dy = start_y - pos.y;
                                         let d_offset = (dy / plot_rect.height()) as f64 * 0.5;
                                         self.project.state.integration_offset = start_offset + d_offset;
-                                        self.status_message = format!("Offset {:.3}", self.project.state.integration_offset);
+                                        self.status_message = format!("Integration Offset: {:.3}", self.project.state.integration_offset);
                                     }
                                 }
                             }
@@ -2185,6 +2394,7 @@ impl eframe::App for ResonaApp {
                         self.drag_current = None;
                         self.is_dragging_threshold = false;
                     }
+                    }
                 }
 
                 if do_reset_zoom {
@@ -2193,6 +2403,7 @@ impl eframe::App for ResonaApp {
             });
 
         // 7. ダイアログの表示と処理
+
         if let Some(ft_settings) = show_ft_dialog(
             ctx,
             &mut self.ft_dialog_state,
