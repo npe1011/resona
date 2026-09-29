@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use egui::{
     epaint::PathShape, vec2, Color32, FontFamily, FontId, Pos2, Rect, Stroke, Ui,
 };
@@ -65,7 +66,7 @@ pub fn paint_spectrum(
     integration_ref_factor: f64,
     multiviews: &[MultiviewItem],
     _multiview_ratio: f64,
-    selected_multiview_id: Option<&str>,
+    selected_multiview_ids: &HashSet<String>,
     hovered_multiview_id: Option<&str>,
     is_multiview_edit_mode: bool,
     threshold: Option<f64>,
@@ -262,7 +263,7 @@ pub fn paint_spectrum(
         integrations,
         integration_ref_factor,
         multiviews,
-        selected_multiview_id,
+        selected_multiview_ids,
         hovered_multiview_id,
         is_multiview_edit_mode,
         style,
@@ -581,7 +582,7 @@ fn paint_multiviews(
     integrations: &[IntegrationItem],
     integration_ref_factor: f64,
     multiviews: &[MultiviewItem],
-    selected_id: Option<&str>,
+    selected_ids: &HashSet<String>,
     hovered_id: Option<&str>,
     is_edit_mode: bool,
     style: &PlotStyle,
@@ -596,7 +597,7 @@ fn paint_multiviews(
             continue;
         }
 
-        let is_selected = selected_id == Some(&mv.id);
+        let is_selected = selected_ids.contains(&mv.id);
         let is_hovered = is_edit_mode && hovered_id == Some(&mv.id);
         let painter = ui.painter_at(inset_rect.expand(2.0));
 

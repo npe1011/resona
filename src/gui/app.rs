@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use egui::{CentralPanel, Color32, Context, Key, Margin, Pos2, Rect, RichText, Stroke, TopBottomPanel, SidePanel};
 use crate::core::{
@@ -113,11 +114,18 @@ pub enum MultiviewDragMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct MultiviewDragItemState {
+    pub id: String,
+    pub start_rect: RectF,
+}
+
+#[derive(Debug, Clone)]
 pub struct MultiviewDragState {
     pub item_id: String,
     pub mode: MultiviewDragMode,
     pub start_rect: RectF,
     pub start_pointer: Pos2,
+    pub items: Vec<MultiviewDragItemState>,
 }
 
 /// Multiview インセット枠のマウス位置からドラッグモードを正確に判定する
@@ -283,7 +291,7 @@ pub struct ResonaApp {
     pub multiview_drag: Option<MultiviewDragState>,
 
     // 選択状態
-    pub selected_multiview_id: Option<String>,
+    pub selected_multiview_ids: HashSet<String>,
     pub hovered_multiview_id: Option<String>,
     pub selected_j_idx: Option<usize>,
 
@@ -333,7 +341,7 @@ impl Default for ResonaApp {
             is_dragging_threshold: false,
             integrate_drag: None,
             multiview_drag: None,
-            selected_multiview_id: None,
+            selected_multiview_ids: HashSet::new(),
             hovered_multiview_id: None,
             selected_j_idx: None,
             last_multiview_ratio: settings.multiview_ratio,
@@ -916,11 +924,12 @@ impl ResonaApp {
         if input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace) {
             if let Some(mode) = self.mode {
                 if mode == AppMode::Multiview {
-                    if let Some(ref sel_id) = self.selected_multiview_id {
-                        self.project.state.multiviews.retain(|mv| mv.id != *sel_id);
-                        self.selected_multiview_id = None;
+                    if !self.selected_multiview_ids.is_empty() {
+                        let count = self.selected_multiview_ids.len();
+                        self.project.state.multiviews.retain(|mv| !self.selected_multiview_ids.contains(&mv.id));
+                        self.selected_multiview_ids.clear();
                         self.project.push_history();
-                        self.status_message = "Deleted selected multiview inset".to_string();
+                        self.status_message = format!("Deleted {} selected multiview inset(s)", count);
                     }
                 } else if mode == AppMode::JCoupling {
                     if let Some(idx) = self.selected_j_idx {
@@ -1299,7 +1308,7 @@ impl eframe::App for ResonaApp {
             }
             ActionEvent::ResetMultiview => {
                 self.project.state.multiviews.clear();
-                self.selected_multiview_id = None;
+                self.selected_multiview_ids.clear();
                 self.project.push_history();
                 self.status_message = "All multiview insets cleared".to_string();
             }
@@ -1446,7 +1455,7 @@ impl eframe::App for ResonaApp {
                             ref_factor,
                             active_multiviews,
                             self.action_state.multiview_ratio,
-                            self.selected_multiview_id.as_deref(),
+                            &self.selected_multiview_ids,
                             self.hovered_multiview_id.as_deref(),
                             is_multiview_edit_mode,
                             Some(self.action_state.peak_threshold),
@@ -1575,17 +1584,28 @@ impl eframe::App for ResonaApp {
                                     if is_multiview_delete_mode {
                                         if let Some(ref hid) = self.hovered_multiview_id.clone() {
                                             self.project.state.multiviews.retain(|m| &m.id != hid);
-                                            if self.selected_multiview_id.as_ref() == Some(hid) {
-                                                self.selected_multiview_id = None;
-                                            }
+                                            self.selected_multiview_ids.remove(hid);
                                             self.project.push_history();
                                             self.status_message = "Deleted multiview inset".to_string();
                                         }
                                     } else if is_multiview_edit_mode {
+                                        let is_shift = ctx.input(|i| i.modifiers.shift);
                                         if let Some(ref hid) = self.hovered_multiview_id {
-                                            self.selected_multiview_id = Some(hid.clone());
-                                        } else {
-                                            self.selected_multiview_id = None;
+                                            if is_shift {
+                                                // Shift+クリック: 複数選択のトグル
+                                                if self.selected_multiview_ids.contains(hid) {
+                                                    self.selected_multiview_ids.remove(hid);
+                                                } else {
+                                                    self.selected_multiview_ids.insert(hid.clone());
+                                                }
+                                            } else {
+                                                // 通常クリック: 単一選択
+                                                self.selected_multiview_ids.clear();
+                                                self.selected_multiview_ids.insert(hid.clone());
+                                            }
+                                        } else if !is_shift {
+                                            // 何もないところを通常クリックした場合は選択全解除
+                                            self.selected_multiview_ids.clear();
                                         }
                                     }
                                 } else if self.mode == Some(AppMode::Peak) && self.active_zoom.is_none() {
@@ -1692,11 +1712,12 @@ impl eframe::App for ResonaApp {
                         && is_multiview_mode
                         && is_multiview_edit_mode
                     {
-                        if let Some(ref sel_id) = self.selected_multiview_id.clone() {
-                            self.project.state.multiviews.retain(|m| &m.id != sel_id);
-                            self.selected_multiview_id = None;
+                        if !self.selected_multiview_ids.is_empty() {
+                            let count = self.selected_multiview_ids.len();
+                            self.project.state.multiviews.retain(|m| !self.selected_multiview_ids.contains(&m.id));
+                            self.selected_multiview_ids.clear();
                             self.project.push_history();
-                            self.status_message = "Deleted multiview inset (Delete key)".to_string();
+                            self.status_message = format!("Deleted {} multiview inset(s) (Delete key)", count);
                         }
                     }
 
@@ -1811,12 +1832,39 @@ impl eframe::App for ResonaApp {
                                     }
                                 }
                                 if let Some((m_id, mode, geom)) = hit_mv {
-                                    self.selected_multiview_id = Some(m_id.clone());
+                                    let is_shift = ctx.input(|i| i.modifiers.shift);
+                                    if !self.selected_multiview_ids.contains(&m_id) {
+                                        if !is_shift {
+                                            self.selected_multiview_ids.clear();
+                                        }
+                                        self.selected_multiview_ids.insert(m_id.clone());
+                                    }
+
+                                    // 移動モードの場合は選択中の全アイテムを初期位置とともに保持
+                                    let items = if mode == MultiviewDragMode::Move {
+                                        self.project
+                                            .state
+                                            .multiviews
+                                            .iter()
+                                            .filter(|m| self.selected_multiview_ids.contains(&m.id))
+                                            .map(|m| MultiviewDragItemState {
+                                                id: m.id.clone(),
+                                                start_rect: m.geometry,
+                                            })
+                                            .collect()
+                                    } else {
+                                        vec![MultiviewDragItemState {
+                                            id: m_id.clone(),
+                                            start_rect: geom,
+                                        }]
+                                    };
+
                                     self.multiview_drag = Some(MultiviewDragState {
                                         item_id: m_id,
                                         mode,
                                         start_rect: geom,
                                         start_pointer: pos,
+                                        items,
                                     });
                                 }
                             }
@@ -1898,54 +1946,179 @@ impl eframe::App for ResonaApp {
                         } else if let Some(ref drag) = self.multiview_drag {
                             if let Some(pos) = pointer_pos {
                                 let delta = pos - drag.start_pointer;
-                                if let Some(mv) = self.project.state.multiviews.iter_mut().find(|m| m.id == drag.item_id) {
+                                let is_shift = ctx.input(|i| i.modifiers.shift);
+
+                                if drag.mode == MultiviewDragMode::Move {
+                                    // 拡大図の直角移動 (Shift を押しながら)
+                                    let effective_delta = if is_shift {
+                                        if delta.x.abs() >= delta.y.abs() {
+                                            egui::vec2(delta.x, 0.0) // 水平移動
+                                        } else {
+                                            egui::vec2(0.0, delta.y) // 垂直移動
+                                        }
+                                    } else {
+                                        delta
+                                    };
+
+                                    // 複数選択されたすべての拡大図を同時に移動
+                                    for item in &drag.items {
+                                        if let Some(mv) = self.project.state.multiviews.iter_mut().find(|m| m.id == item.id) {
+                                            mv.geometry.x = item.start_rect.x + effective_delta.x;
+                                            mv.geometry.y = item.start_rect.y + effective_delta.y;
+                                        }
+                                    }
+                                } else if let Some(mv) = self.project.state.multiviews.iter_mut().find(|m| m.id == drag.item_id) {
                                     let mut r = drag.start_rect;
-                                    match drag.mode {
-                                        MultiviewDragMode::Move => {
-                                            r.x += delta.x;
-                                            r.y += delta.y;
+                                    if is_shift {
+                                        // アスペクト比維持の拡大縮小
+                                        let aspect = (drag.start_rect.w / drag.start_rect.h.max(1e-3)) as f32;
+                                        let orig_w = drag.start_rect.w;
+                                        let orig_h = drag.start_rect.h;
+
+                                        match drag.mode {
+                                            MultiviewDragMode::Move => unreachable!(),
+                                            MultiviewDragMode::Right => {
+                                                let new_w = (orig_w + delta.x).max(60.0);
+                                                let new_h = (new_w / aspect).max(60.0);
+                                                let actual_w = new_h * aspect;
+                                                r.x = drag.start_rect.x;
+                                                r.y = drag.start_rect.y + (orig_h - new_h) * 0.5;
+                                                r.w = actual_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::Left => {
+                                                let new_w = (orig_w - delta.x).max(60.0);
+                                                let new_h = (new_w / aspect).max(60.0);
+                                                let actual_w = new_h * aspect;
+                                                r.x = drag.start_rect.x + orig_w - actual_w;
+                                                r.y = drag.start_rect.y + (orig_h - new_h) * 0.5;
+                                                r.w = actual_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::Bottom => {
+                                                let new_h = (orig_h + delta.y).max(60.0);
+                                                let new_w = (new_h * aspect).max(60.0);
+                                                let actual_h = new_w / aspect;
+                                                r.y = drag.start_rect.y;
+                                                r.x = drag.start_rect.x + (orig_w - new_w) * 0.5;
+                                                r.w = new_w;
+                                                r.h = actual_h;
+                                            }
+                                            MultiviewDragMode::Top => {
+                                                let new_h = (orig_h - delta.y).max(60.0);
+                                                let new_w = (new_h * aspect).max(60.0);
+                                                let actual_h = new_w / aspect;
+                                                r.y = drag.start_rect.y + orig_h - actual_h;
+                                                r.x = drag.start_rect.x + (orig_w - new_w) * 0.5;
+                                                r.w = new_w;
+                                                r.h = actual_h;
+                                            }
+                                            MultiviewDragMode::TopLeft => {
+                                                let dx = -delta.x;
+                                                let dy = -delta.y;
+                                                let d = if dx.abs() >= dy.abs() * aspect { dx } else { dy * aspect };
+                                                let mut new_w = (orig_w + d).max(60.0);
+                                                let mut new_h = new_w / aspect;
+                                                if new_h < 60.0 {
+                                                    new_h = 60.0;
+                                                    new_w = new_h * aspect;
+                                                }
+                                                r.x = drag.start_rect.x + orig_w - new_w;
+                                                r.y = drag.start_rect.y + orig_h - new_h;
+                                                r.w = new_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::TopRight => {
+                                                let dx = delta.x;
+                                                let dy = -delta.y;
+                                                let d = if dx.abs() >= dy.abs() * aspect { dx } else { dy * aspect };
+                                                let mut new_w = (orig_w + d).max(60.0);
+                                                let mut new_h = new_w / aspect;
+                                                if new_h < 60.0 {
+                                                    new_h = 60.0;
+                                                    new_w = new_h * aspect;
+                                                }
+                                                r.x = drag.start_rect.x;
+                                                r.y = drag.start_rect.y + orig_h - new_h;
+                                                r.w = new_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::BottomLeft => {
+                                                let dx = -delta.x;
+                                                let dy = delta.y;
+                                                let d = if dx.abs() >= dy.abs() * aspect { dx } else { dy * aspect };
+                                                let mut new_w = (orig_w + d).max(60.0);
+                                                let mut new_h = new_w / aspect;
+                                                if new_h < 60.0 {
+                                                    new_h = 60.0;
+                                                    new_w = new_h * aspect;
+                                                }
+                                                r.x = drag.start_rect.x + orig_w - new_w;
+                                                r.y = drag.start_rect.y;
+                                                r.w = new_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::BottomRight => {
+                                                let dx = delta.x;
+                                                let dy = delta.y;
+                                                let d = if dx.abs() >= dy.abs() * aspect { dx } else { dy * aspect };
+                                                let mut new_w = (orig_w + d).max(60.0);
+                                                let mut new_h = new_w / aspect;
+                                                if new_h < 60.0 {
+                                                    new_h = 60.0;
+                                                    new_w = new_h * aspect;
+                                                }
+                                                r.x = drag.start_rect.x;
+                                                r.y = drag.start_rect.y;
+                                                r.w = new_w;
+                                                r.h = new_h;
+                                            }
                                         }
-                                        MultiviewDragMode::Left => {
-                                            let new_w = (r.w - delta.x).max(60.0);
-                                            r.x += r.w - new_w;
-                                            r.w = new_w;
-                                        }
-                                        MultiviewDragMode::Right => {
-                                            r.w = (r.w + delta.x).max(60.0);
-                                        }
-                                        MultiviewDragMode::Top => {
-                                            let new_h = (r.h - delta.y).max(60.0);
-                                            r.y += r.h - new_h;
-                                            r.h = new_h;
-                                        }
-                                        MultiviewDragMode::Bottom => {
-                                            r.h = (r.h + delta.y).max(60.0);
-                                        }
-                                        MultiviewDragMode::TopLeft => {
-                                            let new_w = (r.w - delta.x).max(60.0);
-                                            let new_h = (r.h - delta.y).max(60.0);
-                                            r.x += r.w - new_w;
-                                            r.y += r.h - new_h;
-                                            r.w = new_w;
-                                            r.h = new_h;
-                                        }
-                                        MultiviewDragMode::TopRight => {
-                                            let new_w = (r.w + delta.x).max(60.0);
-                                            let new_h = (r.h - delta.y).max(60.0);
-                                            r.y += r.h - new_h;
-                                            r.w = new_w;
-                                            r.h = new_h;
-                                        }
-                                        MultiviewDragMode::BottomLeft => {
-                                            let new_w = (r.w - delta.x).max(60.0);
-                                            let new_h = (r.h + delta.y).max(60.0);
-                                            r.x += r.w - new_w;
-                                            r.w = new_w;
-                                            r.h = new_h;
-                                        }
-                                        MultiviewDragMode::BottomRight => {
-                                            r.w = (r.w + delta.x).max(60.0);
-                                            r.h = (r.h + delta.y).max(60.0);
+                                    } else {
+                                        match drag.mode {
+                                            MultiviewDragMode::Move => unreachable!(),
+                                            MultiviewDragMode::Left => {
+                                                let new_w = (r.w - delta.x).max(60.0);
+                                                r.x += r.w - new_w;
+                                                r.w = new_w;
+                                            }
+                                            MultiviewDragMode::Right => {
+                                                r.w = (r.w + delta.x).max(60.0);
+                                            }
+                                            MultiviewDragMode::Top => {
+                                                let new_h = (r.h - delta.y).max(60.0);
+                                                r.y += r.h - new_h;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::Bottom => {
+                                                r.h = (r.h + delta.y).max(60.0);
+                                            }
+                                            MultiviewDragMode::TopLeft => {
+                                                let new_w = (r.w - delta.x).max(60.0);
+                                                let new_h = (r.h - delta.y).max(60.0);
+                                                r.x += r.w - new_w;
+                                                r.y += r.h - new_h;
+                                                r.w = new_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::TopRight => {
+                                                let new_w = (r.w + delta.x).max(60.0);
+                                                let new_h = (r.h - delta.y).max(60.0);
+                                                r.y += r.h - new_h;
+                                                r.w = new_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::BottomLeft => {
+                                                let new_w = (r.w - delta.x).max(60.0);
+                                                let new_h = (r.h + delta.y).max(60.0);
+                                                r.x += r.w - new_w;
+                                                r.w = new_w;
+                                                r.h = new_h;
+                                            }
+                                            MultiviewDragMode::BottomRight => {
+                                                r.w = (r.w + delta.x).max(60.0);
+                                                r.h = (r.h + delta.y).max(60.0);
+                                            }
                                         }
                                     }
                                     mv.geometry = r;
@@ -2367,7 +2540,8 @@ impl eframe::App for ResonaApp {
                                                         ratio,
                                                         geometry: geom,
                                                     });
-                                                    self.selected_multiview_id = Some(mv_id);
+                                                    self.selected_multiview_ids.clear();
+                                                    self.selected_multiview_ids.insert(mv_id);
                                                     self.project.push_history();
                                                     self.status_message = format!("Added multiview inset {:.3} ~ {:.3} ppm", p_high, p_low);
                                                 }
@@ -2626,5 +2800,72 @@ impl eframe::App for ResonaApp {
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         self.save_app_settings();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_multiview_selection_toggle() {
+        let mut app = ResonaApp::default();
+        assert!(app.selected_multiview_ids.is_empty());
+
+        // 単一選択
+        app.selected_multiview_ids.insert("mv-1".to_string());
+        assert_eq!(app.selected_multiview_ids.len(), 1);
+        assert!(app.selected_multiview_ids.contains("mv-1"));
+
+        // Shift追加
+        app.selected_multiview_ids.insert("mv-2".to_string());
+        assert_eq!(app.selected_multiview_ids.len(), 2);
+        assert!(app.selected_multiview_ids.contains("mv-2"));
+
+        // Shiftトグル (削除)
+        app.selected_multiview_ids.remove("mv-1");
+        assert_eq!(app.selected_multiview_ids.len(), 1);
+        assert!(!app.selected_multiview_ids.contains("mv-1"));
+        assert!(app.selected_multiview_ids.contains("mv-2"));
+    }
+
+    #[test]
+    fn test_multiview_orthogonal_movement() {
+        // 水平優位
+        let delta = egui::vec2(100.0, 30.0);
+        let eff_delta = if delta.x.abs() >= delta.y.abs() {
+            egui::vec2(delta.x, 0.0)
+        } else {
+            egui::vec2(0.0, delta.y)
+        };
+        assert_eq!(eff_delta.x, 100.0);
+        assert_eq!(eff_delta.y, 0.0);
+
+        // 垂直優位
+        let delta2 = egui::vec2(20.0, -80.0);
+        let eff_delta2 = if delta2.x.abs() >= delta2.y.abs() {
+            egui::vec2(delta2.x, 0.0)
+        } else {
+            egui::vec2(0.0, delta2.y)
+        };
+        assert_eq!(eff_delta2.x, 0.0);
+        assert_eq!(eff_delta2.y, -80.0);
+    }
+
+    #[test]
+    fn test_multiview_aspect_ratio_resize() {
+        let orig = RectF { x: 100.0, y: 100.0, w: 200.0, h: 100.0 };
+        let aspect = orig.w / orig.h; // 2.0
+        assert_eq!(aspect, 2.0);
+
+        // BottomRight ドラッグで右下へ (dx=40, dy=10)
+        let delta = egui::vec2(40.0, 10.0);
+        let d = if delta.x.abs() >= delta.y.abs() * aspect { delta.x } else { delta.y * aspect };
+        assert_eq!(d, 40.0);
+        let new_w = orig.w + d; // 240.0
+        let new_h = new_w / aspect; // 120.0
+        assert_eq!(new_w, 240.0);
+        assert_eq!(new_h, 120.0);
+        assert_eq!(new_w / new_h, aspect);
     }
 }
