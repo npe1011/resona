@@ -14,8 +14,9 @@ use crate::core::analysis::{
     resolve_solvent_target_ppm, AutoSensitivity, IntegrationItem, JCouplingResultItem, PeakItem,
 };
 use crate::core::baseline::BaselineMethod;
+
 use crate::core::error::{ResonaError, Result};
-use crate::core::io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource};
+use crate::core::io::{AcquisitionMetadata, BrukerReader, JeolJdfReader, NmrDataSource};
 use crate::core::pipeline::{process_raw_fid, FtSettings};
 use crate::core::signal::apply_phase_and_extract_real;
 
@@ -291,6 +292,33 @@ impl Project {
     /// JDF ファイルを開き、初期化して処理を実行する
     pub fn load_jdf<P: AsRef<Path>>(&mut self, path: P, ft_settings: Option<FtSettings>) -> Result<()> {
         let raw_fid = JeolJdfReader::read_fid(&path)?;
+        let settings = ft_settings.unwrap_or_default();
+
+        let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0)?;
+
+        self.ppm = Some(processed.ppm);
+        self.spectrum_real = Some(processed.spectrum_real);
+        self.complex_spectrum_unphased = Some(processed.complex_spectrum_unphased);
+        self.fid_raw = Some(raw_fid.data);
+        self.metadata = raw_fid.metadata;
+        self.baseline_array = None;
+
+        self.state = ProjectState::default();
+        self.state.ft_settings = settings;
+
+        // 初期自動位相補正を実行
+        self.auto_phase();
+
+        self.invalidate_cache();
+        self.history = HistoryManager::new();
+        self.history.commit(&self.state, &self.ppm, &self.spectrum_real);
+
+        Ok(())
+    }
+
+    /// Bruker ディレクトリまたはファイルを開き、初期化して処理を実行する
+    pub fn load_bruker<P: AsRef<Path>>(&mut self, path: P, ft_settings: Option<FtSettings>) -> Result<()> {
+        let raw_fid = BrukerReader::read_fid(&path)?;
         let settings = ft_settings.unwrap_or_default();
 
         let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0)?;

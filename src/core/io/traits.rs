@@ -143,10 +143,9 @@ impl AcquisitionMetadata {
         if !self.instrument.is_empty() {
             rows.push(("Instrument", self.instrument.clone()));
         }
-        if !self.probe.is_empty() {
-            rows.push(("Probe", self.probe.clone()));
-        }
         rows
+
+
     }
 }
 

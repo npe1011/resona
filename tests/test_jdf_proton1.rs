@@ -25,6 +25,10 @@ fn test_proton1_pipeline() {
     assert_relative_eq!(raw_fid.metadata.spectral_width_hz, 11140.819964349375, epsilon = 1e-6);
     assert_relative_eq!(raw_fid.metadata.center_ppm, 5.0, epsilon = 1e-6);
     assert_eq!(raw_fid.group_delay, Some(19.6875));
+    assert_eq!(raw_fid.metadata.instrument, "JEOL unknown");
+    assert_eq!(raw_fid.metadata.probe, "");
+
+
 
     let settings = FtSettings {
         window: WindowFunction::Exponential { lb: 0.12 },

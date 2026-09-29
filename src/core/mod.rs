@@ -19,8 +19,9 @@ pub use baseline::{
     baseline_polynomial, BaselineMethod,
 };
 pub use error::{ResonaError, Result};
-pub use io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource, RawFid};
+pub use io::{AcquisitionMetadata, BrukerReader, JeolJdfReader, NmrDataSource, RawFid};
 pub use pipeline::{process_raw_fid, FtSettings, ProcessedSpectrum};
+
 pub use project::{
     DisplaySettings, FullAutoReport, HistoryManager, MultiviewItem, Project, ProjectState, RectF,
 };

@@ -14,7 +14,7 @@ pub use core::{
         baseline_polynomial, BaselineMethod,
     },
     error::{ResonaError, Result},
-    io::{AcquisitionMetadata, JeolJdfReader, NmrDataSource, RawFid},
+    io::{AcquisitionMetadata, BrukerReader, JeolJdfReader, NmrDataSource, RawFid},
     pipeline::{process_raw_fid, FtSettings, ProcessedSpectrum},
     project::{
         DisplaySettings, FullAutoReport, HistoryManager, MultiviewItem, Project, ProjectState,

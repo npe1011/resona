@@ -126,9 +126,11 @@ impl NmrDataSource for JeolJdfReader {
         let mut temperature_celsius = 25.0;
         let mut spin_rate_hz: Option<f64> = None;
         let mut instrument = String::new();
-        let mut probe = String::new();
         let mut experiment = String::new();
         let mut actual_start_time: Option<f64> = None;
+
+
+
 
         for i in 0..num_params {
             let offset = i * 64;
@@ -169,8 +171,10 @@ impl NmrDataSource for JeolJdfReader {
                     nucleus = val_str;
                 } else if name == "solvent" {
                     solvent = val_str;
-                } else if name == "inst_model_number" || (name == "instrument" && instrument.is_empty()) {
-                    instrument = val_str;
+                } else if name == "inst_model_number" || name == "instrument_model_number" || name == "instrument" {
+                    if !val_str.is_empty() {
+                        instrument = val_str;
+                    }
                 } else if name == "experiment" {
                     experiment = val_str;
                 } else if name == "pulse_in_file" {
@@ -181,10 +185,9 @@ impl NmrDataSource for JeolJdfReader {
                     decoupling_nucleus = val_str;
                 } else if name == "irr_noise" {
                     decoupling_sequence = val_str;
-                } else if name == "probe_attributes" {
-                    probe = val_str;
                 }
             } else {
+
                 let numeric_val = match val_type {
                     1 => {
                         // Integer (0x10..0x14, 4 bytes)
@@ -235,8 +238,16 @@ impl NmrDataSource for JeolJdfReader {
             }
         }
 
-        // 5. デジタルフィルタ群遅延 (Group Delay) の計算
+        // 5. 機器名 (Instrument) の決定 (テキスト設定がなければ JEOL unknown)
+        if instrument.is_empty() {
+            instrument = "JEOL unknown".to_string();
+        }
+        let probe = String::new();
+
+        // 6. デジタルフィルタ群遅延 (Group Delay) の計算
         let group_delay = compute_jeol_group_delay(&orders_str, &factors_str);
+
+
 
         // 6. 生データブロックのパース (1D: 2 sections: Real, Imag)
         file.seek(SeekFrom::Start(data_start))?;
@@ -447,6 +458,7 @@ pub fn format_jeol_timestamp(jeol_seconds: f64) -> String {
     let day = d + 1;
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, day, hour, min, sec)
 }
+
 
 #[cfg(test)]
 mod tests {
