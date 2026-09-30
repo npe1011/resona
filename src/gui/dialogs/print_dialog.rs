@@ -180,42 +180,147 @@ fn fetch_system_printers() -> Vec<SystemPrinter> {
 
 #[cfg(target_os = "windows")]
 fn fetch_windows_printers() -> Vec<SystemPrinter> {
-    let cmd = "Get-CimInstance Win32_Printer | Select-Object Name, Default | ConvertTo-Json";
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", cmd])
-        .output();
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct PRINTER_INFO_4W {
+        pPrinterName: *const u16,
+        pServerName: *const u16,
+        Attributes: u32,
+    }
+
+    #[link(name = "winspool")]
+    unsafe extern "system" {
+        fn EnumPrintersW(
+            flags: u32,
+            name: *const u16,
+            level: u32,
+            pPrinterEnum: *mut u8,
+            cbBuf: u32,
+            pcbNeeded: *mut u32,
+            pcReturned: *mut u32,
+        ) -> i32;
+        fn GetDefaultPrinterW(pszBuffer: *mut u16, pcchBuffer: *mut u32) -> i32;
+    }
+
+    const PRINTER_ENUM_LOCAL: u32 = 0x00000002;
+    const PRINTER_ENUM_CONNECTIONS: u32 = 0x00000004;
+
+    // デフォルトプリンター名の取得
+    let mut default_printer_name = String::new();
+    let mut def_buf = vec![0u16; 512];
+    let mut def_len = def_buf.len() as u32;
+    unsafe {
+        if GetDefaultPrinterW(def_buf.as_mut_ptr(), &mut def_len) != 0 {
+            if let Some(pos) = def_buf.iter().position(|&c| c == 0) {
+                default_printer_name = String::from_utf16_lossy(&def_buf[..pos]);
+            }
+        }
+    }
 
     let mut result = Vec::new();
-    if let Ok(out) = output {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            #[derive(Deserialize)]
-            struct WinPrinter {
-                #[serde(rename = "Name")]
-                name: String,
-                #[serde(rename = "Default")]
-                is_default: bool,
-            }
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    let mut needed = 0u32;
+    let mut returned = 0u32;
 
-            if let Ok(list) = serde_json::from_str::<Vec<WinPrinter>>(&text) {
-                for p in list {
+    // まず必要なバッファサイズを取得
+    unsafe {
+        EnumPrintersW(
+            flags,
+            std::ptr::null(),
+            4,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+            &mut returned,
+        );
+    }
+
+    if needed > 0 {
+        let mut buffer = vec![0u8; needed as usize];
+        let success = unsafe {
+            EnumPrintersW(
+                flags,
+                std::ptr::null(),
+                4,
+                buffer.as_mut_ptr(),
+                needed,
+                &mut needed,
+                &mut returned,
+            )
+        };
+
+        if success != 0 && returned > 0 {
+            let infos = buffer.as_ptr() as *const PRINTER_INFO_4W;
+            for i in 0..returned as usize {
+                unsafe {
+                    let info = &*infos.add(i);
+                    if !info.pPrinterName.is_null() {
+                        let mut len = 0;
+                        while *info.pPrinterName.add(len) != 0 {
+                            len += 1;
+                        }
+                        let name = String::from_utf16_lossy(std::slice::from_raw_parts(info.pPrinterName, len));
+                        let is_default = if !default_printer_name.is_empty() {
+                            name.eq_ignore_ascii_case(&default_printer_name)
+                        } else {
+                            i == 0
+                        };
+                        result.push(SystemPrinter {
+                            name,
+                            is_default,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // もし EnumPrintersW で取得できなかった場合のフォールバック (PowerShell を CREATE_NO_WINDOW で実行)
+    if result.is_empty() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let cmd = "Get-CimInstance Win32_Printer | Select-Object Name, Default | ConvertTo-Json";
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", cmd])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                #[derive(Deserialize)]
+                struct WinPrinter {
+                    #[serde(rename = "Name")]
+                    name: String,
+                    #[serde(rename = "Default")]
+                    is_default: bool,
+                }
+
+                if let Ok(list) = serde_json::from_str::<Vec<WinPrinter>>(&text) {
+                    for p in list {
+                        result.push(SystemPrinter {
+                            name: p.name,
+                            is_default: p.is_default,
+                        });
+                    }
+                } else if let Ok(single) = serde_json::from_str::<WinPrinter>(&text) {
                     result.push(SystemPrinter {
-                        name: p.name,
-                        is_default: p.is_default,
+                        name: single.name,
+                        is_default: single.is_default,
                     });
                 }
-            } else if let Ok(single) = serde_json::from_str::<WinPrinter>(&text) {
-                result.push(SystemPrinter {
-                    name: single.name,
-                    is_default: single.is_default,
-                });
             }
         }
     }
 
     if result.is_empty() {
+        let name = if !default_printer_name.is_empty() {
+            default_printer_name
+        } else {
+            "Microsoft Print to PDF".to_string()
+        };
         result.push(SystemPrinter {
-            name: "Default Printer".to_string(),
+            name,
             is_default: true,
         });
     }

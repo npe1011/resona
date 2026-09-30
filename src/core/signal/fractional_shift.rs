@@ -42,6 +42,17 @@ pub fn remove_fractional_delay(fid: &Array1<Complex64>, shift_pts: f64) -> Array
         *val *= scale;
     }
 
+    // 4. 左シフト（shift_pts > 0）によって末尾に回り込んだ先頭過渡応答データをゼロクリア
+    // （周波数領域での線形位相回転による巡回シフトを、本来の線形シフトに復元）
+    if shift_pts > 0.0 {
+        // ceil(shift_pts) に安全マージン (+2点) を加えてクリア
+        let tail_pts = (shift_pts.ceil() as usize + 2).min(n);
+        let start_tail = n.saturating_sub(tail_pts);
+        for val in &mut buffer[start_tail..n] {
+            *val = Complex64::default();
+        }
+    }
+
     Array1::from_vec(buffer)
 }
 
@@ -62,4 +73,23 @@ mod tests {
             assert!((data[i] - shifted[i]).norm() < 1e-10);
         }
     }
+
+    #[test]
+    fn test_shift_tail_zeroing() {
+        let mut data_vec = vec![Complex64::new(0.0, 0.0); 100];
+        // 先頭に大きな信号
+        data_vec[0] = Complex64::new(10.0, 5.0);
+        data_vec[1] = Complex64::new(5.0, 2.0);
+        let data = Array1::from_vec(data_vec);
+
+        let shift = 3.5;
+        let shifted = remove_fractional_delay(&data, shift);
+
+        // shift = 3.5 の場合、tail_pts = ceil(3.5) + 2 = 6 点がゼロクリアされるはず
+        let tail_pts = (shift.ceil() as usize + 2).min(100);
+        for i in (100 - tail_pts)..100 {
+            assert_eq!(shifted[i], Complex64::default());
+        }
+    }
 }
+
