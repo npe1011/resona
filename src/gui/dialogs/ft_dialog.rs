@@ -491,10 +491,16 @@ pub fn show_ft_dialog(
                         let orig_pts = metadata.map(|m| m.points).unwrap_or(0);
                         let zf_pts = orig_pts * state.settings.zf_factor.max(1);
                         if orig_pts > 0 {
+                            let digital_res = metadata
+                                .map(|m| if zf_pts > 0 { m.spectral_width_hz / (zf_pts as f64) } else { 0.0 })
+                                .unwrap_or(0.0);
                             ui.label(
-                                RichText::new(format!("Points: {} → {} pts", orig_pts, zf_pts))
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(108, 117, 125)),
+                                RichText::new(format!(
+                                    "Points: {} -> {} pts ({:.4} Hz/pt)",
+                                    orig_pts, zf_pts, digital_res
+                                ))
+                                .size(11.0)
+                                .color(Color32::from_rgb(108, 117, 125)),
                             );
                         }
                     });

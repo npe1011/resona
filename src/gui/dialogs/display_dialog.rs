@@ -37,7 +37,7 @@ impl Default for DisplayDialogState {
             open: false,
             ppm_min: 0.0,
             ppm_max: 10.0,
-            y_min_scale: -10.0,
+            y_min_scale: 10.0,
             y_max_scale: 80.0,
             max_peak_intensity: 1.0,
             auto_ticks: false,
@@ -93,7 +93,7 @@ pub fn show_display_dialog(
                 ui.add(
                     DragValue::new(&mut state.y_min_scale)
                         .speed(1.0)
-                        .range(-10000.0..=0.0)
+                        .range(0.0..=10000.0)
                         .suffix("%"),
                 );
             });
@@ -136,7 +136,7 @@ pub fn show_display_dialog(
                     let base_y = state.max_peak_intensity.max(1e-6);
                     let top_pct = state.y_max_scale.max(1.0);
                     let computed_y_max = base_y * (100.0 / top_pct);
-                    let computed_y_min = base_y * (state.y_min_scale / top_pct);
+                    let computed_y_min = -base_y * (state.y_min_scale / 100.0);
 
                     applied = Some(DisplaySettingsResult {
                         ppm_min: state.ppm_min,

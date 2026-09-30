@@ -544,7 +544,11 @@ impl Project {
     /// 4. Reference-Auto (メタデータの溶媒情報から解決し、有意なピークがあればシフト。見つからない/失敗したらスキップ)
     /// 5. Peak Pick-Auto (auto_sensitivity の閾値で検出)
     /// 6. Integrate-Auto (auto_sensitivity で領域検出 & スケール初期化)
-    pub fn execute_full_auto(&mut self, baseline_method: BaselineMethod) -> FullAutoReport {
+    pub fn execute_full_auto(
+        &mut self,
+        baseline_method: BaselineMethod,
+        include_integration: bool,
+    ) -> FullAutoReport {
         // 1. 全処理クリア
         self.clear_all_processing();
 
@@ -601,24 +605,28 @@ impl Project {
             0
         };
 
-        // 6. Integrate-Auto
-        let integrations_count = if let (Some(spec), Some(ppm)) = (&self.spectrum_real, &self.ppm) {
-            self.state.integrations = auto_detect_integrations(spec, ppm, self.state.auto_sensitivity);
-            let mut max_area = 0.0_f64;
-            for intg in &self.state.integrations {
-                if let Some(res) = compute_integral(spec, ppm, intg, 1.0, 1.0, 0.03) {
-                    if res.total_area > max_area {
-                        max_area = res.total_area;
+        // 6. Integrate-Auto (オプション)
+        let integrations_count = if include_integration {
+            if let (Some(spec), Some(ppm)) = (&self.spectrum_real, &self.ppm) {
+                self.state.integrations = auto_detect_integrations(spec, ppm, self.state.auto_sensitivity);
+                let mut max_area = 0.0_f64;
+                for intg in &self.state.integrations {
+                    if let Some(res) = compute_integral(spec, ppm, intg, 1.0, 1.0, 0.03) {
+                        if res.total_area > max_area {
+                            max_area = res.total_area;
+                        }
                     }
                 }
+                let max_spec = self.max_intensity();
+                if max_area > 1e-12 && max_spec > 0.0 {
+                    self.state.integration_scale = (max_spec * 0.35) / max_area;
+                    self.state.integration_ref_area = max_area;
+                    self.state.integration_ref_value = 1.0;
+                }
+                self.state.integrations.len()
+            } else {
+                0
             }
-            let max_spec = self.max_intensity();
-            if max_area > 1e-12 && max_spec > 0.0 {
-                self.state.integration_scale = (max_spec * 0.35) / max_area;
-                self.state.integration_ref_area = max_area;
-                self.state.integration_ref_value = 1.0;
-            }
-            self.state.integrations.len()
         } else {
             0
         };
@@ -977,17 +985,25 @@ mod tests {
         assert_eq!(proj.state.p0, 0.0);
         assert_eq!(proj.state.p1, 0.0);
 
-        // 3. execute_full_auto の実行検証
+        // 3. execute_full_auto の実行検証 (Integration あり)
         proj.push_history(); // 実行前の状態を履歴に保存
-        let report = proj.execute_full_auto(BaselineMethod::AirPLS {
-            log_lambda: 8.0,
-            max_iter: 15,
-        });
+        let report = proj.execute_full_auto(
+            BaselineMethod::AirPLS {
+                log_lambda: 8.0,
+                max_iter: 15,
+            },
+            true,
+        );
 
         assert!(report.baseline_applied);
         assert!(report.reference_applied, "CDCl3 reference should be detected and applied");
         assert!(report.peaks_count >= 2, "Both CDCl3 and sample peaks should be picked");
         assert!(report.integrations_count >= 1, "At least one region should be integrated");
+
+        // Integration なしの実行検証
+        let report_no_int = proj.execute_full_auto(BaselineMethod::None, false);
+        assert_eq!(report_no_int.integrations_count, 0);
+        assert!(proj.state.integrations.is_empty());
 
         // 4. Full Auto 適用状態をコミットし、Undo で実行前のまっさらな状態に復元できるか
         proj.push_history(); // 実行後の状態をコミット (current_idx = 1)

@@ -1,6 +1,7 @@
 use ndarray::Array1;
 use resona::core::{AcquisitionMetadata, FtSettings, IntegrationItem, JCouplingResultItem, MultiviewItem, PeakItem};
-use resona::gui::dialogs::print_dialog::{generate_complete_page_svg, PrintOrientation, PrintSettings};
+use resona::gui::dialogs::print_dialog::{generate_complete_page_svg, generate_complete_page_svg_with_style, PrintOrientation, PrintSettings};
+use resona::gui::dialogs::print_style_dialog::{PrintStyleSettings, RgbColor};
 
 #[test]
 fn test_print_settings_default() {
@@ -276,3 +277,64 @@ fn test_custom_precision_and_manual_ticks() {
     // 手動目盛り 2.0 が反映されているか (2.0, 4.0, 6.0, 8.0, 10.0)
     assert!(svg.contains(">2.0<") || svg.contains(">2<") || svg.contains(">4.0<") || svg.contains(">8.0<"));
 }
+
+#[test]
+fn test_print_style_settings_custom_svg() {
+    let settings = PrintSettings::default();
+    let mut style = PrintStyleSettings::default();
+    // カスタム太さと色を設定
+    style.main_spectrum.line_width = 2.5;
+    style.main_spectrum.line_color = RgbColor::new(0, 51, 102); // #003366
+    style.main_spectrum.integral_width = 1.8;
+    style.main_spectrum.integral_color = RgbColor::new(204, 0, 51); // #cc0033
+    style.main_spectrum.peak_lead_width = 0.75;
+    style.main_spectrum.peak_lead_color = RgbColor::new(85, 85, 85); // #555555
+
+    let ppm = Array1::linspace(10.0, 0.0, 100);
+    let mut spec = Array1::zeros(100);
+    spec[50] = 100.0;
+
+    let peaks = vec![PeakItem {
+        ppm: 5.0,
+        intensity: 100.0,
+        is_auto: true,
+    }];
+    let integrations = vec![IntegrationItem {
+        id: "1".to_string(),
+        start_ppm: 6.0,
+        end_ppm: 4.0,
+        y_start: 0.0,
+        y_end: 0.0,
+    }];
+    let multiviews = Vec::new();
+    let metadata = AcquisitionMetadata::default();
+    let ft_settings = FtSettings::default();
+    let j_couplings = Vec::new();
+
+    let svg = generate_complete_page_svg_with_style(
+        &settings,
+        &style,
+        None,
+        Some(&ppm),
+        Some(&spec),
+        &peaks,
+        &integrations,
+        1.0,
+        0.03,
+        1.0,
+        &multiviews,
+        &metadata,
+        &ft_settings,
+        &j_couplings,
+        None,
+    );
+
+    // スペクトル線の色と太さが反映されているか確認
+    assert!(svg.contains(r##"stroke="#003366" stroke-width="2.50""##), "Main spectrum style must be reflected in SVG");
+    // 積分線の色と太さが反映されているか確認
+    assert!(svg.contains(r##"stroke="#cc0033" stroke-width="1.80""##), "Main integral curve style must be reflected in SVG");
+    // ピーク引き出し線の色と太さが反映されているか確認
+    assert!(svg.contains(r##"stroke="#555555" stroke-width="0.75""##), "Peak lead line style must be reflected in SVG");
+}
+
+

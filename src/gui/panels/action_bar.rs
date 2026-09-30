@@ -2,6 +2,7 @@ use egui::{
     vec2, Button, Color32, DragValue, Frame, Margin, RichText, Slider, Stroke, Ui,
 };
 
+use crate::core::analysis::KNOWN_SOLVENTS;
 use crate::core::baseline::BaselineMethod;
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 
@@ -24,6 +25,7 @@ pub enum ActionEvent {
     AutoMultiview,
     AdjustYMultiview,
     AlignMultiview,
+    AlignMultiviewsOneRow,
     ResetMultiview,
     ClearJCoupling,
     CloseMode,
@@ -56,6 +58,7 @@ pub struct ActionBarState {
 
     // Multiview モード
     pub multiview_ratio: f64,
+    pub multiview_auto_align: bool,
 }
 
 impl ActionBarState {
@@ -73,7 +76,7 @@ impl Default for ActionBarState {
     fn default() -> Self {
         Self {
             peak_submode: PeakSubMode::None,
-            integrate_submode: IntegrateSubMode::None,
+            integrate_submode: IntegrateSubMode::Add,
             multiview_submode: MultiviewSubMode::None,
             jcoupling_add_active: false,
             non_integer_protons: false,
@@ -86,7 +89,8 @@ impl Default for ActionBarState {
             ref_set_active: false,
             peak_threshold: 0.0,
             integration_ref_val: 1.0,
-            multiview_ratio: 5.0,
+            multiview_ratio: 3.0,
+            multiview_auto_align: true,
         }
     }
 }
@@ -295,11 +299,11 @@ pub fn continuous_step_arrow_button(
             let next_hold = hold_time + dt;
             ui.data_mut(|d| d.insert_temp(id, next_hold));
 
-            const DELAY: f64 = 0.25;
+            const DELAY: f64 = 0.20;
             if next_hold > DELAY {
                 let t = next_hold - DELAY;
                 let progress = (t / accel_duration.max(0.001)).clamp(0.0, 1.0);
-                let speed = min_speed + (max_speed - min_speed) * progress;
+                let speed = min_speed + (max_speed - min_speed) * (progress * progress);
                 delta = speed * dt;
             }
         }
@@ -351,39 +355,39 @@ pub fn show_action_bar(
                     // [Y-Scale (%)]  Max [入力] [▲] [▼]   Min [入力] [▲] [▼]
                     // と正しく整列する。
 
-                    // 1. Min 下ボタン (▼) [一番右端]
-                    let ymin_dec = continuous_step_arrow_button(
+                    // 1. Min 下ボタン (▼) [値を下げる]
+                    let ymin_down = continuous_step_arrow_button(
                         ui,
                         "ab_ymin_dec",
                         StepDirection::Down,
+                        2.0,
+                        15.0,
+                        150.0,
                         1.0,
-                        5.0,
-                        50.0,
-                        1.2,
                     );
-                    if ymin_dec > 0.0 {
-                        *y_min_scale = (*y_min_scale - ymin_dec).clamp(-10000.0, 0.0);
+                    if ymin_down > 0.0 {
+                        *y_min_scale = (*y_min_scale - ymin_down).clamp(0.0, 10000.0);
                     }
 
-                    // 2. Min 上ボタン (▲)
-                    let ymin_inc = continuous_step_arrow_button(
+                    // 2. Min 上ボタン (▲) [値を上げる]
+                    let ymin_up = continuous_step_arrow_button(
                         ui,
                         "ab_ymin_inc",
                         StepDirection::Up,
+                        2.0,
+                        15.0,
+                        150.0,
                         1.0,
-                        5.0,
-                        50.0,
-                        1.2,
                     );
-                    if ymin_inc > 0.0 {
-                        *y_min_scale = (*y_min_scale + ymin_inc).clamp(-10000.0, 0.0);
+                    if ymin_up > 0.0 {
+                        *y_min_scale = (*y_min_scale + ymin_up).clamp(0.0, 10000.0);
                     }
 
-                    // 3. Min 入力欄
+                    // 3. Min 入力欄 (絶対値表示 0.0..=10000.0)
                     ui.add(
                         DragValue::new(y_min_scale)
                             .speed(1.0)
-                            .range(-10000.0..=0.0),
+                            .range(0.0..=10000.0),
                     );
 
                     // 4. Min ラベル
@@ -400,10 +404,10 @@ pub fn show_action_bar(
                         ui,
                         "ab_ymax_dec",
                         StepDirection::Down,
+                        2.5,
+                        15.0,
+                        250.0,
                         1.0,
-                        5.0,
-                        100.0,
-                        1.2,
                     );
                     if ymax_dec > 0.0 {
                         *y_max_scale = (*y_max_scale - ymax_dec).clamp(1.0, 10000.0);
@@ -414,10 +418,10 @@ pub fn show_action_bar(
                         ui,
                         "ab_ymax_inc",
                         StepDirection::Up,
+                        2.5,
+                        15.0,
+                        250.0,
                         1.0,
-                        5.0,
-                        100.0,
-                        1.2,
                     );
                     if ymax_inc > 0.0 {
                         *y_max_scale = (*y_max_scale + ymax_inc).clamp(1.0, 10000.0);
@@ -473,7 +477,7 @@ pub fn show_action_bar(
                     ui.spacing_mut().item_spacing.x = 3.0;
 
                     let is_rect = *active_zoom == Some(ZoomTool::Rect);
-                    if light_button(ui, "Rect", is_rect, 46.0).clicked() {
+                    if light_button(ui, "X-Y", is_rect, 46.0).clicked() {
                         *active_zoom = Some(ZoomTool::Rect);
                         state.clear_submodes();
                     }
@@ -640,38 +644,25 @@ pub fn show_action_bar(
                             }
                             AppMode::Reference => {
                                 let is_13c = nucleus.contains("13C") || nucleus.contains("C13");
-                                let solvents: &[(&str, f64)] = if is_13c {
-                                    &[
-                                        ("CDCl3 (77.16 ppm)", 77.16),
-                                        ("DMSO-d6 (39.52 ppm)", 39.52),
-                                        ("CD3OD (49.00 ppm)", 49.00),
-                                        ("Acetone-d6 (29.84 ppm)", 29.84),
-                                        ("CD3CN (1.32 ppm)", 1.32),
-                                        ("TMS (0.00 ppm)", 0.00),
-                                    ]
-                                } else {
-                                    &[
-                                        ("CDCl3 (7.26 ppm)", 7.26),
-                                        ("D2O (4.79 ppm)", 4.79),
-                                        ("DMSO-d6 (2.50 ppm)", 2.50),
-                                        ("CD3OD (3.31 ppm)", 3.31),
-                                        ("Acetone-d6 (2.05 ppm)", 2.05),
-                                        ("CD3CN (1.94 ppm)", 1.94),
-                                        ("TMS (0.00 ppm)", 0.00),
-                                    ]
-                                };
+                                let mut solvents: Vec<(String, f64)> = Vec::new();
+                                for info in KNOWN_SOLVENTS {
+                                    let target = if is_13c { info.carbon_ppm } else { info.proton_ppm };
+                                    if let Some(ppm) = target {
+                                        solvents.push((format!("{} ({:.2} ppm)", info.name, ppm), ppm));
+                                    }
+                                }
 
                                 ui.label(RichText::new("Solvent").size(12.0));
                                 let current_solvent_name = solvents
                                     .get(state.ref_solvent_idx)
-                                    .map(|s| s.0)
+                                    .map(|s| s.0.as_str())
                                     .unwrap_or("Custom");
                                 egui::ComboBox::from_id_salt("ref_solvent_combo")
                                     .selected_text(current_solvent_name)
                                     .width(140.0)
                                     .show_ui(ui, |ui| {
                                         for (i, (name, val)) in solvents.iter().enumerate() {
-                                            if ui.selectable_label(state.ref_solvent_idx == i, *name).clicked() {
+                                            if ui.selectable_label(state.ref_solvent_idx == i, name).clicked() {
                                                 state.ref_solvent_idx = i;
                                                 state.ref_target_ppm = *val;
                                             }
@@ -689,12 +680,6 @@ pub fn show_action_bar(
                                 if light_button(ui, "Set", state.ref_set_active, 46.0).clicked() {
                                     state.ref_set_active = true;
                                     *active_zoom = None;
-                                }
-
-                                if state.ref_set_active {
-                                    ui.label(RichText::new("Drag on peak to reference").size(11.0).color(Color32::from_rgb(13, 110, 253)));
-                                } else {
-                                    ui.label(RichText::new("Click Set to select peak").size(11.0).italics().color(Color32::from_gray(140)));
                                 }
                             }
                             AppMode::Peak => {
@@ -759,7 +744,11 @@ pub fn show_action_bar(
 
                                 let is_del = state.integrate_submode == IntegrateSubMode::Delete;
                                 if light_button(ui, "Delete", is_del, 50.0).clicked() {
-                                    state.integrate_submode = IntegrateSubMode::Delete;
+                                    if is_del {
+                                        state.integrate_submode = IntegrateSubMode::Add;
+                                    } else {
+                                        state.integrate_submode = IntegrateSubMode::Delete;
+                                    }
                                     *active_zoom = None;
                                 }
 
@@ -780,49 +769,31 @@ pub fn show_action_bar(
                                     event = ActionEvent::ClearIntegrations;
                                 }
 
-                                match state.integrate_submode {
-                                    IntegrateSubMode::Add => {
-                                        ui.label(RichText::new("Drag over peak to integrate").size(11.0).color(Color32::from_rgb(13, 110, 253)));
-                                    }
-                                    IntegrateSubMode::Edit => {
-                                        ui.label(RichText::new("Drag handles or curve").size(11.0).color(Color32::from_rgb(13, 110, 253)));
-                                    }
-                                    IntegrateSubMode::Split => {
-                                        ui.label(RichText::new("Click or drag to split").size(11.0).color(Color32::from_rgb(13, 110, 253)));
-                                    }
-                                    IntegrateSubMode::Delete => {
-                                        ui.label(RichText::new("Click or drag to delete").size(11.0).color(Color32::from_rgb(220, 38, 38)));
-                                    }
-                                    IntegrateSubMode::Reference => {
-                                        ui.label(RichText::new("Click or drag to set reference").size(11.0).color(Color32::from_rgb(13, 110, 253)));
-                                    }
-                                    _ => {}
-                                }
                             }
                             AppMode::Multiview => {
                                 ui.label(RichText::new("Ratio").size(12.0));
                                 ui.add(DragValue::new(&mut state.multiview_ratio).speed(0.5).range(0.5..=100.0));
+
+                                ui.checkbox(&mut state.multiview_auto_align, "Auto Align");
 
                                 if auto_button(ui, "Auto", 44.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::AutoMultiview;
                                 }
 
-                                let is_add = state.multiview_submode == MultiviewSubMode::Add;
-                                if light_button(ui, "Add", is_add, 46.0).clicked() {
-                                    state.multiview_submode = MultiviewSubMode::Add;
-                                    *active_zoom = None;
-                                }
-
-                                let is_edit = state.multiview_submode == MultiviewSubMode::Edit;
-                                if light_button(ui, "Edit", is_edit, 44.0).clicked() {
-                                    state.multiview_submode = MultiviewSubMode::Edit;
+                                let is_add_edit = state.multiview_submode != MultiviewSubMode::Delete;
+                                if light_button(ui, "Add & Edit", is_add_edit, 72.0).clicked() {
+                                    state.multiview_submode = MultiviewSubMode::None;
                                     *active_zoom = None;
                                 }
 
                                 let is_del = state.multiview_submode == MultiviewSubMode::Delete;
                                 if light_button(ui, "Delete", is_del, 50.0).clicked() {
-                                    state.multiview_submode = MultiviewSubMode::Delete;
+                                    if is_del {
+                                        state.multiview_submode = MultiviewSubMode::None;
+                                    } else {
+                                        state.multiview_submode = MultiviewSubMode::Delete;
+                                    }
                                     *active_zoom = None;
                                 }
 
@@ -836,22 +807,14 @@ pub fn show_action_bar(
                                     event = ActionEvent::AlignMultiview;
                                 }
 
+                                if light_button(ui, "1-Row", false, 48.0).clicked() {
+                                    *active_zoom = None;
+                                    event = ActionEvent::AlignMultiviewsOneRow;
+                                }
+
                                 if light_button(ui, "Clear", false, 46.0).clicked() {
                                     *active_zoom = None;
                                     event = ActionEvent::ResetMultiview;
-                                }
-
-                                match state.multiview_submode {
-                                    MultiviewSubMode::Add => {
-                                        ui.label(RichText::new("Drag on peak to create inset").size(11.0).color(Color32::from_rgb(147, 51, 234)));
-                                    }
-                                    MultiviewSubMode::Edit => {
-                                        ui.label(RichText::new("Drag inside to move, edges to resize, Delete to remove").size(11.0).color(Color32::from_rgb(13, 110, 253)));
-                                    }
-                                    MultiviewSubMode::Delete => {
-                                        ui.label(RichText::new("Click inset to delete").size(11.0).color(Color32::from_rgb(220, 38, 38)));
-                                    }
-                                    _ => {}
                                 }
                             }
                             AppMode::JCoupling => {

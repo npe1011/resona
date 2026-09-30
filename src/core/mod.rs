@@ -9,9 +9,9 @@ pub mod signal;
 
 pub use analysis::{
     add_peak_in_range, analyze_multiplet, auto_detect_integrations, auto_detect_reference_peak,
-    compute_integral, estimate_noise_mad, pick_peaks, resolve_solvent_target_ppm, snap_and_add_peak,
-    AutoSensitivity, IntegralResult, IntegrationItem, JCouplingCandidate, JCouplingResultItem,
-    PeakItem, SolventInfo, KNOWN_SOLVENTS,
+    compute_integral, estimate_noise_mad, parse_jcoupling_sort_ppm, pick_peaks,
+    resolve_solvent_target_ppm, snap_and_add_peak, AutoSensitivity, IntegralResult,
+    IntegrationItem, JCouplingCandidate, JCouplingResultItem, PeakItem, SolventInfo, KNOWN_SOLVENTS,
 };
 pub use autophase::{acme_score, autophase_acme, nelder_mead_2d};
 pub use baseline::{

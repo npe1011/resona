@@ -2,14 +2,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use egui::{CentralPanel, Color32, Context, Key, Margin, Pos2, Rect, RichText, Stroke, TopBottomPanel, SidePanel};
 use crate::core::{
-    analyze_multiplet, auto_detect_integrations, compute_integral, pick_peaks,
-    add_peak_in_range, IntegrationItem, JCouplingResultItem, MultiviewItem, Project, RectF,
+    add_peak_in_range, analyze_multiplet, auto_detect_integrations, compute_integral,
+    parse_jcoupling_sort_ppm, pick_peaks, IntegrationItem, JCouplingResultItem, MultiviewItem,
+    Project, RectF,
 };
 
 use crate::gui::dialogs::{
     show_display_dialog, show_ft_dialog, show_full_auto_dialog, show_jcoupling_dialog,
-    show_print_dialog, DisplayDialogState, FtDialogState, FullAutoBaselineChoice,
-    FullAutoDialogState, JCouplingDialogState, PrintDialogState,
+    show_multiview_yscale_dialog, show_print_dialog, DisplayDialogState, FtDialogState,
+    FullAutoBaselineChoice, FullAutoDialogState, JCouplingDialogState,
+    MultiviewYScaleDialogState, PrintDialogState,
 };
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 use crate::gui::panels::{
@@ -307,6 +309,7 @@ pub struct ResonaApp {
     pub full_auto_dialog_state: FullAutoDialogState,
     pub display_dialog_state: DisplayDialogState,
     pub jcoupling_dialog_state: JCouplingDialogState,
+    pub multiview_yscale_dialog_state: MultiviewYScaleDialogState,
     pub print_dialog_state: PrintDialogState,
 
     pub plot_style: PlotStyle,
@@ -331,6 +334,8 @@ pub struct ResonaApp {
     pub y_max_scale: f64,
     pub y_min_scale: f64,
     last_transform_y: Option<(f64, f64)>,
+    pub arrow_key_hold_time: f64,
+    pub temp_zoom_saved: Option<Option<ZoomTool>>,
 }
 
 impl Default for ResonaApp {
@@ -347,9 +352,16 @@ impl Default for ResonaApp {
 
         let mut action_state = ActionBarState::default();
         action_state.multiview_ratio = settings.multiview_ratio;
+        action_state.multiview_auto_align = settings.multiview_auto_align;
 
         let mut print_dialog_state = PrintDialogState::default();
         print_dialog_state.settings = settings.print_settings;
+
+        let mut full_auto_dialog_state = FullAutoDialogState::default();
+        full_auto_dialog_state.baseline_choice = settings.full_auto_baseline_choice;
+        full_auto_dialog_state.airpls_log_lambda = settings.full_auto_airpls_lambda;
+        full_auto_dialog_state.poly_order = settings.full_auto_poly_order;
+        full_auto_dialog_state.enable_integration = settings.full_auto_integration;
 
         Self {
             project: Project::new(),
@@ -359,9 +371,10 @@ impl Default for ResonaApp {
             active_zoom: None,
             action_state,
             ft_dialog_state: FtDialogState::default(),
-            full_auto_dialog_state: FullAutoDialogState::default(),
+            full_auto_dialog_state,
             display_dialog_state,
             jcoupling_dialog_state: JCouplingDialogState::default(),
+            multiview_yscale_dialog_state: MultiviewYScaleDialogState::default(),
             print_dialog_state,
             plot_style,
             transform: None,
@@ -377,8 +390,10 @@ impl Default for ResonaApp {
             last_multiview_ratio: settings.multiview_ratio,
             status_message: "Ready. Drag & drop .jdf or .rsn file here.".to_string(),
             y_max_scale: 80.0,
-            y_min_scale: -10.0,
+            y_min_scale: 10.0,
             last_transform_y: None,
+            arrow_key_hold_time: 0.0,
+            temp_zoom_saved: None,
         }
     }
 }
@@ -395,11 +410,36 @@ impl ResonaApp {
             ppm_decimals: self.plot_style.ppm_decimals,
             integral_decimals: self.plot_style.integral_decimals,
             multiview_ratio: self.action_state.multiview_ratio,
+            multiview_auto_align: self.action_state.multiview_auto_align,
+            full_auto_baseline_choice: self.full_auto_dialog_state.baseline_choice,
+            full_auto_airpls_lambda: self.full_auto_dialog_state.airpls_log_lambda,
+            full_auto_poly_order: self.full_auto_dialog_state.poly_order,
+            full_auto_integration: self.full_auto_dialog_state.enable_integration,
             print_settings: self.print_dialog_state.settings.clone(),
         };
         if let Err(e) = settings.save() {
             eprintln!("Warning: Failed to save app settings: {}", e);
         }
+    }
+
+    /// 全設定をデフォルトに初期化
+    pub fn reset_settings_to_default(&mut self) {
+        let def = crate::gui::config::AppSettings::default();
+        self.plot_style.ppm_decimals = def.ppm_decimals;
+        self.plot_style.integral_decimals = def.integral_decimals;
+        self.display_dialog_state.ppm_decimals = def.ppm_decimals;
+        self.display_dialog_state.integral_decimals = def.integral_decimals;
+        self.action_state.multiview_ratio = def.multiview_ratio;
+        self.action_state.multiview_auto_align = def.multiview_auto_align;
+        self.full_auto_dialog_state.baseline_choice = def.full_auto_baseline_choice;
+        self.full_auto_dialog_state.airpls_log_lambda = def.full_auto_airpls_lambda;
+        self.full_auto_dialog_state.poly_order = def.full_auto_poly_order;
+        self.full_auto_dialog_state.enable_integration = def.full_auto_integration;
+        self.print_dialog_state.settings = def.print_settings.clone();
+        if let Err(e) = def.save() {
+            eprintln!("Warning: Failed to reset settings to default: {}", e);
+        }
+        self.status_message = "Settings reset to default".to_string();
     }
 
     /// いずれかのモーダルダイアログが開いているか判定
@@ -408,6 +448,7 @@ impl ResonaApp {
             || self.full_auto_dialog_state.open
             || self.display_dialog_state.open
             || self.jcoupling_dialog_state.open
+            || self.multiview_yscale_dialog_state.open
             || self.print_dialog_state.is_open
     }
 
@@ -594,39 +635,49 @@ impl ResonaApp {
         }
     }
 
-    /// 既存の拡大図について、枠全体の縦の大きさ（h）を最大のものに揃え、
-    /// アスペクト比（w/h）を維持して拡大・縮小する (Adjust-Y)
-    pub fn adjust_y_multiviews(&mut self) {
+    /// 既存の拡大図について、枠全体の縦の大きさ（h）を一番左上にあるものに揃え、
+    /// アスペクト比（w/h）を維持して拡大・縮小する (内部用: 履歴pushなし)
+    pub fn adjust_y_multiviews_internal(&mut self) -> Option<f32> {
         if self.project.state.multiviews.is_empty() {
-            return;
+            return None;
         }
 
-        let max_h = self
-            .project
-            .state
-            .multiviews
-            .iter()
-            .map(|mv| mv.geometry.h)
-            .fold(0.0_f32, f32::max);
+        // 一番左上にあるインセット（y 最小、近接行なら x 最小）
+        let target_mv = self.project.state.multiviews.iter().min_by(|a, b| {
+            if (a.geometry.y - b.geometry.y).abs() < 10.0 {
+                a.geometry.x.partial_cmp(&b.geometry.x).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                a.geometry.y.partial_cmp(&b.geometry.y).unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
 
-        if max_h <= 0.0 {
-            return;
+        let target_h = target_mv.map(|mv| mv.geometry.h).unwrap_or(0.0);
+        if target_h <= 0.0 {
+            return None;
         }
 
         for mv in &mut self.project.state.multiviews {
             if mv.geometry.h > 0.0 {
-                let scale = max_h / mv.geometry.h;
+                let scale = target_h / mv.geometry.h;
                 mv.geometry.w *= scale;
-                mv.geometry.h = max_h;
+                mv.geometry.h = target_h;
             }
         }
 
-        self.project.push_history();
-        self.status_message = format!("Adjusted multiview heights to {:.0}px", max_h);
+        Some(target_h)
     }
 
-    /// 既存の Multiview を最大化学シフト降順にソートし、画面上部に下揃えで整列配置 (ezNMR準拠)
-    pub fn align_multiviews(&mut self, plot_rect: Rect) {
+    /// 既存の拡大図について、枠全体の縦の大きさ（h）を一番左上のものに揃え、
+    /// アスペクト比（w/h）を維持して拡大・縮小する (Adjust-Y)
+    pub fn adjust_y_multiviews(&mut self) {
+        if let Some(target_h) = self.adjust_y_multiviews_internal() {
+            self.project.push_history();
+            self.status_message = format!("Adjusted multiview heights to top-left {:.0}px", target_h);
+        }
+    }
+
+    /// 既存の Multiview を最大化学シフト降順にソートし、画面上部に下揃えで整列配置 (内部用: 履歴pushなし)
+    pub fn align_multiviews_internal(&mut self, plot_rect: Rect) {
         if self.project.state.multiviews.is_empty() {
             return;
         }
@@ -678,9 +729,72 @@ impl ResonaApp {
             }
             current_y += row_h + 15.0;
         }
+    }
 
+    /// 既存の Multiview を最大化学シフト降順にソートし、画面上部に下揃えで整列配置 (ezNMR準拠)
+    pub fn align_multiviews(&mut self, plot_rect: Rect) {
+        if self.project.state.multiviews.is_empty() {
+            return;
+        }
+        self.align_multiviews_internal(plot_rect);
         self.project.push_history();
         self.status_message = "Aligned multiview insets".to_string();
+    }
+
+    /// 既存の Multiview を最大化学シフト降順にソートし、画面上部に1行横並びで下揃え整列配置
+    /// 全幅がプロット画面幅を超える場合は画面内に収まるよう均等縮小
+    pub fn align_multiviews_one_row(&mut self, plot_rect: Rect) {
+        if self.project.state.multiviews.is_empty() {
+            return;
+        }
+
+        // 最大化学シフト降順にソート (ezNMR準拠)
+        self.project.state.multiviews.sort_by(|a, b| {
+            let max_a = a.src_x_min.max(a.src_x_max);
+            let max_b = b.src_x_min.max(b.src_x_max);
+            max_b.partial_cmp(&max_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let start_x = plot_rect.min.x + 15.0;
+        let start_y = plot_rect.min.y + 15.0;
+        let available_w = (plot_rect.width() - 30.0).max(100.0);
+        let count = self.project.state.multiviews.len();
+        let gap = 15.0_f32;
+        let total_gap = if count > 1 { (count - 1) as f32 * gap } else { 0.0 };
+        let sum_w: f32 = self.project.state.multiviews.iter().map(|mv| mv.geometry.w).sum();
+        let total_needed = sum_w + total_gap;
+
+        // 画面幅を超える場合は、アスペクト比を維持して均等縮小
+        if total_needed > available_w && sum_w > 0.0 {
+            let available_for_insets = (available_w - total_gap).max(count as f32 * 30.0);
+            let scale = (available_for_insets / sum_w).clamp(0.05, 1.0);
+            for mv in &mut self.project.state.multiviews {
+                mv.geometry.w *= scale;
+                mv.geometry.h *= scale;
+            }
+        }
+
+        let max_h = self
+            .project
+            .state
+            .multiviews
+            .iter()
+            .map(|mv| mv.geometry.h)
+            .fold(0.0_f32, f32::max);
+
+        let mut cur_x = start_x;
+        for mv in &mut self.project.state.multiviews {
+            let h = mv.geometry.h;
+            let w = mv.geometry.w;
+            // 下揃え: y = start_y + (max_h - h)
+            let y = start_y + (max_h - h);
+            mv.geometry.x = cur_x;
+            mv.geometry.y = y;
+            cur_x += w + gap;
+        }
+
+        self.project.push_history();
+        self.status_message = "Aligned multiview insets in 1 row".to_string();
     }
 
     /// 既存の積分区間から Multiview インセットを自動生成 (ezNMR lines 508-535準拠 + 感度フィルタ)
@@ -759,7 +873,10 @@ impl ResonaApp {
             });
         }
 
-        self.align_multiviews(plot_rect);
+        // Auto で追加したときは必ず Adjust-Y + Align を実行 (履歴は 1-step)
+        self.adjust_y_multiviews_internal();
+        self.align_multiviews_internal(plot_rect);
+        self.project.push_history();
         self.status_message = format!(
             "Auto-created {} multiview insets from integrals (sensitivity={})",
             self.project.state.multiviews.len(),
@@ -782,10 +899,10 @@ impl ResonaApp {
             } else {
                 80.0
             };
-            let min_pct = if t.y_max > 1e-6 {
-                (100.0 * t.y_min / t.y_max).clamp(-10000.0, 0.0)
+            let min_pct = if max_intensity > 1e-6 {
+                (100.0 * (-t.y_min) / max_intensity).clamp(0.0, 10000.0)
             } else {
-                -10.0
+                10.0
             };
             self.display_dialog_state.y_max_scale = top_pct;
             self.display_dialog_state.y_min_scale = min_pct;
@@ -808,7 +925,7 @@ impl ResonaApp {
                 self.plot_style.tick_major = default_step;
             }
         } else {
-            self.display_dialog_state.y_min_scale = -10.0;
+            self.display_dialog_state.y_min_scale = 10.0;
             self.display_dialog_state.y_max_scale = 80.0;
         }
 
@@ -1052,6 +1169,13 @@ impl eframe::App for ResonaApp {
                             ui.close_menu();
                         }
                     });
+
+                    ui.menu_button("Settings", |ui| {
+                        if ui.button("Default").clicked() {
+                            self.reset_settings_to_default();
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
 
@@ -1090,6 +1214,10 @@ impl eframe::App for ResonaApp {
                 }
             });
 
+        if self.mode == Some(AppMode::Integrate) && self.action_state.integrate_submode == IntegrateSubMode::None {
+            self.action_state.integrate_submode = IntegrateSubMode::Add;
+        }
+
         // 3. コンテキスト専用アクションバー (2行目: 左 ZOOM常駐フレーム + 中央 サブツールバー + 右 Y-Axis (scale)常駐フレーム)
         let has_spectrum = self.project.spectrum_real.is_some();
         let max_intensity = self.project.spectrum_real.as_ref()
@@ -1102,7 +1230,7 @@ impl eframe::App for ResonaApp {
             if self.last_transform_y != Some(current_y) {
                 if t.y_max > 1e-6 {
                     self.y_max_scale = (100.0 * max_intensity / t.y_max).clamp(1.0, 10000.0);
-                    self.y_min_scale = (100.0 * t.y_min / t.y_max).clamp(-10000.0, 0.0);
+                    self.y_min_scale = (100.0 * (-t.y_min) / max_intensity).clamp(0.0, 10000.0);
                 }
                 self.last_transform_y = Some(current_y);
             }
@@ -1156,7 +1284,7 @@ impl eframe::App for ResonaApp {
                 let base_y = max_intensity;
                 let top_pct = self.y_max_scale.max(1.0);
                 t.y_max = base_y * (100.0 / top_pct);
-                t.y_min = base_y * (self.y_min_scale / top_pct);
+                t.y_min = -base_y * (self.y_min_scale / 100.0);
                 self.last_transform_y = Some((t.y_min, t.y_max));
             }
         }
@@ -1336,6 +1464,10 @@ impl eframe::App for ResonaApp {
                 let plot_rect = self.transform.as_ref().map(|t| t.screen_rect).unwrap_or(Rect::from_min_size(Pos2::new(100.0, 100.0), egui::vec2(800.0, 600.0)));
                 self.align_multiviews(plot_rect);
             }
+            ActionEvent::AlignMultiviewsOneRow => {
+                let plot_rect = self.transform.as_ref().map(|t| t.screen_rect).unwrap_or(Rect::from_min_size(Pos2::new(100.0, 100.0), egui::vec2(800.0, 600.0)));
+                self.align_multiviews_one_row(plot_rect);
+            }
             ActionEvent::ResetMultiview => {
                 self.project.state.multiviews.clear();
                 self.selected_multiview_ids.clear();
@@ -1367,12 +1499,14 @@ impl eframe::App for ResonaApp {
                 if is_modal_active {
                     ui.disable();
                 }
+                let has_data = self.project.spectrum_real.is_some() || self.project.fid_raw.is_some();
                 show_side_panel(
                     ui,
                     &self.project.metadata,
                     &self.project.state.ft_settings,
                     &mut self.project.state.j_couplings,
                     &mut self.selected_j_idx,
+                    has_data,
                 );
             });
 
@@ -1528,10 +1662,207 @@ impl eframe::App for ResonaApp {
                                 t.ppm_max = p_max;
                                 t.y_min = y_min;
                                 t.y_max = y_max;
+                                self.last_transform_y = Some((t.y_min, t.y_max));
                                 self.status_message = "Zoom undone (double-click)".to_string();
                             } else {
                                 do_reset_zoom = true;
                                 self.status_message = "Zoom reset (double-click)".to_string();
+                            }
+                        }
+
+                        // --- キーボード＆マウスホイール操作 ---
+                        let wants_kbd = ctx.wants_keyboard_input();
+                        if !wants_kbd {
+                            // 1. Backspace で Zoom を 1 つ戻す
+                            if ctx.input(|i| i.key_pressed(Key::Backspace)) {
+                                if let Some((p_min, p_max, y_min, y_max)) = self.zoom_history.pop() {
+                                    t.ppm_min = p_min;
+                                    t.ppm_max = p_max;
+                                    t.y_min = y_min;
+                                    t.y_max = y_max;
+                                    self.last_transform_y = Some((t.y_min, t.y_max));
+                                    self.status_message = "Zoom undone (Backspace)".to_string();
+                                } else {
+                                    do_reset_zoom = true;
+                                    self.status_message = "Zoom reset (Backspace)".to_string();
+                                }
+                            }
+
+                            // 2. Z / X / S で一時 Zoom (押している間だけアクティブ、離すと復帰、他キーや修飾キーなし時限定)
+                            let has_modifiers = ctx.input(|i| i.modifiers.any());
+                            if !has_modifiers {
+                                let z_down = ctx.input(|i| i.key_down(Key::Z));
+                                let x_down = ctx.input(|i| i.key_down(Key::X));
+                                let s_down = ctx.input(|i| i.key_down(Key::S));
+
+                                if z_down || x_down || s_down {
+                                    if self.temp_zoom_saved.is_none() {
+                                        self.temp_zoom_saved = Some(self.active_zoom);
+                                    }
+                                    let target_tool = if z_down {
+                                        ZoomTool::Rect
+                                    } else if x_down {
+                                        ZoomTool::X
+                                    } else {
+                                        ZoomTool::Y
+                                    };
+                                    if self.active_zoom != Some(target_tool) {
+                                        self.active_zoom = Some(target_tool);
+                                        self.action_state.clear_submodes();
+                                    }
+                                } else if let Some(saved) = self.temp_zoom_saved.take() {
+                                    self.active_zoom = saved;
+                                }
+                            } else if let Some(saved) = self.temp_zoom_saved.take() {
+                                self.active_zoom = saved;
+                            }
+
+                            // 3. 矢印キー（← / →）によるデータ範囲内スクロール、および（↑ / ↓）による Y-Scale (%) 調整
+                            let is_left = ctx.input(|i| i.key_down(Key::ArrowLeft));
+                            let is_right = ctx.input(|i| i.key_down(Key::ArrowRight));
+                            let is_up = ctx.input(|i| i.key_down(Key::ArrowUp));
+                            let is_down = ctx.input(|i| i.key_down(Key::ArrowDown));
+
+                            let pressed_left = ctx.input(|i| i.key_pressed(Key::ArrowLeft));
+                            let pressed_right = ctx.input(|i| i.key_pressed(Key::ArrowRight));
+                            let pressed_up = ctx.input(|i| i.key_pressed(Key::ArrowUp));
+                            let pressed_down = ctx.input(|i| i.key_pressed(Key::ArrowDown));
+
+                            let any_arrow_down = is_left || is_right || is_up || is_down;
+                            let dt = (ctx.input(|i| i.stable_dt) as f64).min(0.1);
+
+                            if any_arrow_down {
+                                ctx.request_repaint();
+                                self.arrow_key_hold_time += dt;
+
+                                let is_shift = ctx.input(|i| i.modifiers.shift);
+                                let shift_mult = if is_shift { 3.0 } else { 1.0 };
+
+                                // 長押し時の加速 (0.15秒後から最大3倍まで加速)
+                                let accel_mult = if self.arrow_key_hold_time > 0.15 {
+                                    let progress = ((self.arrow_key_hold_time - 0.15) / 0.8).clamp(0.0, 1.0);
+                                    1.0 + (progress * progress) * 2.0
+                                } else {
+                                    1.0
+                                };
+
+                                // 3a. 左右キー: データ範囲 (PPM端) を超えないようにスクロール & クランプ
+                                if is_left || is_right {
+                                    let x_span = (t.ppm_max - t.ppm_min).abs();
+                                    let continuous_rate = 0.6 * shift_mult * accel_mult * dt;
+                                    let step_x_cont = x_span * continuous_rate;
+                                    let discrete_rate = 0.05 * shift_mult;
+                                    let step_x_disc = x_span * discrete_rate;
+
+                                    let dx = if is_left {
+                                        if pressed_left { step_x_disc } else { step_x_cont }
+                                    } else {
+                                        -(if pressed_right { step_x_disc } else { step_x_cont })
+                                    };
+
+                                    t.ppm_min += dx;
+                                    t.ppm_max += dx;
+
+                                    // データ範囲でクランプ
+                                    let (data_min_ppm, data_max_ppm) = match self.project.ppm {
+                                        Some(ref p) if !p.is_empty() => {
+                                            let p0 = p[0];
+                                            let p1 = p[p.len() - 1];
+                                            (p0.min(p1), p0.max(p1))
+                                        }
+                                        _ => (-10.0, 200.0),
+                                    };
+
+                                    let cur_min = t.ppm_min.min(t.ppm_max);
+                                    let cur_max = t.ppm_min.max(t.ppm_max);
+                                    let width = cur_max - cur_min;
+                                    let data_width = data_max_ppm - data_min_ppm;
+
+                                    if width < data_width {
+                                        let is_desc = t.ppm_min > t.ppm_max;
+                                        if cur_max > data_max_ppm {
+                                            let new_max = data_max_ppm;
+                                            let new_min = data_max_ppm - width;
+                                            if is_desc {
+                                                t.ppm_min = new_max;
+                                                t.ppm_max = new_min;
+                                            } else {
+                                                t.ppm_min = new_min;
+                                                t.ppm_max = new_max;
+                                            }
+                                        } else if cur_min < data_min_ppm {
+                                            let new_min = data_min_ppm;
+                                            let new_max = data_min_ppm + width;
+                                            if is_desc {
+                                                t.ppm_min = new_max;
+                                                t.ppm_max = new_min;
+                                            } else {
+                                                t.ppm_min = new_min;
+                                                t.ppm_max = new_max;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 3b. 上下キー: Y-Scale (%) Max / Min 調整
+                                if is_up || is_down {
+                                    let max_intensity = self.project.max_intensity().max(1e-6);
+                                    if is_shift {
+                                        // Shift + 上下: Y-scale Min(%) を加速調整
+                                        let step = if pressed_up || pressed_down { 2.0 } else { 25.0 * accel_mult * dt };
+                                        if is_up {
+                                            self.y_min_scale = (self.y_min_scale + step).clamp(0.0, 10000.0);
+                                        } else {
+                                            self.y_min_scale = (self.y_min_scale - step).clamp(0.0, 10000.0);
+                                        }
+                                    } else {
+                                        // 上下: Y-scale Max(%) を加速調整
+                                        let step = if pressed_up || pressed_down { 2.5 } else { 35.0 * accel_mult * dt };
+                                        if is_up {
+                                            self.y_max_scale = (self.y_max_scale + step).clamp(1.0, 10000.0);
+                                        } else {
+                                            self.y_max_scale = (self.y_max_scale - step).clamp(1.0, 10000.0);
+                                        }
+                                    }
+                                    let top_pct = self.y_max_scale.max(1.0);
+                                    t.y_max = max_intensity * (100.0 / top_pct);
+                                    t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                                    self.last_transform_y = Some((t.y_min, t.y_max));
+                                }
+                            } else {
+                                self.arrow_key_hold_time = 0.0;
+                            }
+                        }
+
+                        // 4. マウスホイール (通常: Y-scale Max, Shift: Y-scale Min)
+                        if response.hovered() {
+                            let scroll_y = ctx.input(|i| i.raw_scroll_delta.y) as f64;
+                            if scroll_y.abs() > 0.1 {
+                                let is_shift = ctx.input(|i| i.modifiers.shift);
+                                let max_intensity = self.project.max_intensity().max(1e-6);
+                                if is_shift {
+                                    // Shift + ホイール: Min (%) 調整
+                                    let delta = (scroll_y / 30.0).clamp(-10.0, 10.0) * 2.0;
+                                    let new_min = (self.y_min_scale + delta).clamp(0.0, 10000.0);
+                                    if (new_min - self.y_min_scale).abs() > 1e-4 {
+                                        self.y_min_scale = new_min;
+                                        let top_pct = self.y_max_scale.max(1.0);
+                                        t.y_max = max_intensity * (100.0 / top_pct);
+                                        t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                                        self.last_transform_y = Some((t.y_min, t.y_max));
+                                    }
+                                } else {
+                                    // 通常ホイール: Max (%) 調整
+                                    let factor = 1.10_f64.powf(scroll_y / 50.0);
+                                    let new_max_scale = (self.y_max_scale * factor).clamp(1.0, 10000.0);
+                                    if (new_max_scale - self.y_max_scale).abs() > 1e-4 {
+                                        self.y_max_scale = new_max_scale;
+                                        let top_pct = self.y_max_scale.max(1.0);
+                                        t.y_max = max_intensity * (100.0 / top_pct);
+                                        t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                                        self.last_transform_y = Some((t.y_min, t.y_max));
+                                    }
+                                }
                             }
                         }
 
@@ -1545,24 +1876,23 @@ impl eframe::App for ResonaApp {
                             && self.action_state.integrate_submode == IntegrateSubMode::Delete
                             && self.active_zoom.is_none();
                         let is_multiview_mode = self.mode == Some(AppMode::Multiview) && self.active_zoom.is_none();
-                        let is_multiview_edit_mode = is_multiview_mode && self.action_state.multiview_submode == MultiviewSubMode::Edit;
                         let is_multiview_delete_mode = is_multiview_mode && self.action_state.multiview_submode == MultiviewSubMode::Delete;
                         let thresh_val = self.action_state.peak_threshold;
                         let mut near_threshold = false;
 
                     // Multiview ホバー判定 (外側8px枠線ゾーンまで検知)
                     self.hovered_multiview_id = None;
-                    if is_multiview_mode && (is_multiview_edit_mode || is_multiview_delete_mode) {
+                    if is_multiview_mode {
                         if let Some(pos) = pointer_pos {
                             for mv in self.project.state.multiviews.iter().rev() {
                                 if is_multiview_delete_mode {
                                     let rect = Rect::from_min_size(Pos2::new(mv.geometry.x, mv.geometry.y), egui::vec2(mv.geometry.w, mv.geometry.h));
                                     if rect.expand(6.0).contains(pos) {
                                         self.hovered_multiview_id = Some(mv.id.clone());
-                                        ctx.set_cursor_icon(egui::CursorIcon::NoDrop);
+                                        ctx.set_cursor_icon(egui::CursorIcon::Default);
                                         break;
                                     }
-                                } else if is_multiview_edit_mode {
+                                } else {
                                     if let Some(mode) = detect_multiview_drag_mode(pos, &mv.geometry) {
                                         self.hovered_multiview_id = Some(mv.id.clone());
                                         let cursor = match mode {
@@ -1602,7 +1932,52 @@ impl eframe::App for ResonaApp {
                         }
                     }
 
-                    if response.clicked_by(egui::PointerButton::Primary) {
+                    if response.double_clicked() {
+                        if let Some(pos) = pointer_pos {
+                            if is_multiview_mode && !is_multiview_delete_mode {
+                                for mv in self.project.state.multiviews.iter().rev() {
+                                    let rect = Rect::from_min_size(Pos2::new(mv.geometry.x, mv.geometry.y), egui::vec2(mv.geometry.w, mv.geometry.h));
+                                    if rect.contains(pos) {
+                                        let p_min = mv.src_x_min.min(mv.src_x_max);
+                                        let p_max = mv.src_x_min.max(mv.src_x_max);
+                                        let inset_max = if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                                            let mut mx = 0.0_f64;
+                                            for i in 0..ppm.len().min(spec.len()) {
+                                                let p = ppm[i];
+                                                if p >= p_min && p <= p_max {
+                                                    if spec[i] > mx {
+                                                        mx = spec[i];
+                                                    }
+                                                }
+                                            }
+                                            if mx > 1e-6 { mx } else { self.project.max_intensity().max(1.0) }
+                                        } else {
+                                            1.0
+                                        };
+
+                                        let (y_max_scale, y_min_scale) = if let (Some(cur_ymax), Some(cur_ymin)) = (mv.src_y_max, mv.src_y_min) {
+                                            let top = if cur_ymax > 1e-6 { (100.0 * inset_max / cur_ymax).clamp(1.0, 10000.0) } else { 80.0 };
+                                            let min = (100.0 * (-cur_ymin) / inset_max).clamp(0.0, 10000.0);
+                                            (top, min)
+                                        } else {
+                                            (80.0, 10.0)
+                                        };
+
+                                        self.multiview_yscale_dialog_state = MultiviewYScaleDialogState {
+                                            open: true,
+                                            target_id: Some(mv.id.clone()),
+                                            target_label: format!("Inset: {:.3} ~ {:.3} ppm", mv.src_x_max, mv.src_x_min),
+                                            auto_y: mv.src_y_max.is_none(),
+                                            max_peak_intensity: inset_max,
+                                            y_max_scale,
+                                            y_min_scale,
+                                        };
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else if response.clicked_by(egui::PointerButton::Primary) {
                         if let Some(pos) = pointer_pos {
                             if plot_rect.contains(pos) && pos.y <= axis_y {
                                 let (click_ppm, _) = t.screen_to_data(pos);
@@ -1618,7 +1993,7 @@ impl eframe::App for ResonaApp {
                                             self.project.push_history();
                                             self.status_message = "Deleted multiview inset".to_string();
                                         }
-                                    } else if is_multiview_edit_mode {
+                                    } else {
                                         let is_shift = ctx.input(|i| i.modifiers.shift);
                                         if let Some(ref hid) = self.hovered_multiview_id {
                                             if is_shift {
@@ -1738,17 +2113,15 @@ impl eframe::App for ResonaApp {
                     }
 
                     // Multiview 選択中の Delete キー削除 (ezNMR lines 401-407準拠)
-                    if (ctx.input(|i| i.key_pressed(Key::Delete)) || ctx.input(|i| i.key_pressed(Key::Backspace)))
+                    if ctx.input(|i| i.key_pressed(Key::Delete))
                         && is_multiview_mode
-                        && is_multiview_edit_mode
+                        && !self.selected_multiview_ids.is_empty()
                     {
-                        if !self.selected_multiview_ids.is_empty() {
-                            let count = self.selected_multiview_ids.len();
-                            self.project.state.multiviews.retain(|m| !self.selected_multiview_ids.contains(&m.id));
-                            self.selected_multiview_ids.clear();
-                            self.project.push_history();
-                            self.status_message = format!("Deleted {} multiview inset(s) (Delete key)", count);
-                        }
+                        let count = self.selected_multiview_ids.len();
+                        self.project.state.multiviews.retain(|m| !self.selected_multiview_ids.contains(&m.id));
+                        self.selected_multiview_ids.clear();
+                        self.project.push_history();
+                        self.status_message = format!("Deleted {} multiview inset(s) (Delete key)", count);
                     }
 
                     if let Some(pos) = pointer_pos {
@@ -1758,7 +2131,7 @@ impl eframe::App for ResonaApp {
                         // Delete サブモード時のホバー判定
                         if is_integrate_delete_mode && plot_rect.contains(pos) && pos.y <= axis_y {
                             if let Some(item) = self.project.state.integrations.iter().find(|it| it.contains_ppm(cur_ppm)) {
-                                ctx.set_cursor_icon(egui::CursorIcon::NoDrop);
+                                ctx.set_cursor_icon(egui::CursorIcon::Default);
                                 let p_min = item.start_ppm.min(item.end_ppm);
                                 let p_max = item.start_ppm.max(item.end_ppm);
                                 self.status_message = format!("Click to delete integration [{:.2} ~ {:.2} ppm]", p_min, p_max);
@@ -1850,53 +2223,56 @@ impl eframe::App for ResonaApp {
                                 self.action_state.peak_threshold = new_thresh;
                                 self.project.state.peak_threshold = Some(new_thresh);
                             }
-                        } else if is_multiview_edit_mode {
+                        } else if is_multiview_mode && !is_multiview_delete_mode {
                             self.is_dragging_threshold = false;
                             let origin = ctx.input(|i| i.pointer.press_origin()).or(pointer_pos);
+                            let mut hit_mv = None;
                             if let Some(pos) = origin {
-                                let mut hit_mv = None;
                                 for mv in self.project.state.multiviews.iter().rev() {
                                     if let Some(mode) = detect_multiview_drag_mode(pos, &mv.geometry) {
                                         hit_mv = Some((mv.id.clone(), mode, mv.geometry));
                                         break;
                                     }
                                 }
-                                if let Some((m_id, mode, geom)) = hit_mv {
-                                    let is_shift = ctx.input(|i| i.modifiers.shift);
-                                    if !self.selected_multiview_ids.contains(&m_id) {
-                                        if !is_shift {
-                                            self.selected_multiview_ids.clear();
-                                        }
-                                        self.selected_multiview_ids.insert(m_id.clone());
+                            }
+                            if let (Some(pos), Some((m_id, mode, geom))) = (origin, hit_mv) {
+                                let is_shift = ctx.input(|i| i.modifiers.shift);
+                                if !self.selected_multiview_ids.contains(&m_id) {
+                                    if !is_shift {
+                                        self.selected_multiview_ids.clear();
                                     }
-
-                                    // 移動モードの場合は選択中の全アイテムを初期位置とともに保持
-                                    let items = if mode == MultiviewDragMode::Move {
-                                        self.project
-                                            .state
-                                            .multiviews
-                                            .iter()
-                                            .filter(|m| self.selected_multiview_ids.contains(&m.id))
-                                            .map(|m| MultiviewDragItemState {
-                                                id: m.id.clone(),
-                                                start_rect: m.geometry,
-                                            })
-                                            .collect()
-                                    } else {
-                                        vec![MultiviewDragItemState {
-                                            id: m_id.clone(),
-                                            start_rect: geom,
-                                        }]
-                                    };
-
-                                    self.multiview_drag = Some(MultiviewDragState {
-                                        item_id: m_id,
-                                        mode,
-                                        start_rect: geom,
-                                        start_pointer: pos,
-                                        items,
-                                    });
+                                    self.selected_multiview_ids.insert(m_id.clone());
                                 }
+
+                                // 移動モードの場合は選択中の全アイテムを初期位置とともに保持
+                                let items = if mode == MultiviewDragMode::Move {
+                                    self.project
+                                        .state
+                                        .multiviews
+                                        .iter()
+                                        .filter(|m| self.selected_multiview_ids.contains(&m.id))
+                                        .map(|m| MultiviewDragItemState {
+                                            id: m.id.clone(),
+                                            start_rect: m.geometry,
+                                        })
+                                        .collect()
+                                } else {
+                                    vec![MultiviewDragItemState {
+                                        id: m_id.clone(),
+                                        start_rect: geom,
+                                    }]
+                                };
+
+                                self.multiview_drag = Some(MultiviewDragState {
+                                    item_id: m_id,
+                                    mode,
+                                    start_rect: geom,
+                                    start_pointer: pos,
+                                    items,
+                                });
+                            } else {
+                                self.drag_start = origin;
+                                self.drag_current = pointer_pos;
                             }
                         } else if is_integrate_edit_mode {
                             self.is_dragging_threshold = false;
@@ -2259,6 +2635,68 @@ impl eframe::App for ResonaApp {
                                                 egui::FontId::proportional(11.5),
                                                 Color32::from_rgb(225, 29, 72),
                                             );
+
+                                            // 4. ドラッグ中のリアルタイム積分曲線描画
+                                            if (start.x - curr.x).abs() > 4.0 {
+                                                if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                                                    let temp_item = IntegrationItem {
+                                                        id: "preview".to_string(),
+                                                        start_ppm: p_s,
+                                                        end_ppm: p_e,
+                                                        y_start: 0.0,
+                                                        y_end: 0.0,
+                                                    };
+                                                    let scale = if self.project.state.integrations.is_empty() || self.project.state.integration_scale == 1.0 {
+                                                        if let Some(r0) = compute_integral(spec, ppm, &temp_item, 1.0, 1.0, 0.03) {
+                                                            let max_spec = self.project.max_intensity();
+                                                            if r0.total_area > 1e-12 && max_spec > 0.0 {
+                                                                (max_spec * 0.35) / r0.total_area
+                                                            } else {
+                                                                1.0
+                                                            }
+                                                        } else {
+                                                            1.0
+                                                        }
+                                                    } else {
+                                                        self.project.state.integration_scale
+                                                    };
+                                                    let ref_factor = if self.project.state.integration_ref_area > 1e-12 {
+                                                        self.project.state.integration_ref_value / self.project.state.integration_ref_area
+                                                    } else {
+                                                        1.0
+                                                    };
+                                                    if let Some(res) = compute_integral(spec, ppm, &temp_item, scale, ref_factor, 0.03) {
+                                                        if res.ppm.len() > 1 && res.ppm.len() == res.curve_y.len() {
+                                                            let mut pts: Vec<Pos2> = Vec::with_capacity(res.ppm.len());
+                                                            for i in 0..res.ppm.len() {
+                                                                let pos = t.data_to_screen(res.ppm[i], res.curve_y[i]);
+                                                                let clamped_pos = Pos2::new(pos.x, pos.y.clamp(plot_rect.min.y, plot_rect.max.y));
+                                                                pts.push(clamped_pos);
+                                                            }
+                                                            if pts.len() > 1 {
+                                                                painter.add(egui::epaint::PathShape::line(
+                                                                    pts.clone(),
+                                                                    Stroke::new(2.0_f32, self.plot_style.integral_color),
+                                                                ));
+
+                                                                // 5. ドラッグ中のリアルタイム積分数値ラベル (縦書き90度回転)
+                                                                let mid_x = (start.x + curr.x) * 0.5;
+                                                                let val_text = format!("{:.1$}", res.normalized_value, self.plot_style.integral_decimals);
+                                                                let font_intg = egui::FontId::proportional(11.0);
+                                                                let galley = painter.layout_no_wrap(val_text, font_intg, self.plot_style.integral_color);
+                                                                let text_len = galley.size().x;
+                                                                let text_h = galley.size().y;
+                                                                let min_screen_y = pts.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+                                                                let start_y = (min_screen_y - 4.0 - text_len).max(plot_rect.min.y + 4.0);
+                                                                let text_pos = Pos2::new(mid_x + text_h * 0.5, start_y);
+                                                                let ts = egui::epaint::TextShape::new(text_pos, galley, self.plot_style.integral_color)
+                                                                    .with_angle(std::f32::consts::FRAC_PI_2);
+                                                                painter.add(ts);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                         IntegrateSubMode::Delete => {
                                             painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(220, 38, 38, 50));
@@ -2280,36 +2718,33 @@ impl eframe::App for ResonaApp {
                                     }
                                 }
                                 AppMode::Multiview => {
-                                    let p1 = t.screen_to_data(start).0;
-                                    let p2 = t.screen_to_data(curr).0;
-                                    let p_high = p1.max(p2);
-                                    let p_low = p1.min(p2);
-                                    let delta_p = p_high - p_low;
+                                    if self.action_state.multiview_submode != MultiviewSubMode::Delete {
+                                        let p1 = t.screen_to_data(start).0;
+                                        let p2 = t.screen_to_data(curr).0;
+                                        let p_high = p1.max(p2);
+                                        let p_low = p1.min(p2);
+                                        let delta_p = p_high - p_low;
 
-                                    match self.action_state.multiview_submode {
-                                        MultiviewSubMode::Add => {
-                                            let min_x = start.x.min(curr.x);
-                                            let max_x = start.x.max(curr.x);
-                                            let band_rect = Rect::from_min_max(
-                                                Pos2::new(min_x, plot_rect.min.y),
-                                                Pos2::new(max_x, axis_y),
-                                            );
-                                            painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(147, 51, 234, 45));
-                                            painter.rect_stroke(band_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(147, 51, 234)));
-                                            let stroke_v = Stroke::new(1.5_f32, Color32::from_rgb(147, 51, 234));
-                                            painter.line_segment([Pos2::new(start.x, plot_rect.min.y), Pos2::new(start.x, axis_y)], stroke_v);
-                                            painter.line_segment([Pos2::new(curr.x, plot_rect.min.y), Pos2::new(curr.x, axis_y)], stroke_v);
+                                        let min_x = start.x.min(curr.x);
+                                        let max_x = start.x.max(curr.x);
+                                        let band_rect = Rect::from_min_max(
+                                            Pos2::new(min_x, plot_rect.min.y),
+                                            Pos2::new(max_x, axis_y),
+                                        );
+                                        painter.rect_filled(band_rect, 0.0, Color32::from_rgba_premultiplied(147, 51, 234, 45));
+                                        painter.rect_stroke(band_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(147, 51, 234)));
+                                        let stroke_v = Stroke::new(1.5_f32, Color32::from_rgb(147, 51, 234));
+                                        painter.line_segment([Pos2::new(start.x, plot_rect.min.y), Pos2::new(start.x, axis_y)], stroke_v);
+                                        painter.line_segment([Pos2::new(curr.x, plot_rect.min.y), Pos2::new(curr.x, axis_y)], stroke_v);
 
-                                            let label_txt = format!("{:.3} ~ {:.3} ppm (Δ={:.3})", p_high, p_low, delta_p);
-                                            painter.text(
-                                                Pos2::new((min_x + max_x) * 0.5, plot_rect.min.y + 12.0),
-                                                egui::Align2::CENTER_CENTER,
-                                                label_txt,
-                                                egui::FontId::proportional(11.5),
-                                                Color32::from_rgb(147, 51, 234),
-                                            );
-                                        }
-                                        _ => {}
+                                        let label_txt = format!("{:.3} ~ {:.3} ppm (Δ={:.3})", p_high, p_low, delta_p);
+                                        painter.text(
+                                            Pos2::new((min_x + max_x) * 0.5, plot_rect.min.y + 12.0),
+                                            egui::Align2::CENTER_CENTER,
+                                            label_txt,
+                                            egui::FontId::proportional(11.5),
+                                            Color32::from_rgb(147, 51, 234),
+                                        );
                                     }
                                 }
                                 AppMode::JCoupling => {
@@ -2544,39 +2979,40 @@ impl eframe::App for ResonaApp {
                                         let dx = (start.x - end.x).abs();
                                         let ratio = self.action_state.multiview_ratio;
 
-                                        match self.action_state.multiview_submode {
-                                            MultiviewSubMode::Add => {
-                                                if dx > 8.0 {
-                                                    let view_ppm_span = (t.ppm_max - t.ppm_min).abs().max(1e-6);
-                                                    let px_w = plot_rect.width();
-                                                    let w_main = ((p_high - p_low) / view_ppm_span) * (px_w as f64);
-                                                    let w = (240.0 + (w_main * ratio) as f32 * 0.5).clamp(240.0, 600.0);
-                                                    let h = (w * 0.70).clamp(160.0, 420.0);
-                                                    // 既存の拡大図に被らないように左上から順に空き位置を探索
-                                                    let pos = find_non_overlapping_multiview_pos(&self.project.state.multiviews, plot_rect, w, h);
-                                                    let geom = RectF {
-                                                        x: pos.x,
-                                                        y: pos.y,
-                                                        w,
-                                                        h,
-                                                    };
-                                                    let mv_id = format!("mv-{}", self.project.state.multiviews.len() + 1);
-                                                    self.project.state.multiviews.push(MultiviewItem {
-                                                        id: mv_id.clone(),
-                                                        src_x_min: p_low,
-                                                        src_x_max: p_high,
-                                                        src_y_min: None,
-                                                        src_y_max: None,
-                                                        ratio,
-                                                        geometry: geom,
-                                                    });
-                                                    self.selected_multiview_ids.clear();
-                                                    self.selected_multiview_ids.insert(mv_id);
-                                                    self.project.push_history();
-                                                    self.status_message = format!("Added multiview inset {:.3} ~ {:.3} ppm", p_high, p_low);
+                                        if self.action_state.multiview_submode != MultiviewSubMode::Delete {
+                                            if dx > 8.0 {
+                                                let view_ppm_span = (t.ppm_max - t.ppm_min).abs().max(1e-6);
+                                                let px_w = plot_rect.width();
+                                                let w_main = ((p_high - p_low) / view_ppm_span) * (px_w as f64);
+                                                let w = (240.0 + (w_main * ratio) as f32 * 0.5).clamp(240.0, 600.0);
+                                                let h = (w * 0.70).clamp(160.0, 420.0);
+                                                // 既存の拡大図に被らないように左上から順に空き位置を探索
+                                                let pos = find_non_overlapping_multiview_pos(&self.project.state.multiviews, plot_rect, w, h);
+                                                let geom = RectF {
+                                                    x: pos.x,
+                                                    y: pos.y,
+                                                    w,
+                                                    h,
+                                                };
+                                                let mv_id = format!("mv-{}", self.project.state.multiviews.len() + 1);
+                                                self.project.state.multiviews.push(MultiviewItem {
+                                                    id: mv_id.clone(),
+                                                    src_x_min: p_low,
+                                                    src_x_max: p_high,
+                                                    src_y_min: None,
+                                                    src_y_max: None,
+                                                    ratio,
+                                                    geometry: geom,
+                                                });
+                                                self.selected_multiview_ids.clear();
+                                                self.selected_multiview_ids.insert(mv_id);
+                                                if self.action_state.multiview_auto_align {
+                                                    self.adjust_y_multiviews_internal();
+                                                    self.align_multiviews_internal(plot_rect);
                                                 }
+                                                self.project.push_history();
+                                                self.status_message = format!("Added multiview inset {:.3} ~ {:.3} ppm", p_high, p_low);
                                             }
-                                            _ => {}
                                         }
                                     }
                                     AppMode::JCoupling => {
@@ -2691,8 +3127,12 @@ impl eframe::App for ResonaApp {
                         self.drag_current = None;
                         self.is_dragging_threshold = false;
                     }
-                    }
                 }
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new("No Data").size(24.0).strong().color(Color32::from_gray(160)));
+                });
+            }
 
                 if do_reset_zoom {
                     self.reset_zoom();
@@ -2744,8 +3184,11 @@ impl eframe::App for ResonaApp {
             // 1. Sensitivity を全体設定に反映
             self.project.state.auto_sensitivity = full_auto_res.sensitivity;
 
-            // 2. Full Auto パイプラインを実行 (Phase -> Baseline -> Reference -> Peak -> Integrate)
-            let report = self.project.execute_full_auto(full_auto_res.baseline_method);
+            // 2. Full Auto パイプラインを実行 (Phase -> Baseline -> Reference -> Peak -> Integrate[optional])
+            let report = self.project.execute_full_auto(
+                full_auto_res.baseline_method,
+                full_auto_res.enable_integration,
+            );
 
             // 3. アクションバー状態をプロジェクトに合わせて同期
             self.sync_action_bar_from_project();
@@ -2754,7 +3197,10 @@ impl eframe::App for ResonaApp {
             // 4. Undo 履歴にコミット
             self.project.push_history();
 
-            // 5. ステータスメッセージを更新
+            // 5. 設定保存
+            self.save_app_settings();
+
+            // 6. ステータスメッセージを更新
             self.status_message = format!(
                 "Full Auto completed: Phase (P0={:.1}°, P1={:.1}°), Baseline ({}), Ref ({}), Peaks ({}), Integrations ({})",
                 report.p0,
@@ -2782,12 +3228,27 @@ impl eframe::App for ResonaApp {
         }
 
         if let Some((text, center_ppm)) = show_jcoupling_dialog(ctx, &mut self.jcoupling_dialog_state) {
+            let sort_ppm = parse_jcoupling_sort_ppm(&text).unwrap_or(center_ppm);
             self.project.state.j_couplings.push(JCouplingResultItem {
                 text,
-                ppm: center_ppm,
+                ppm: sort_ppm,
+            });
+            self.project.state.j_couplings.sort_by(|a, b| {
+                let ppm_a = parse_jcoupling_sort_ppm(&a.text).unwrap_or(a.ppm);
+                let ppm_b = parse_jcoupling_sort_ppm(&b.text).unwrap_or(b.ppm);
+                ppm_b.partial_cmp(&ppm_a).unwrap_or(std::cmp::Ordering::Equal)
             });
             self.project.push_history();
             self.status_message = "Added J-coupling multiplet to results".to_string();
+        }
+
+        if let Some(res) = show_multiview_yscale_dialog(ctx, &mut self.multiview_yscale_dialog_state) {
+            if let Some(mv) = self.project.state.multiviews.iter_mut().find(|m| m.id == res.target_id) {
+                mv.src_y_min = res.y_min;
+                mv.src_y_max = res.y_max;
+                self.project.push_history();
+                self.status_message = format!("Updated Y-scale for inset {}", res.target_id);
+            }
         }
 
         let ref_factor = if self.project.state.integration_ref_area > 0.0 {

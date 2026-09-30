@@ -295,6 +295,27 @@ pub fn analyze_multiplet(
     top_candidates
 }
 
+/// J-coupling のテキストからソート用化学シフト値 (ppm) を抽出する。
+/// 単一化学シフト（例: "7.26 (d, ...)"）の場合はその値、
+/// 範囲表記（例: "7.27-7.25 (m, ...)"）の場合は左端（最大値）を返す。
+pub fn parse_jcoupling_sort_ppm(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    // 最初の '(' の前にある文字列を化学シフト部分とする
+    let shift_full = trimmed.split('(').next()?.trim();
+    if shift_full.is_empty() {
+        return None;
+    }
+    // "7.27-7.25" や "7.27 - 7.25" のようなハイフン区切りの場合
+    // 先頭の負符号 '-' を除外して次のハイフンを探す
+    let search_start = if shift_full.starts_with('-') { 1 } else { 0 };
+    if let Some(idx) = shift_full[search_start..].find('-') {
+        let left_part = shift_full[..search_start + idx].trim();
+        left_part.parse::<f64>().ok()
+    } else {
+        shift_full.split_whitespace().next()?.parse::<f64>().ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,4 +339,15 @@ mod tests {
         approx::assert_relative_eq!(candidates[0].j_vals[0], 7.8, epsilon = 0.1);
         assert!(candidates[0].text.contains("J = 7.8 Hz"));
     }
+
+    #[test]
+    fn test_parse_jcoupling_sort_ppm() {
+        assert_eq!(parse_jcoupling_sort_ppm("7.26 (d, J = 7.8 Hz, 1H)"), Some(7.26));
+        assert_eq!(parse_jcoupling_sort_ppm("7.27-7.25 (m, 1H)"), Some(7.27));
+        assert_eq!(parse_jcoupling_sort_ppm("7.27 - 7.25 (m, 1H)"), Some(7.27));
+        assert_eq!(parse_jcoupling_sort_ppm("-0.05--0.10 (m, 2H)"), Some(-0.05));
+        assert_eq!(parse_jcoupling_sort_ppm("-0.05 (s, 1H)"), Some(-0.05));
+        assert_eq!(parse_jcoupling_sort_ppm("invalid"), None);
+    }
 }
+

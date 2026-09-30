@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use crate::gui::dialogs::print_dialog::PrintSettings;
+use crate::gui::dialogs::FullAutoBaselineChoice;
 
 /// アプリケーション全体の永続化設定 (~/.resona/settings.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,13 +18,31 @@ pub struct AppSettings {
     #[serde(default = "default_multiview_ratio")]
     pub multiview_ratio: f64,
 
+    #[serde(default = "default_multiview_auto_align")]
+    pub multiview_auto_align: bool,
+
+    #[serde(default)]
+    pub full_auto_baseline_choice: FullAutoBaselineChoice,
+
+    #[serde(default = "default_full_auto_airpls_lambda")]
+    pub full_auto_airpls_lambda: f64,
+
+    #[serde(default = "default_full_auto_poly_order")]
+    pub full_auto_poly_order: usize,
+
+    #[serde(default)]
+    pub full_auto_integration: bool,
+
     #[serde(default)]
     pub print_settings: PrintSettings,
 }
 
 fn default_ppm_decimals() -> usize { 3 }
 fn default_integral_decimals() -> usize { 3 }
-fn default_multiview_ratio() -> f64 { 5.0 }
+fn default_multiview_ratio() -> f64 { 3.0 }
+fn default_multiview_auto_align() -> bool { true }
+fn default_full_auto_airpls_lambda() -> f64 { 8.0 }
+fn default_full_auto_poly_order() -> usize { 3 }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -32,6 +51,11 @@ impl Default for AppSettings {
             ppm_decimals: default_ppm_decimals(),
             integral_decimals: default_integral_decimals(),
             multiview_ratio: default_multiview_ratio(),
+            multiview_auto_align: default_multiview_auto_align(),
+            full_auto_baseline_choice: FullAutoBaselineChoice::default(),
+            full_auto_airpls_lambda: default_full_auto_airpls_lambda(),
+            full_auto_poly_order: default_full_auto_poly_order(),
+            full_auto_integration: false,
             print_settings: PrintSettings::default(),
         }
     }
@@ -131,7 +155,10 @@ mod tests {
         let s = AppSettings::default();
         assert_eq!(s.ppm_decimals, 3);
         assert_eq!(s.integral_decimals, 3);
-        assert!((s.multiview_ratio - 5.0).abs() < 1e-6);
+        assert!((s.multiview_ratio - 3.0).abs() < 1e-6);
+        assert!(s.multiview_auto_align);
+        assert_eq!(s.full_auto_baseline_choice, FullAutoBaselineChoice::None);
+        assert!(!s.full_auto_integration);
         assert!(s.print_settings.spectrum);
     }
 
@@ -141,6 +168,9 @@ mod tests {
         s.ppm_decimals = 4;
         s.integral_decimals = 2;
         s.multiview_ratio = 8.0;
+        s.multiview_auto_align = false;
+        s.full_auto_baseline_choice = FullAutoBaselineChoice::AirPLS;
+        s.full_auto_integration = true;
         s.print_settings.filename = false;
 
         let json = serde_json::to_string(&s).unwrap();
@@ -149,6 +179,9 @@ mod tests {
         assert_eq!(decoded.ppm_decimals, 4);
         assert_eq!(decoded.integral_decimals, 2);
         assert!((decoded.multiview_ratio - 8.0).abs() < 1e-6);
+        assert!(!decoded.multiview_auto_align);
+        assert_eq!(decoded.full_auto_baseline_choice, FullAutoBaselineChoice::AirPLS);
+        assert!(decoded.full_auto_integration);
         assert!(!decoded.print_settings.filename);
     }
 }

@@ -8,6 +8,7 @@ pub fn show_side_panel(
     ft_settings: &FtSettings,
     j_couplings: &mut Vec<JCouplingResultItem>,
     selected_j_idx: &mut Option<usize>,
+    has_data: bool,
 ) {
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
@@ -16,7 +17,19 @@ pub fn show_side_panel(
         // 1. Experimental Parameters テーブル (Python版 ezNMR 完全準拠)
         // -------------------------------------------------------------
         ui.label(RichText::new("Experimental Parameters").strong().size(11.5).color(Color32::from_rgb(70, 75, 80)));
-        render_zebra_table(ui, "meta_table", &metadata.to_display_rows());
+        if has_data {
+            render_zebra_table(ui, "meta_table", &metadata.to_display_rows());
+        } else {
+            render_zebra_table(ui, "meta_table", &[
+                ("Title", "-".to_string()),
+                ("Nucleus", "-".to_string()),
+                ("Obs. Freq.", "-".to_string()),
+                ("Spec. Width", "-".to_string()),
+                ("Points", "-".to_string()),
+                ("Scans", "-".to_string()),
+                ("Solvent", "-".to_string()),
+            ]);
+        }
 
         ui.add_space(2.0);
         ui.separator();
@@ -26,20 +39,30 @@ pub fn show_side_panel(
         // 2. FT Settings テーブル (Zebra stripe)
         // -------------------------------------------------------------
         ui.label(RichText::new("FT Settings").strong().size(11.5).color(Color32::from_rgb(70, 75, 80)));
-        render_zebra_table(ui, "ft_table", &[
-            ("Window Type", match ft_settings.window {
-                WindowFunction::None => "None".to_string(),
-                WindowFunction::Exponential { lb } => format!("Exponential ({} Hz)", lb),
-                WindowFunction::Gaussian { g1, g2, g3 } => format!("Gaussian (g1={}, g2={}, g3={})", g1, g2, g3),
-            }),
-            ("Zero Fill", format!("{}x", ft_settings.zf_factor)),
-            ("Digital Resolution", {
-                let eff_points = (metadata.points * ft_settings.zf_factor).max(1);
-                format!("{:.4} Hz/pt", metadata.spectral_width_hz / (eff_points as f64))
-            }),
-            ("Group Delay", if ft_settings.remove_digital_filter { "Removed".to_string() } else { "Kept".to_string() }),
-            ("Filter Delay", metadata.digital_filter_delay.map(|d| format!("{:.4} pts", d)).unwrap_or_else(|| "-".to_string())),
-        ]);
+        if has_data {
+            render_zebra_table(ui, "ft_table", &[
+                ("Window Type", match ft_settings.window {
+                    WindowFunction::None => "None".to_string(),
+                    WindowFunction::Exponential { lb } => format!("Exponential ({} Hz)", lb),
+                    WindowFunction::Gaussian { g1, g2, g3 } => format!("Gaussian (g1={}, g2={}, g3={})", g1, g2, g3),
+                }),
+                ("Zero Fill", format!("{}x", ft_settings.zf_factor)),
+                ("Digital Resolution", {
+                    let eff_points = (metadata.points * ft_settings.zf_factor).max(1);
+                    format!("{:.4} Hz/pt", metadata.spectral_width_hz / (eff_points as f64))
+                }),
+                ("Group Delay", if ft_settings.remove_digital_filter { "Removed".to_string() } else { "Kept".to_string() }),
+                ("Filter Delay", metadata.digital_filter_delay.map(|d| format!("{:.4} pts", d)).unwrap_or_else(|| "-".to_string())),
+            ]);
+        } else {
+            render_zebra_table(ui, "ft_table", &[
+                ("Window Type", "-".to_string()),
+                ("Zero Fill", "-".to_string()),
+                ("Digital Resolution", "-".to_string()),
+                ("Group Delay", "-".to_string()),
+                ("Filter Delay", "-".to_string()),
+            ]);
+        }
 
         ui.add_space(2.0);
         ui.separator();
@@ -50,14 +73,7 @@ pub fn show_side_panel(
         // -------------------------------------------------------------
         ui.label(RichText::new(format!("J-Couplings ({})", j_couplings.len())).strong().size(11.5).color(Color32::from_rgb(70, 75, 80)));
 
-        if j_couplings.is_empty() {
-            ui.label(
-                RichText::new("No multiplets analyzed yet\nSelect J Coupling and drag over peak")
-                    .size(10.5)
-                    .italics()
-                    .color(Color32::from_gray(140)),
-            );
-        } else {
+        if !j_couplings.is_empty() {
             let mut remove_idx = None;
 
             for (i, jc) in j_couplings.iter().enumerate() {

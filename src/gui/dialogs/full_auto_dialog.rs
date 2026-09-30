@@ -1,10 +1,12 @@
 use egui::{vec2, Button, Color32, ComboBox, DragValue, RichText, Stroke, Window};
+use serde::{Deserialize, Serialize};
 
 use crate::core::analysis::AutoSensitivity;
 use crate::core::baseline::BaselineMethod;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FullAutoBaselineChoice {
+    #[default]
     None,
     AirPLS,
     Polynomial,
@@ -17,6 +19,7 @@ pub struct FullAutoDialogState {
     pub baseline_choice: FullAutoBaselineChoice,
     pub airpls_log_lambda: f64,
     pub poly_order: usize,
+    pub enable_integration: bool,
 }
 
 impl Default for FullAutoDialogState {
@@ -27,6 +30,7 @@ impl Default for FullAutoDialogState {
             baseline_choice: FullAutoBaselineChoice::None,
             airpls_log_lambda: 8.0,
             poly_order: 3,
+            enable_integration: false,
         }
     }
 }
@@ -36,6 +40,7 @@ impl Default for FullAutoDialogState {
 pub struct FullAutoResult {
     pub sensitivity: AutoSensitivity,
     pub baseline_method: BaselineMethod,
+    pub enable_integration: bool,
 }
 
 /// Full Auto Process ダイアログを表示する (最低限のUI・ラベルとRun/Cancelボタンのみ)
@@ -104,7 +109,14 @@ pub fn show_full_auto_dialog(
 
             ui.separator();
 
-            // 3. ボタン行 (Cancel & Run)
+            // 3. Integration 設定
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut state.enable_integration, RichText::new("Integration").strong().size(12.5));
+            });
+
+            ui.separator();
+
+            // 4. ボタン行 (Cancel & Run)
             ui.horizontal(|ui| {
                 // Cancel ボタン
                 let btn_cancel = Button::new(RichText::new("Cancel").size(12.5).color(Color32::from_rgb(73, 80, 87)))
@@ -141,6 +153,7 @@ pub fn show_full_auto_dialog(
                         result = Some(FullAutoResult {
                             sensitivity: state.sensitivity,
                             baseline_method,
+                            enable_integration: state.enable_integration,
                         });
                         state.open = false;
                     }

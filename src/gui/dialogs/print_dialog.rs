@@ -12,6 +12,9 @@ use crate::core::{
     compute_integral, AcquisitionMetadata, FtSettings, IntegrationItem, JCouplingResultItem,
     MultiviewItem, PeakItem,
 };
+use crate::gui::dialogs::print_style_dialog::{
+    show_print_style_dialog, PrintStyleDialogState, PrintStyleSettings,
+};
 use crate::gui::plot::transform::PlotTransform;
 
 /// 印刷の向き設定
@@ -86,6 +89,9 @@ pub struct PrintDialogState {
     pub available_printers: Arc<Mutex<Option<Vec<SystemPrinter>>>>,
     pub is_loading_printers: bool,
     pub status_message: Option<(String, bool)>, // (メッセージ, is_error)
+    pub open_counter: usize,
+    pub style_settings: PrintStyleSettings,
+    pub style_dialog_state: PrintStyleDialogState,
 }
 
 impl Default for PrintDialogState {
@@ -96,6 +102,9 @@ impl Default for PrintDialogState {
             available_printers: Arc::new(Mutex::new(None)),
             is_loading_printers: false,
             status_message: None,
+            open_counter: 0,
+            style_settings: PrintStyleSettings::load(),
+            style_dialog_state: PrintStyleDialogState::default(),
         }
     }
 }
@@ -104,6 +113,7 @@ impl PrintDialogState {
     /// ダイアログを開き、非同期でプリンター一覧を検出する
     pub fn open(&mut self) {
         self.is_open = true;
+        self.open_counter += 1;
         self.status_message = None;
 
         let printers_arc = Arc::clone(&self.available_printers);
@@ -415,8 +425,10 @@ pub fn show_print_dialog(
 
     let mut is_open = state.is_open;
     let mut should_close = false;
+    let is_style_open = state.style_dialog_state.is_open;
 
-    Window::new(RichText::new("Print Settings").strong())
+    Window::new(RichText::new("Print Preview").strong())
+        .id(egui::Id::new("print_preview_dialog_window").with(state.open_counter))
         .open(&mut is_open)
         .resizable(true)
         .default_width(740.0)
@@ -424,6 +436,9 @@ pub fn show_print_dialog(
         .min_width(620.0)
         .min_height(500.0)
         .show(ctx, |ui| {
+            if is_style_open {
+                ui.disable();
+            }
             ui.spacing_mut().item_spacing.y = 8.0;
 
             // 1. 上部コントロール (プリンター選択 & ページ設定)
@@ -528,6 +543,7 @@ pub fn show_print_dialog(
                         if ui.add(btn_print).clicked() {
                             match execute_native_print(
                                 &state.settings,
+                                &state.style_settings,
                                 main_transform,
                                 ppm,
                                 spectrum,
@@ -562,8 +578,9 @@ pub fn show_print_dialog(
                                 .set_file_name("resona_report.svg")
                                 .save_file()
                             {
-                                let svg = generate_complete_page_svg(
+                                let svg = generate_complete_page_svg_with_style(
                                     &state.settings,
+                                    &state.style_settings,
                                     main_transform,
                                     ppm,
                                     spectrum,
@@ -593,6 +610,16 @@ pub fn show_print_dialog(
                         }
                     });
 
+                    // 右詰めで Print Settings ボタン
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn_settings = Button::new(RichText::new("Print Settings...").size(12.0))
+                            .min_size(vec2(105.0, 24.0))
+                            .rounding(3.0_f32);
+                        if ui.add(btn_settings).clicked() {
+                            state.style_dialog_state.is_open = true;
+                        }
+                    });
+
                     // ステータス / エラーメッセージ表示
                     if let Some((ref msg, is_err)) = state.status_message {
                         if is_err {
@@ -610,6 +637,7 @@ pub fn show_print_dialog(
                 ui,
                 avail_size,
                 &state.settings,
+                &state.style_settings,
                 main_transform,
                 ppm,
                 spectrum,
@@ -626,6 +654,8 @@ pub fn show_print_dialog(
             );
         });
 
+    show_print_style_dialog(ctx, &mut state.style_dialog_state, &mut state.style_settings);
+
     if should_close {
         is_open = false;
     }
@@ -637,6 +667,7 @@ fn render_realtime_preview(
     ui: &mut Ui,
     avail_size: egui::Vec2,
     settings: &PrintSettings,
+    style: &PrintStyleSettings,
     main_transform: Option<&PlotTransform>,
     ppm: Option<&Array1<f64>>,
     spectrum: Option<&Array1<f64>>,
@@ -744,7 +775,7 @@ fn render_realtime_preview(
                 if points.len() > 1 {
                     painter.add(egui::epaint::PathShape::line(
                         points,
-                        Stroke::new(0.85_f32, Color32::BLACK),
+                        Stroke::new(style.main_spectrum.line_width, style.main_spectrum.line_color.to_color32()),
                     ));
                 }
             }
@@ -843,13 +874,13 @@ fn render_realtime_preview(
                                 }
                                 painter.add(egui::epaint::PathShape::line(
                                     pts,
-                                    Stroke::new(1.2_f32, Color32::from_rgb(225, 29, 72)),
+                                    Stroke::new(style.main_spectrum.integral_width, style.main_spectrum.integral_color.to_color32()),
                                 ));
 
                                 let mid_x = (sx_start + sx_end) * 0.5;
                                 let val_text = format!("{:.1$}", res.normalized_value, settings.integral_decimals);
                                 let font_intg = FontId::new(7.0, FontFamily::Proportional);
-                                let color_intg = Color32::from_rgb(217, 27, 66);
+                                let color_intg = style.main_spectrum.integral_color.to_color32();
                                 let galley = painter.layout_no_wrap(val_text, font_intg, color_intg);
                                 let text_len = galley.size().x;
                                 let text_h = galley.size().y;
@@ -910,7 +941,7 @@ fn render_realtime_preview(
                         let pk_sy = t.data_to_screen(pk.ppm, pk.intensity).y;
                         let y_start = (axis_y - 6.0).max(pk_sy + 1.5);
 
-                        let stroke_lead = Stroke::new(0.55_f32, Color32::from_rgb(110, 115, 120));
+                        let stroke_lead = Stroke::new(style.main_spectrum.peak_lead_width, style.main_spectrum.peak_lead_color.to_color32());
                         painter.line_segment([Pos2::new(px, y_start), Pos2::new(px, y_elbow)], stroke_lead);
                         painter.line_segment([Pos2::new(px, y_elbow), Pos2::new(tx, y_text_start - 2.5)], stroke_lead);
                         painter.line_segment([Pos2::new(tx, y_text_start - 2.5), Pos2::new(tx, y_text_start)], stroke_lead);
@@ -990,7 +1021,7 @@ fn render_realtime_preview(
                         if mv_points.len() > 1 {
                             painter.add(egui::epaint::PathShape::line(
                                 mv_points,
-                                Stroke::new(0.85_f32, Color32::BLACK),
+                                Stroke::new(style.multiview.line_width, style.multiview.line_color.to_color32()),
                             ));
                         }
 
@@ -1017,14 +1048,14 @@ fn render_realtime_preview(
                                         if intg_pts.len() > 1 {
                                             painter.add(egui::epaint::PathShape::line(
                                                 intg_pts,
-                                                Stroke::new(1.3_f32, Color32::from_rgb(217, 27, 66)),
+                                                Stroke::new(style.multiview.integral_width, style.multiview.integral_color.to_color32()),
                                             ));
                                             let mid_p = (i_min.max(mv_src_min) + i_max.min(mv_src_max)) * 0.5;
                                             let mid_x = mv_ppm_to_x(mid_p);
                                             let top_y = mv_y_to_y(y_min_adj + 0.70 * h_diff);
                                             let val_text = format!("{:.1$}", res.normalized_value, settings.integral_decimals);
                                             let font_intg = FontId::new(6.5, FontFamily::Proportional);
-                                            let color_intg = Color32::from_rgb(217, 27, 66);
+                                            let color_intg = style.multiview.integral_color.to_color32();
                                             let galley = painter.layout_no_wrap(val_text, font_intg, color_intg);
                                             let text_len = galley.size().x;
                                             let text_h = galley.size().y;
@@ -1085,7 +1116,7 @@ fn render_realtime_preview(
                                     let line_start_y = (py - clearance).min(max_lead_y);
 
                                     if line_start_y > mv_elbow_y + 1.0 {
-                                        let stroke_lead = Stroke::new(0.5_f32, Color32::from_gray(115));
+                                        let stroke_lead = Stroke::new(style.multiview.peak_lead_width, style.multiview.peak_lead_color.to_color32());
                                         painter.line_segment([Pos2::new(px, line_start_y), Pos2::new(px, mv_elbow_y)], stroke_lead);
                                         painter.line_segment([Pos2::new(px, mv_elbow_y), Pos2::new(tx, text_bottom_y + 1.5)], stroke_lead);
                                         painter.line_segment([Pos2::new(tx, text_bottom_y + 1.5), Pos2::new(tx, text_bottom_y)], stroke_lead);
@@ -1247,10 +1278,48 @@ fn render_realtime_preview(
     }
 }
 
-/// ページ全体の完全なベクター SVG を生成 (プロット + パラメータ表 + ヘッダー)
-/// ユーザーが「Export SVG...」を押した際にファイル保存される完全な出版品質ドキュメント
+/// ページ全体の完全なベクター SVG を生成 (互換用ラッパー: デフォルトスタイル使用)
 pub fn generate_complete_page_svg(
     settings: &PrintSettings,
+    main_transform: Option<&PlotTransform>,
+    ppm: Option<&Array1<f64>>,
+    spectrum: Option<&Array1<f64>>,
+    peaks: &[PeakItem],
+    integrations: &[IntegrationItem],
+    integration_scale: f64,
+    integration_offset: f64,
+    integration_ref_factor: f64,
+    multiviews: &[MultiviewItem],
+    metadata: &AcquisitionMetadata,
+    ft_settings: &FtSettings,
+    j_couplings: &[JCouplingResultItem],
+    current_filepath: Option<&Path>,
+) -> String {
+    let default_style = PrintStyleSettings::default();
+    generate_complete_page_svg_with_style(
+        settings,
+        &default_style,
+        main_transform,
+        ppm,
+        spectrum,
+        peaks,
+        integrations,
+        integration_scale,
+        integration_offset,
+        integration_ref_factor,
+        multiviews,
+        metadata,
+        ft_settings,
+        j_couplings,
+        current_filepath,
+    )
+}
+
+/// スタイル指定付きでページ全体の完全なベクター SVG を生成 (プロット + パラメータ表 + ヘッダー)
+/// ユーザーが「Export SVG...」を押した際にファイル保存される完全な出版品質ドキュメント
+pub fn generate_complete_page_svg_with_style(
+    settings: &PrintSettings,
+    style: &PrintStyleSettings,
     main_transform: Option<&PlotTransform>,
     ppm: Option<&Array1<f64>>,
     spectrum: Option<&Array1<f64>>,
@@ -1310,6 +1379,7 @@ pub fn generate_complete_page_svg(
     if let (Some(ppm_arr), Some(spec_arr)) = (ppm, spectrum) {
         let plot_svg_inner = generate_plot_svg_content(
             settings,
+            style,
             main_transform,
             ppm_arr,
             spec_arr,
@@ -1441,6 +1511,7 @@ pub fn generate_complete_page_svg(
 /// プロット部分の内部ベクター SVG 生成
 fn generate_plot_svg_content(
     settings: &PrintSettings,
+    style: &PrintStyleSettings,
     main_transform: Option<&PlotTransform>,
     ppm: &Array1<f64>,
     spectrum: &Array1<f64>,
@@ -1511,9 +1582,11 @@ fn generate_plot_svg_content(
             }
         }
         svg.push_str(&format!(
-            r##"<path d="{}" stroke="#000000" stroke-width="0.85" fill="none" />
+            r##"<path d="{}" stroke="{}" stroke-width="{:.2}" fill="none" />
 "##,
-            path_data
+            path_data,
+            style.main_spectrum.line_color.to_hex(),
+            style.main_spectrum.line_width,
         ));
     }
 
@@ -1637,9 +1710,9 @@ fn generate_plot_svg_content(
                 let y_start = (axis_y - 8.0).max(pk_sy + 2.0);
 
                 svg.push_str(&format!(
-                    r##"<line x1="{px:.1}" y1="{y_start:.1}" x2="{px:.1}" y2="{y_elbow:.1}" stroke="#70757a" stroke-width="0.55" />
-<line x1="{px:.1}" y1="{y_elbow:.1}" x2="{tx:.1}" y2="{y_text_start_pre:.1}" stroke="#70757a" stroke-width="0.55" />
-<line x1="{tx:.1}" y1="{y_text_start_pre:.1}" x2="{tx:.1}" y2="{y_text_start:.1}" stroke="#70757a" stroke-width="0.55" />
+                    r##"<line x1="{px:.1}" y1="{y_start:.1}" x2="{px:.1}" y2="{y_elbow:.1}" stroke="{col}" stroke-width="{w:.2}" />
+<line x1="{px:.1}" y1="{y_elbow:.1}" x2="{tx:.1}" y2="{y_text_start_pre:.1}" stroke="{col}" stroke-width="{w:.2}" />
+<line x1="{tx:.1}" y1="{y_text_start_pre:.1}" x2="{tx:.1}" y2="{y_text_start:.1}" stroke="{col}" stroke-width="{w:.2}" />
 <g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7.5" text-anchor="start" dominant-baseline="central" font-family="sans-serif" fill="#000000">{val:.prec$}</text></g>
 "##,
                     px = px,
@@ -1651,6 +1724,8 @@ fn generate_plot_svg_content(
                     ty = y_text_start + 2.0,
                     val = pk.ppm,
                     prec = settings.ppm_decimals,
+                    col = style.main_spectrum.peak_lead_color.to_hex(),
+                    w = style.main_spectrum.peak_lead_width,
                 ));
             }
         }
@@ -1697,14 +1772,16 @@ fn generate_plot_svg_content(
                         }
 
                         svg.push_str(&format!(
-                            r##"<path d="{}" stroke="#e11d48" stroke-width="1.4" fill="none" />
-<g transform="translate({mx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="8.0" text-anchor="end" dominant-baseline="central" font-family="sans-serif" fill="#e11d48">{val:.prec$}</text></g>
+                            r##"<path d="{}" stroke="{col}" stroke-width="{w:.2}" fill="none" />
+<g transform="translate({mx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="8.0" text-anchor="end" dominant-baseline="central" font-family="sans-serif" fill="{col}">{val:.prec$}</text></g>
 "##,
                             curve_d,
                             mx = (sx_start + sx_end) * 0.5,
                             ty = min_sy - 3.0,
                             val = res.normalized_value,
                             prec = settings.integral_decimals,
+                            col = style.main_spectrum.integral_color.to_hex(),
+                            w = style.main_spectrum.integral_width,
                         ));
                     }
                 }
@@ -1786,9 +1863,11 @@ fn generate_plot_svg_content(
                 }
                 if !mv_d.is_empty() {
                     svg.push_str(&format!(
-                        r##"<path d="{}" stroke="#000000" stroke-width="0.85" fill="none" />
+                        r##"<path d="{}" stroke="{}" stroke-width="{:.2}" fill="none" />
 "##,
-                        mv_d
+                        mv_d,
+                        style.multiview.line_color.to_hex(),
+                        style.multiview.line_width,
                     ));
                 }
 
@@ -1822,20 +1901,23 @@ fn generate_plot_svg_content(
                                 }
                                 if !intg_d.is_empty() {
                                     svg.push_str(&format!(
-                                        r##"<path d="{}" stroke="#d91b42" stroke-width="1.4" fill="none" />
+                                        r##"<path d="{}" stroke="{col}" stroke-width="{w:.2}" fill="none" />
 "##,
-                                        intg_d
+                                        intg_d,
+                                        col = style.multiview.integral_color.to_hex(),
+                                        w = style.multiview.integral_width,
                                     ));
                                     let mid_p = (i_min.max(mv_src_min) + i_max.min(mv_src_max)) * 0.5;
                                     let tx = mv_ppm_to_x(mid_p);
                                     let ty = mv_y_to_y(y_min_adj + 0.70 * h_diff);
                                     svg.push_str(&format!(
-                                        r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7.5" text-anchor="end" dominant-baseline="central" font-family="sans-serif" fill="#d91b42">{val:.prec$}</text></g>
+                                        r##"<g transform="translate({tx:.1}, {ty:.1}) rotate(90)"><text x="0" y="0" font-size="7.5" text-anchor="end" dominant-baseline="central" font-family="sans-serif" fill="{col}">{val:.prec$}</text></g>
 "##,
                                         tx = tx,
                                         ty = ty,
                                         val = res.normalized_value,
                                         prec = settings.integral_decimals,
+                                        col = style.multiview.integral_color.to_hex(),
                                     ));
                                 }
                             }
@@ -1890,9 +1972,9 @@ fn generate_plot_svg_content(
 
                             if line_start_y > mv_elbow_y + 1.0 {
                                 svg.push_str(&format!(
-                                    r##"<line x1="{px:.1}" y1="{line_start_y:.1}" x2="{px:.1}" y2="{mv_elbow_y:.1}" stroke="#70757a" stroke-width="0.5" />
-<line x1="{px:.1}" y1="{mv_elbow_y:.1}" x2="{tx:.1}" y2="{y_elbow_t:.1}" stroke="#70757a" stroke-width="0.5" />
-<line x1="{tx:.1}" y1="{y_elbow_t:.1}" x2="{tx:.1}" y2="{y_start_t:.1}" stroke="#70757a" stroke-width="0.5" />
+                                    r##"<line x1="{px:.1}" y1="{line_start_y:.1}" x2="{px:.1}" y2="{mv_elbow_y:.1}" stroke="{col}" stroke-width="{w:.2}" />
+<line x1="{px:.1}" y1="{mv_elbow_y:.1}" x2="{tx:.1}" y2="{y_elbow_t:.1}" stroke="{col}" stroke-width="{w:.2}" />
+<line x1="{tx:.1}" y1="{y_elbow_t:.1}" x2="{tx:.1}" y2="{y_start_t:.1}" stroke="{col}" stroke-width="{w:.2}" />
 "##,
                                     px = px,
                                     line_start_y = line_start_y,
@@ -1900,6 +1982,8 @@ fn generate_plot_svg_content(
                                     tx = tx,
                                     y_elbow_t = text_bottom_y + 1.5,
                                     y_start_t = text_bottom_y,
+                                    col = style.multiview.peak_lead_color.to_hex(),
+                                    w = style.multiview.peak_lead_width,
                                 ));
                             }
 
@@ -1962,6 +2046,7 @@ fn generate_plot_svg_content(
 /// OSネイティブ直接印刷の実行 (ブラウザは一切起動せず、OS印刷スプーラーへ直接ジョブ送信)
 fn execute_native_print(
     settings: &PrintSettings,
+    style: &PrintStyleSettings,
     main_transform: Option<&PlotTransform>,
     ppm: Option<&Array1<f64>>,
     spectrum: Option<&Array1<f64>>,
@@ -1980,6 +2065,7 @@ fn execute_native_print(
     {
         print_windows_native(
             settings,
+            style,
             main_transform,
             ppm,
             spectrum,
@@ -2000,6 +2086,7 @@ fn execute_native_print(
     {
         print_macos_native(
             settings,
+            style,
             main_transform,
             ppm,
             spectrum,
@@ -2028,6 +2115,7 @@ fn execute_native_print(
 #[cfg(target_os = "windows")]
 fn print_windows_native(
     settings: &PrintSettings,
+    style: &PrintStyleSettings,
     main_transform: Option<&PlotTransform>,
     ppm: Option<&Array1<f64>>,
     spectrum: Option<&Array1<f64>>,
@@ -2323,7 +2411,13 @@ fn print_windows_native(
 
         // スペクトル曲線
         if settings.spectrum && !ppm_arr.is_empty() && !spec_arr.is_empty() {
-            let spec_pen = unsafe { CreatePen(PS_SOLID, ((dpi_y as f64 * 0.85 / 72.0).round() as i32).max(1), rgb(0, 0, 0)) };
+            let spec_pen = unsafe {
+                CreatePen(
+                    PS_SOLID,
+                    ((dpi_y as f64 * style.main_spectrum.line_width as f64 / 72.0).round() as i32).max(1),
+                    rgb(style.main_spectrum.line_color.r, style.main_spectrum.line_color.g, style.main_spectrum.line_color.b),
+                )
+            };
             let old_pen = unsafe { SelectObject(hdc, spec_pen) };
 
             let mut pts: Vec<POINT> = Vec::new();
@@ -2455,8 +2549,14 @@ fn print_windows_native(
                 let y_elbow = axis_y + (dpi_y * 15 / 72);
                 let y_text_start = axis_y + (dpi_y * 28 / 72);
 
-                let lead_width = ((dpi_y as f64 * 0.55 / 72.0).round() as i32).max(1);
-                let lead_pen = unsafe { CreatePen(PS_SOLID, lead_width, rgb(112, 117, 122)) };
+                let lead_width = ((dpi_y as f64 * style.main_spectrum.peak_lead_width as f64 / 72.0).round() as i32).max(1);
+                let lead_pen = unsafe {
+                    CreatePen(
+                        PS_SOLID,
+                        lead_width,
+                        rgb(style.main_spectrum.peak_lead_color.r, style.main_spectrum.peak_lead_color.g, style.main_spectrum.peak_lead_color.b),
+                    )
+                };
                 let rot_font = make_font(6.5, false, 270);
                 let old_font = unsafe { SelectObject(hdc, rot_font) };
                 let mut tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
@@ -2504,14 +2604,20 @@ fn print_windows_native(
 
         // 積分 (本物の累積積分曲線 & 局所ベースライン)
         if settings.integrate {
-            let intg_pen = unsafe { CreatePen(PS_SOLID, (dpi_y * 1 / 72).max(1), rgb(225, 29, 72)) };
+            let intg_pen = unsafe {
+                CreatePen(
+                    PS_SOLID,
+                    ((dpi_y as f64 * style.main_spectrum.integral_width as f64 / 72.0).round() as i32).max(1),
+                    rgb(style.main_spectrum.integral_color.r, style.main_spectrum.integral_color.g, style.main_spectrum.integral_color.b),
+                )
+            };
             let bl_pen = unsafe { CreatePen(PS_DASH, 1, rgb(59, 130, 246)) };
             let intg_font = make_font(6.5, false, 270);
             let old_font = unsafe { SelectObject(hdc, intg_font) };
             let mut intg_tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
             unsafe {
                 GetTextMetricsW(hdc, &mut intg_tm);
-                SetTextColor(hdc, rgb(217, 27, 66));
+                SetTextColor(hdc, rgb(style.main_spectrum.integral_color.r, style.main_spectrum.integral_color.g, style.main_spectrum.integral_color.b));
             }
 
             for it in integrations {
@@ -2625,8 +2731,14 @@ fn print_windows_native(
                         inset_axis_y - (((y - y_min_adj) / (y_max_adj - y_min_adj).max(1e-6)) * (inset_plot_h as f64)).round() as i32
                     };
 
-                    // 1. 拡大スペクトル曲線 (黒色)
-                    let spec_pen = unsafe { CreatePen(PS_SOLID, ((dpi_y as f64 * 0.85 / 72.0).round() as i32).max(1), rgb(0, 0, 0)) };
+                    // 1. 拡大スペクトル曲線
+                    let spec_pen = unsafe {
+                        CreatePen(
+                            PS_SOLID,
+                            ((dpi_y as f64 * style.multiview.line_width as f64 / 72.0).round() as i32).max(1),
+                            rgb(style.multiview.line_color.r, style.multiview.line_color.g, style.multiview.line_color.b),
+                        )
+                    };
                     let old_spec_pen = unsafe { SelectObject(hdc, spec_pen) };
 
                     let mut mv_pts = Vec::new();
@@ -2652,14 +2764,20 @@ fn print_windows_native(
 
                     // 2. 積分 (マルチビュー内)
                     if settings.integrate {
-                        let mv_intg_pen = unsafe { CreatePen(PS_SOLID, ((dpi_y as f64 * 1.4 / 72.0).round() as i32).max(1), rgb(217, 27, 66)) };
+                        let mv_intg_pen = unsafe {
+                            CreatePen(
+                                PS_SOLID,
+                                ((dpi_y as f64 * style.multiview.integral_width as f64 / 72.0).round() as i32).max(1),
+                                rgb(style.multiview.integral_color.r, style.multiview.integral_color.g, style.multiview.integral_color.b),
+                            )
+                        };
                         let old_intg_p = unsafe { SelectObject(hdc, mv_intg_pen) };
                         let mv_intg_font = make_font(5.5, false, 270);
                         let old_font = unsafe { SelectObject(hdc, mv_intg_font) };
                         let mut mv_intg_tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
                         unsafe {
                             GetTextMetricsW(hdc, &mut mv_intg_tm);
-                            SetTextColor(hdc, rgb(217, 27, 66));
+                            SetTextColor(hdc, rgb(style.multiview.integral_color.r, style.multiview.integral_color.g, style.multiview.integral_color.b));
                         }
 
                         for integ in integrations {
@@ -2733,8 +2851,14 @@ fn print_windows_native(
                                 if !moved { break; }
                             }
 
-                            let lead_width = ((dpi_y as f64 * 0.5 / 72.0).round() as i32).max(1);
-                            let lead_pen = unsafe { CreatePen(PS_SOLID, lead_width, rgb(112, 117, 122)) };
+                            let lead_width = ((dpi_y as f64 * style.multiview.peak_lead_width as f64 / 72.0).round() as i32).max(1);
+                            let lead_pen = unsafe {
+                                CreatePen(
+                                    PS_SOLID,
+                                    lead_width,
+                                    rgb(style.multiview.peak_lead_color.r, style.multiview.peak_lead_color.g, style.multiview.peak_lead_color.b),
+                                )
+                            };
                             let old_lead = unsafe { SelectObject(hdc, lead_pen) };
                             let mv_rot_font = make_font(5.0, false, 270);
                             let old_font = unsafe { SelectObject(hdc, mv_rot_font) };
@@ -2948,6 +3072,7 @@ fn print_windows_native(
 #[cfg(target_os = "macos")]
 fn print_macos_native(
     settings: &PrintSettings,
+    style: &PrintStyleSettings,
     main_transform: Option<&PlotTransform>,
     ppm: Option<&Array1<f64>>,
     spectrum: Option<&Array1<f64>>,
@@ -2965,8 +3090,9 @@ fn print_macos_native(
     let temp_dir = std::env::temp_dir();
     let svg_path = temp_dir.join("resona_print_job.svg");
 
-    let svg_content = generate_complete_page_svg(
+    let svg_content = generate_complete_page_svg_with_style(
         settings,
+        style,
         main_transform,
         ppm,
         spectrum,

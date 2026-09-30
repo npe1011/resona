@@ -9,78 +9,139 @@ pub struct SolventInfo {
     pub carbon_ppm: Option<f64>,
 }
 
-/// 主要な重溶媒の標準ケミカルシフトテーブル
+/// 主要な重溶媒の標準ケミカルシフトテーブル (Organometallics 2010 準拠)
 pub const KNOWN_SOLVENTS: &[SolventInfo] = &[
     SolventInfo {
+        name: "TMS",
+        aliases: &["tms", "tetramethylsilane", "(ch3)4si", "ch34si"],
+        proton_ppm: Some(0.00),
+        carbon_ppm: Some(0.00),
+    },
+    SolventInfo {
         name: "CDCl3",
-        aliases: &["cdcl3", "chloroform", "chloroform-d"],
+        aliases: &["cdcl3", "chloroform", "chloroform-d", "trichloromethane"],
         proton_ppm: Some(7.26),
         carbon_ppm: Some(77.16),
     },
     SolventInfo {
+        name: "benzene-d6",
+        aliases: &["benzene-d6", "benzened6", "benzene", "c6d6", "c6h6"],
+        proton_ppm: Some(7.16),
+        carbon_ppm: Some(128.06),
+    },
+    SolventInfo {
         name: "DMSO-d6",
-        aliases: &["dmso", "dmso-d6", "dmsod6", "dimethyl sulfoxide"],
+        aliases: &[
+            "dmso-d6", "dmsod6", "dmso", "(cd3)2so", "cd32so", "dimethylsulfoxide",
+            "dimethyl sulfoxide", "(ch3)2so", "ch32so",
+        ],
         proton_ppm: Some(2.50),
         carbon_ppm: Some(39.52),
     },
     SolventInfo {
         name: "CD3OD",
-        aliases: &["cd3od", "methanol", "methanol-d4", "meod"],
+        aliases: &["cd3od", "methanol", "methanol-d4", "meod", "ch3oh"],
         proton_ppm: Some(3.31),
         carbon_ppm: Some(49.00),
     },
     SolventInfo {
         name: "Acetone-d6",
-        aliases: &["acetone", "acetone-d6", "acetoned6"],
+        aliases: &[
+            "acetone-d6", "acetoned6", "acetone", "(cd3)2co", "cd32co", "c3d6o",
+            "(ch3)2co", "ch32co",
+        ],
         proton_ppm: Some(2.05),
         carbon_ppm: Some(29.84),
     },
     SolventInfo {
-        name: "D2O",
-        aliases: &["d2o", "water", "heavy water"],
-        proton_ppm: Some(4.79),
-        carbon_ppm: None,
-    },
-    SolventInfo {
         name: "CD3CN",
-        aliases: &["cd3cn", "acetonitrile", "acetonitrile-d3"],
+        aliases: &["cd3cn", "acetonitrile", "acetonitrile-d3", "ch3cn", "acn"],
         proton_ppm: Some(1.94),
         carbon_ppm: Some(1.32),
     },
     SolventInfo {
-        name: "C6D6",
-        aliases: &["c6d6", "benzene", "benzene-d6"],
-        proton_ppm: Some(7.16),
-        carbon_ppm: Some(128.06),
+        name: "D2O",
+        aliases: &["d2o", "water", "heavywater", "heavy water", "h2o", "deuteriumoxide"],
+        proton_ppm: Some(4.79),
+        carbon_ppm: None,
     },
     SolventInfo {
-        name: "TMS",
-        aliases: &["tms", "tetramethylsilane"],
-        proton_ppm: Some(0.00),
-        carbon_ppm: Some(0.00),
+        name: "CD2Cl2",
+        aliases: &[
+            "cd2cl2", "dichloromethane", "dichloromethane-d2", "dcm", "ch2cl2",
+            "methylenechloride", "methylene chloride",
+        ],
+        proton_ppm: Some(5.32),
+        carbon_ppm: Some(53.84),
+    },
+    SolventInfo {
+        name: "THF-d8",
+        aliases: &[
+            "thf-d8", "thfd8", "thf", "tetrahydrofuran", "tetrahydrofuran-d8", "c4d8o",
+            "c4h8o",
+        ],
+        proton_ppm: Some(1.72),
+        carbon_ppm: Some(25.31),
+    },
+    SolventInfo {
+        name: "toluene-d8",
+        aliases: &[
+            "toluene-d8", "toluened8", "toluene", "c7d8", "c7h8", "methylbenzene",
+        ],
+        proton_ppm: Some(2.08),
+        carbon_ppm: Some(20.43),
     },
 ];
 
+fn normalize_solvent_str(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
 /// 溶媒文字列と核種から標準ケミカルシフト (ppm) を解決する
 pub fn resolve_solvent_target_ppm(solvent_str: &str, nucleus: &str) -> Option<(&'static str, f64)> {
-    let s_clean = solvent_str
-        .to_lowercase()
-        .replace(['-', '_', ' '], "");
+    let s_clean = normalize_solvent_str(solvent_str);
     if s_clean.is_empty() {
         return None;
     }
 
     let is_13c = nucleus.contains("13C") || nucleus.contains("C13");
 
+    // 1. 完全一致 (正規化文字列)
     for info in KNOWN_SOLVENTS {
+        let name_clean = normalize_solvent_str(info.name);
+        if s_clean == name_clean {
+            let target = if is_13c { info.carbon_ppm } else { info.proton_ppm };
+            if let Some(ppm) = target {
+                return Some((info.name, ppm));
+            }
+        }
         for alias in info.aliases {
-            let alias_clean = alias.to_lowercase().replace(['-', '_', ' '], "");
+            let alias_clean = normalize_solvent_str(alias);
+            if s_clean == alias_clean {
+                let target = if is_13c { info.carbon_ppm } else { info.proton_ppm };
+                if let Some(ppm) = target {
+                    return Some((info.name, ppm));
+                }
+            }
+        }
+    }
+
+    // 2. 部分一致 (包含関係)
+    for info in KNOWN_SOLVENTS {
+        let name_clean = normalize_solvent_str(info.name);
+        if s_clean.contains(&name_clean) || name_clean.contains(&s_clean) {
+            let target = if is_13c { info.carbon_ppm } else { info.proton_ppm };
+            if let Some(ppm) = target {
+                return Some((info.name, ppm));
+            }
+        }
+        for alias in info.aliases {
+            let alias_clean = normalize_solvent_str(alias);
             if s_clean.contains(&alias_clean) || alias_clean.contains(&s_clean) {
-                let target = if is_13c {
-                    info.carbon_ppm
-                } else {
-                    info.proton_ppm
-                };
+                let target = if is_13c { info.carbon_ppm } else { info.proton_ppm };
                 if let Some(ppm) = target {
                     return Some((info.name, ppm));
                 }
@@ -177,6 +238,30 @@ mod tests {
             Some(("DMSO-d6", 2.50))
         );
         assert_eq!(
+            resolve_solvent_target_ppm("(cd3)2so", "1H"),
+            Some(("DMSO-d6", 2.50))
+        );
+        assert_eq!(
+            resolve_solvent_target_ppm("dmso", "1H"),
+            Some(("DMSO-d6", 2.50))
+        );
+        assert_eq!(
+            resolve_solvent_target_ppm("benzene-d6", "1H"),
+            Some(("benzene-d6", 7.16))
+        );
+        assert_eq!(
+            resolve_solvent_target_ppm("BENZENE", "1H"),
+            Some(("benzene-d6", 7.16))
+        );
+        assert_eq!(
+            resolve_solvent_target_ppm("THF", "1H"),
+            Some(("THF-d8", 1.72))
+        );
+        assert_eq!(
+            resolve_solvent_target_ppm("Toluene", "1H"),
+            Some(("toluene-d8", 2.08))
+        );
+        assert_eq!(
             resolve_solvent_target_ppm("D2O", "1H"),
             Some(("D2O", 4.79))
         );
@@ -193,6 +278,14 @@ mod tests {
         assert_eq!(
             resolve_solvent_target_ppm("DMSO-d6", "13C"),
             Some(("DMSO-d6", 39.52))
+        );
+        assert_eq!(
+            resolve_solvent_target_ppm("benzene-d6", "13C"),
+            Some(("benzene-d6", 128.06))
+        );
+        assert_eq!(
+            resolve_solvent_target_ppm("D2O", "13C"),
+            None
         );
     }
 
