@@ -13,7 +13,7 @@ pub use analysis::{
     resolve_solvent_target_ppm, snap_and_add_peak, AutoSensitivity, IntegralResult,
     IntegrationItem, JCouplingCandidate, JCouplingResultItem, PeakItem, SolventInfo, KNOWN_SOLVENTS,
 };
-pub use autophase::{acme_score, autophase_acme, nelder_mead_2d};
+pub use autophase::{acme_score, autophase_acme, autophase_acme_with_pivot, nelder_mead_2d};
 pub use baseline::{
     apply_baseline_correction, apply_baseline_method, baseline_airpls, baseline_als,
     baseline_polynomial, BaselineMethod,
@@ -27,5 +27,6 @@ pub use project::{
 };
 pub use signal::{
     apply_phase_and_extract_real, apply_phase_complex, apply_window, apply_zerofill,
-    compute_ppm_scale, compute_window_curve, forward_fft, remove_fractional_delay, WindowFunction,
+    compute_ppm_scale, compute_window_curve, find_highest_peak_in_range, forward_fft,
+    remove_fractional_delay, WindowFunction,
 };

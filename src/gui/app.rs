@@ -321,6 +321,7 @@ pub struct ResonaApp {
     pub drag_start: Option<Pos2>,
     pub drag_current: Option<Pos2>,
     pub is_dragging_threshold: bool,
+    pub is_dragging_pivot: bool,
     pub integrate_drag: Option<IntegrateDragTarget>,
     pub multiview_drag: Option<MultiviewDragState>,
 
@@ -384,6 +385,7 @@ impl Default for ResonaApp {
             drag_start: None,
             drag_current: None,
             is_dragging_threshold: false,
+            is_dragging_pivot: false,
             integrate_drag: None,
             multiview_drag: None,
             selected_multiview_ids: HashSet::new(),
@@ -1340,11 +1342,16 @@ impl eframe::App for ResonaApp {
             ActionEvent::AutoPhase => {
                 let (new_p0, new_p1) = self.project.auto_phase();
                 self.project.push_history();
-                self.status_message = format!("ACME Autophase applied (P0={:.2}°, P1={:.2}°)", new_p0, new_p1);
+                self.status_message = format!(
+                    "ACME Autophase applied with Pivot at {:.3} ppm (P0={:.2}°, P1={:.2}°)",
+                    self.project.pivot_ppm(), new_p0, new_p1
+                );
             }
-            ActionEvent::ResetPhase => {
-                self.project.update_phase(0.0, 0.0);
-                self.project.push_history();
+            ActionEvent::AutoPivot => {
+                if let Some(ppm) = self.project.auto_pivot() {
+                    self.project.push_history();
+                    self.status_message = format!("Auto Pivot set to {:.3} ppm", ppm);
+                }
             }
             ActionEvent::ApplyBaseline { method } => {
                 self.project.apply_baseline(method);
@@ -1920,6 +1927,23 @@ impl eframe::App for ResonaApp {
                             }
                         }
 
+                        // Phase モード時の判定
+                        let is_phase_mode = self.mode == Some(AppMode::Phase) && self.active_zoom.is_none();
+                        let is_phase_pivot_mode = is_phase_mode && self.action_state.phase_pivot_active;
+                        if is_phase_pivot_mode {
+                            if let Some(pos) = pointer_pos {
+                                if plot_rect.contains(pos) && pos.y <= axis_y {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                                    let shift_down = ctx.input(|i| i.modifiers.shift);
+                                    if shift_down {
+                                        self.status_message = "Click to set pivot (Free position; Shift held)".to_string();
+                                    } else {
+                                        self.status_message = "Click to set pivot (Peak snap enabled; hold Shift to disable)".to_string();
+                                    }
+                                }
+                            }
+                        }
+
                         // スレッショルドバーのホバー／ドラッグ判定 (Peak pick モード時)
                         let is_peak_mode = self.mode == Some(AppMode::Peak) && self.active_zoom.is_none();
                         let is_thresh_submode = is_peak_mode && self.action_state.peak_submode == PeakSubMode::Threshold;
@@ -2035,7 +2059,21 @@ impl eframe::App for ResonaApp {
                         if let Some(pos) = pointer_pos {
                             if plot_rect.contains(pos) && pos.y <= axis_y {
                                 let (click_ppm, _) = t.screen_to_data(pos);
-                                if is_thresh_submode {
+                                if is_phase_pivot_mode {
+                                    let shift_down = ctx.input(|i| i.modifiers.shift);
+                                    let target_ppm = if shift_down {
+                                        click_ppm
+                                    } else if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                        let p1 = t.screen_to_data(Pos2::new(pos.x - 20.0, pos.y)).0;
+                                        let p2 = t.screen_to_data(Pos2::new(pos.x + 20.0, pos.y)).0;
+                                        crate::core::signal::phase::find_highest_peak_in_range(spec, ppm, p1, p2).unwrap_or(click_ppm)
+                                    } else {
+                                        click_ppm
+                                    };
+                                    self.project.set_pivot_ppm(target_ppm);
+                                    self.project.push_history();
+                                    self.status_message = format!("Set pivot to {:.3} ppm", self.project.pivot_ppm());
+                                } else if is_thresh_submode {
                                     let new_thresh = t.screen_y_to_y(pos.y).abs();
                                     self.action_state.peak_threshold = new_thresh;
                                     self.project.state.peak_threshold = Some(new_thresh);
@@ -2270,7 +2308,9 @@ impl eframe::App for ResonaApp {
 
                     // ドラッグ開始 (押下した瞬間の正確な原点座標を取得して遅れを解消)
                     if response.drag_started_by(egui::PointerButton::Primary) {
-                        if near_threshold {
+                        if is_phase_pivot_mode {
+                            self.is_dragging_pivot = true;
+                        } else if near_threshold {
                             self.is_dragging_threshold = true;
                             if let Some(pos) = pointer_pos {
                                 let new_thresh = t.screen_y_to_y(pos.y).abs();
@@ -2388,6 +2428,7 @@ impl eframe::App for ResonaApp {
                             }
                         } else {
                             self.is_dragging_threshold = false;
+                            self.is_dragging_pivot = false;
                             let origin = ctx.input(|i| i.pointer.press_origin()).or(pointer_pos);
                             self.drag_start = origin;
                             self.drag_current = pointer_pos;
@@ -2396,7 +2437,23 @@ impl eframe::App for ResonaApp {
 
                     // ドラッグ中
                     if response.dragged_by(egui::PointerButton::Primary) {
-                        if self.is_dragging_threshold {
+                        if self.is_dragging_pivot {
+                            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                            if let Some(pos) = pointer_pos {
+                                let (cur_ppm, _) = t.screen_to_data(pos);
+                                let shift_down = ctx.input(|i| i.modifiers.shift);
+                                let preview_ppm = if shift_down {
+                                    cur_ppm
+                                } else if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                    let p1 = t.screen_to_data(Pos2::new(pos.x - 20.0, pos.y)).0;
+                                    let p2 = t.screen_to_data(Pos2::new(pos.x + 20.0, pos.y)).0;
+                                    crate::core::signal::phase::find_highest_peak_in_range(spec, ppm, p1, p2).unwrap_or(cur_ppm)
+                                } else {
+                                    cur_ppm
+                                };
+                                self.status_message = format!("Pivot preview: {:.3} ppm (Release to set)", preview_ppm);
+                            }
+                        } else if self.is_dragging_threshold {
                             ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
                             if let Some(pos) = pointer_pos {
                                 let new_thresh = t.screen_y_to_y(pos.y).abs();
@@ -2630,7 +2687,7 @@ impl eframe::App for ResonaApp {
                     }
 
                     // ラバーバンド描画 (ドラッグ中、スレッショルドドラッグでない場合)
-                    if !self.is_dragging_threshold && self.integrate_drag.is_none() && self.multiview_drag.is_none() {
+                    if !self.is_dragging_threshold && !self.is_dragging_pivot && self.integrate_drag.is_none() && self.multiview_drag.is_none() {
                         if let (Some(start), Some(curr)) = (self.drag_start, self.drag_current) {
                             let painter = ui.painter_at(plot_rect);
                         let axis_y = t.axis_y();
@@ -2819,9 +2876,107 @@ impl eframe::App for ResonaApp {
                     }
                 }
 
+                    // Phase モード時の Pivot 線の描画 (赤い縦線 + ラベルタグ)
+                    if self.mode == Some(AppMode::Phase) {
+                        let painter = ui.painter_at(plot_rect);
+                        let axis_y = t.axis_y();
+                        let pivot_ppm = self.project.pivot_ppm();
+                        let px = t.ppm_to_screen_x(pivot_ppm);
+
+                        if px >= plot_rect.min.x - 2.0 && px <= plot_rect.max.x + 2.0 {
+                            let line_color = Color32::from_rgb(220, 38, 38);
+
+                            painter.line_segment(
+                                [Pos2::new(px, plot_rect.min.y), Pos2::new(px, axis_y)],
+                                Stroke::new(1.5_f32, line_color),
+                            );
+
+                            let tag_text = format!("Pivot: {:.3} ppm", pivot_ppm);
+                            let font_id = egui::FontId::proportional(11.0);
+                            let galley = painter.layout_no_wrap(tag_text, font_id, Color32::WHITE);
+                            let tag_w = galley.size().x + 8.0;
+                            let tag_h = galley.size().y + 4.0;
+                            let tag_rect = Rect::from_center_size(
+                                Pos2::new(px.clamp(plot_rect.min.x + tag_w * 0.5 + 4.0, plot_rect.max.x - tag_w * 0.5 - 4.0), plot_rect.min.y + 12.0),
+                                egui::vec2(tag_w, tag_h),
+                            );
+                            painter.rect_filled(tag_rect, 3.0, line_color);
+                            painter.galley(Pos2::new(tag_rect.min.x + 4.0, tag_rect.min.y + 2.0), galley, Color32::WHITE);
+                        }
+
+                        // Pivot モード中にマウスを押下している場合のプレビュー線
+                        if is_phase_pivot_mode {
+                            let is_pressing = ui.input(|i| i.pointer.primary_down()) || self.is_dragging_pivot;
+                            if is_pressing {
+                                if let Some(pos) = pointer_pos {
+                                    if plot_rect.contains(pos) && pos.y <= axis_y {
+                                        let shift_down = ctx.input(|i| i.modifiers.shift);
+                                        let cur_ppm = t.screen_to_data(pos).0;
+                                        let (preview_ppm, is_snapped) = if shift_down {
+                                            (cur_ppm, false)
+                                        } else if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                            let p1 = t.screen_to_data(Pos2::new(pos.x - 20.0, pos.y)).0;
+                                            let p2 = t.screen_to_data(Pos2::new(pos.x + 20.0, pos.y)).0;
+                                            if let Some(snapped) = crate::core::signal::phase::find_highest_peak_in_range(spec, ppm, p1, p2) {
+                                                (snapped, true)
+                                            } else {
+                                                (cur_ppm, false)
+                                            }
+                                        } else {
+                                            (cur_ppm, false)
+                                        };
+
+                                        let prev_px = t.ppm_to_screen_x(preview_ppm);
+                                        if prev_px >= plot_rect.min.x - 2.0 && prev_px <= plot_rect.max.x + 2.0 {
+                                            let prev_color = Color32::from_rgb(239, 68, 68);
+                                            painter.line_segment(
+                                                [Pos2::new(prev_px, plot_rect.min.y), Pos2::new(prev_px, axis_y)],
+                                                Stroke::new(2.0_f32, prev_color),
+                                            );
+
+                                            let tag_text = if is_snapped {
+                                                format!("New Pivot: {:.3} ppm (Snapped)", preview_ppm)
+                                            } else {
+                                                format!("New Pivot: {:.3} ppm", preview_ppm)
+                                            };
+                                            let font_id = egui::FontId::proportional(11.0);
+                                            let galley = painter.layout_no_wrap(tag_text, font_id, Color32::WHITE);
+                                            let tag_w = galley.size().x + 8.0;
+                                            let tag_h = galley.size().y + 4.0;
+                                            let tag_rect = Rect::from_center_size(
+                                                Pos2::new(prev_px.clamp(plot_rect.min.x + tag_w * 0.5 + 4.0, plot_rect.max.x - tag_w * 0.5 - 4.0), plot_rect.min.y + 32.0),
+                                                egui::vec2(tag_w, tag_h),
+                                            );
+                                            painter.rect_filled(tag_rect, 3.0, prev_color);
+                                            painter.galley(Pos2::new(tag_rect.min.x + 4.0, tag_rect.min.y + 2.0), galley, Color32::WHITE);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // ドラッグ終了 (解放) 時の処理
                     if response.drag_stopped_by(egui::PointerButton::Primary) {
-                        if self.multiview_drag.is_some() {
+                        if self.is_dragging_pivot {
+                            self.is_dragging_pivot = false;
+                            if let Some(pos) = pointer_pos {
+                                let (cur_ppm, _) = t.screen_to_data(pos);
+                                let shift_down = ctx.input(|i| i.modifiers.shift);
+                                let target_ppm = if shift_down {
+                                    cur_ppm
+                                } else if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {
+                                    let p1 = t.screen_to_data(Pos2::new(pos.x - 20.0, pos.y)).0;
+                                    let p2 = t.screen_to_data(Pos2::new(pos.x + 20.0, pos.y)).0;
+                                    crate::core::signal::phase::find_highest_peak_in_range(spec, ppm, p1, p2).unwrap_or(cur_ppm)
+                                } else {
+                                    cur_ppm
+                                };
+                                self.project.set_pivot_ppm(target_ppm);
+                                self.project.push_history();
+                                self.status_message = format!("Set pivot to {:.3} ppm", self.project.pivot_ppm());
+                            }
+                        } else if self.multiview_drag.is_some() {
                             self.multiview_drag = None;
                             self.project.push_history();
                         } else if self.integrate_drag.is_some() {
@@ -3183,6 +3338,7 @@ impl eframe::App for ResonaApp {
                         self.drag_start = None;
                         self.drag_current = None;
                         self.is_dragging_threshold = false;
+                        self.is_dragging_pivot = false;
 
                         // 一時 Zoom 中にキーが既に離れていた場合、ドラッグ完了のこの瞬間に元のモードへ復帰
                         if self.temp_zoom_saved.is_some() {
@@ -3231,6 +3387,7 @@ impl eframe::App for ResonaApp {
 
                         self.project.ppm = Some(processed.ppm);
                         self.project.complex_spectrum_unphased = Some(processed.complex_spectrum_unphased);
+                        self.project.auto_pivot();
                         self.project.state.ft_settings = ft_settings;
                         self.project.baseline_array = None;
                         self.project.state.baseline_method = crate::core::baseline::BaselineMethod::None;

@@ -12,7 +12,7 @@ pub enum ActionEvent {
     ResetZoom,
     UndoZoom,
     AutoPhase,
-    ResetPhase,
+    AutoPivot,
     ApplyBaseline { method: BaselineMethod },
     ClearBaseline,
     AutoReference,
@@ -45,6 +45,9 @@ pub struct ActionBarState {
     pub baseline_poly_order: usize,  // 多項式次数
     pub baseline_applied: bool,
 
+    // Phase モード
+    pub phase_pivot_active: bool,
+
     // Reference モード
     pub ref_solvent_idx: usize,
     pub ref_target_ppm: f64,
@@ -64,6 +67,7 @@ pub struct ActionBarState {
 impl ActionBarState {
     /// ズームツール起動時や Esc 押下時にすべてのサブモードを解除する
     pub fn clear_submodes(&mut self) {
+        self.phase_pivot_active = false;
         self.peak_submode = PeakSubMode::None;
         self.integrate_submode = IntegrateSubMode::None;
         self.multiview_submode = MultiviewSubMode::None;
@@ -75,6 +79,7 @@ impl ActionBarState {
 impl Default for ActionBarState {
     fn default() -> Self {
         Self {
+            phase_pivot_active: false,
             peak_submode: PeakSubMode::None,
             integrate_submode: IntegrateSubMode::Add,
             multiview_submode: MultiviewSubMode::None,
@@ -537,6 +542,19 @@ pub fn show_action_bar(
                                     event = ActionEvent::AutoPhase;
                                 }
 
+                                if light_button(ui, "Auto Pivot", false, 72.0).clicked() {
+                                    *active_zoom = None;
+                                    event = ActionEvent::AutoPivot;
+                                }
+
+                                let is_pivot_active = state.phase_pivot_active;
+                                if light_button(ui, "Pivot", is_pivot_active, 46.0).clicked() {
+                                    state.phase_pivot_active = !state.phase_pivot_active;
+                                    if state.phase_pivot_active {
+                                        *active_zoom = None;
+                                    }
+                                }
+
                                 ui.separator();
 
                                 ui.label(RichText::new("P0").size(12.0));
@@ -563,13 +581,6 @@ pub fn show_action_bar(
                                 let p1_inc = continuous_step_button(ui, "p1_inc", ">", 1.0, 6.0, 60.0, 1.0);
                                 if p1_inc > 0.0 {
                                     *p1 = (*p1 + p1_inc).clamp(-360.0, 360.0);
-                                }
-
-                                ui.separator();
-
-                                if light_button(ui, "Reset", false, 46.0).clicked() {
-                                    *active_zoom = None;
-                                    event = ActionEvent::ResetPhase;
                                 }
                             }
                             AppMode::Baseline => {

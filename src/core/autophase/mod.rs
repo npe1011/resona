@@ -254,6 +254,14 @@ pub fn autophase_acme(unphased_complex: &Array1<Complex64>) -> (f64, f64) {
     (opt[0], opt[1])
 }
 
+/// 未補正の複素数スペクトルに対して ACME 法を実行し、指定された pivot_k を基準とする最適な (p0, p1) を算出する
+pub fn autophase_acme_with_pivot(unphased_complex: &Array1<Complex64>, pivot_k: usize) -> (f64, f64) {
+    let (p0_zero, p1) = autophase_acme(unphased_complex);
+    let n = unphased_complex.len();
+    let p0_pivot = crate::core::signal::phase::convert_p0_for_new_pivot(p0_zero, p1, 0, pivot_k, n);
+    (p0_pivot, p1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,7 +18,6 @@ use crate::core::baseline::BaselineMethod;
 use crate::core::error::{ResonaError, Result};
 use crate::core::io::{AcquisitionMetadata, BrukerReader, JeolJdfReader, NmrDataSource};
 use crate::core::pipeline::{process_raw_fid, FtSettings};
-use crate::core::signal::apply_phase_and_extract_real;
 
 /// Multiview (拡大インセット表示) 項目
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,6 +84,9 @@ pub struct ProjectState {
     pub p0: f64,
     #[serde(default)]
     pub p1: f64,
+    /// 位相補正のピボット位置 (unphased_complex におけるインデックス k)
+    #[serde(default)]
+    pub pivot_index: Option<usize>,
     #[serde(default)]
     pub shift_reference: f64,
     /// 基準ピークの化学シフト (ppm)
@@ -130,6 +132,7 @@ impl Default for ProjectState {
         Self {
             p0: 0.0,
             p1: 0.0,
+            pivot_index: None,
             shift_reference: 0.0,
             reference_point: None,
             peak_threshold: None,
@@ -306,6 +309,9 @@ impl Project {
         self.state = ProjectState::default();
         self.state.ft_settings = settings;
 
+        // 初期ピボットを最大ピーク位置 (Auto Pivot) に設定
+        self.auto_pivot();
+
         // 初期自動位相補正を実行
         self.auto_phase();
 
@@ -333,6 +339,9 @@ impl Project {
         self.state = ProjectState::default();
         self.state.ft_settings = settings;
 
+        // 初期ピボットを最大ピーク位置 (Auto Pivot) に設定
+        self.auto_pivot();
+
         // 初期自動位相補正を実行
         self.auto_phase();
 
@@ -343,12 +352,94 @@ impl Project {
         Ok(())
     }
 
-    /// 位相角を手動更新する
+    /// 現在のピボットインデックス (unphased_complex におけるインデックス k)
+    pub fn pivot_index(&self) -> usize {
+        if let Some(k) = self.state.pivot_index {
+            k
+        } else if let Some(ref unphased) = self.complex_spectrum_unphased {
+            crate::core::signal::phase::find_max_magnitude_index(unphased)
+        } else {
+            0
+        }
+    }
+
+    /// 現在のピボット位置の化学シフト (ppm)
+    pub fn pivot_ppm(&self) -> f64 {
+        if let (Some(ppm), Some(unphased)) = (&self.ppm, &self.complex_spectrum_unphased) {
+            let n = ppm.len().min(unphased.len());
+            if n > 0 {
+                let k = self.pivot_index().min(n - 1);
+                let disp_idx = (n - 1) - k;
+                return ppm[disp_idx];
+            }
+        }
+        0.0
+    }
+
+    /// 指定された化学シフト target_ppm に最も近いデータ点にピボットを設定する
+    /// 既存のスペクトル波形（見た目）を完全に維持するため、P0 を自動換算する
+    pub fn set_pivot_ppm(&mut self, target_ppm: f64) {
+        if let (Some(ppm), Some(unphased)) = (&self.ppm, &self.complex_spectrum_unphased) {
+            let n = ppm.len().min(unphased.len());
+            if n > 0 {
+                let mut best_disp_idx = 0;
+                let mut min_diff = f64::MAX;
+                for i in 0..n {
+                    let diff = (ppm[i] - target_ppm).abs();
+                    if diff < min_diff {
+                        min_diff = diff;
+                        best_disp_idx = i;
+                    }
+                }
+                let new_k = (n - 1) - best_disp_idx;
+                let old_k = self.pivot_index().min(n - 1);
+                if new_k != old_k {
+                    let new_p0 = crate::core::signal::phase::convert_p0_for_new_pivot(
+                        self.state.p0,
+                        self.state.p1,
+                        old_k,
+                        new_k,
+                        n,
+                    );
+                    self.state.pivot_index = Some(new_k);
+                    self.state.p0 = new_p0;
+                }
+            }
+        }
+    }
+
+    /// スペクトルの絶対値 (Magnitude |z|) が最大の場所にピボットを設定する (Auto Pivot)
+    /// 既存のスペクトル波形を維持しながら P0 を換算する
+    pub fn auto_pivot(&mut self) -> Option<f64> {
+        if let Some(ref unphased) = self.complex_spectrum_unphased {
+            let n = unphased.len();
+            if n > 0 {
+                let new_k = crate::core::signal::phase::find_max_magnitude_index(unphased);
+                let old_k = self.pivot_index().min(n - 1);
+                let new_p0 = crate::core::signal::phase::convert_p0_for_new_pivot(
+                    self.state.p0,
+                    self.state.p1,
+                    old_k,
+                    new_k,
+                    n,
+                );
+                self.state.pivot_index = Some(new_k);
+                self.state.p0 = new_p0;
+                return Some(self.pivot_ppm());
+            }
+        }
+        None
+    }
+
+    /// 位相角を手動更新する (現在のピボットを使用)
     pub fn update_phase(&mut self, p0: f64, p1: f64) {
         if let Some(ref unphased) = self.complex_spectrum_unphased {
             self.state.p0 = p0;
             self.state.p1 = p1;
-            let spec = apply_phase_and_extract_real(unphased, p0, p1);
+            let pivot_k = self.pivot_index();
+            let spec = crate::core::signal::phase::apply_phase_and_extract_real_with_pivot(
+                unphased, p0, p1, pivot_k,
+            );
 
             // ベースライン補正が適用されていた場合はリセット
             self.baseline_array = None;
@@ -359,10 +450,11 @@ impl Project {
         }
     }
 
-    /// ACME 自動位相補正を実行する
+    /// ACME 自動位相補正を実行する (現在のピボットを使用)
     pub fn auto_phase(&mut self) -> (f64, f64) {
         if let Some(ref unphased) = self.complex_spectrum_unphased {
-            let (p0, p1) = crate::core::autophase::autophase_acme(unphased);
+            let pivot_k = self.pivot_index();
+            let (p0, p1) = crate::core::autophase::autophase_acme_with_pivot(unphased, pivot_k);
             self.update_phase(p0, p1);
             (p0, p1)
         } else {
@@ -429,7 +521,10 @@ impl Project {
 
         // 未補正の実部スペクトルを取得
         let base_real = if let Some(ref unphased) = self.complex_spectrum_unphased {
-            apply_phase_and_extract_real(unphased, self.state.p0, self.state.p1)
+            let pivot_k = self.pivot_index();
+            crate::core::signal::phase::apply_phase_and_extract_real_with_pivot(
+                unphased, self.state.p0, self.state.p1, pivot_k,
+            )
         } else if let Some(ref spec) = self.spectrum_real {
             if let Some(ref bl) = self.baseline_array {
                 spec + bl
@@ -514,11 +609,17 @@ impl Project {
         self.baseline_array = None;
         self.state.baseline_method = BaselineMethod::None;
 
-        // 3. Phase のリセット (P0=0, P1=0)
-        if let Some(ref unphased) = self.complex_spectrum_unphased {
+        // 3. Phase のリセット (P0=0, P1=0, ピボット初期化)
+        if self.complex_spectrum_unphased.is_some() {
             self.state.p0 = 0.0;
             self.state.p1 = 0.0;
-            self.spectrum_real = Some(apply_phase_and_extract_real(unphased, 0.0, 0.0));
+            self.auto_pivot();
+            let pivot_k = self.pivot_index();
+            if let Some(ref unphased) = self.complex_spectrum_unphased {
+                self.spectrum_real = Some(crate::core::signal::phase::apply_phase_and_extract_real_with_pivot(
+                    unphased, 0.0, 0.0, pivot_k,
+                ));
+            }
         }
 
         // 4. 解析項目のクリア
@@ -819,7 +920,10 @@ impl Project {
 
         // 実部スペクトルの復元: apply_phase - baseline
         if let Some(ref unphased) = self.complex_spectrum_unphased {
-            let mut real = apply_phase_and_extract_real(unphased, self.state.p0, self.state.p1);
+            let pivot_k = self.pivot_index();
+            let mut real = crate::core::signal::phase::apply_phase_and_extract_real_with_pivot(
+                unphased, self.state.p0, self.state.p1, pivot_k,
+            );
             if let Some(ref bl) = self.baseline_array {
                 real = real - bl;
             }
@@ -1047,6 +1151,54 @@ mod tests {
         assert_eq!(proj.state.peaks[0].intensity, new_spec[1], "Peak intensity should sync to new spectrum");
         assert_eq!(proj.state.integrations[0].y_start, new_spec[0], "Integration y_start should sync");
         assert_eq!(proj.state.integrations[0].y_end, new_spec[2], "Integration y_end should sync");
+    }
+
+    #[test]
+    fn test_phase_pivot_and_reference_tracking() {
+        let mut proj = Project::new();
+        let n = 100;
+        let mut ppm_vec = vec![0.0; n];
+        let mut unphased_vec = vec![Complex64::new(0.0, 0.0); n];
+        for i in 0..n {
+            ppm_vec[i] = 10.0 - (i as f64) * 0.1; // 10.0 -> 0.1 ppm
+        }
+
+        // i=20 (ppm=8.0) に最大ピーク、i=70 (ppm=3.0) に第2ピーク
+        // rev: k = (n - 1) - i
+        let k_peak1 = (n - 1) - 20; // 79
+        let k_peak2 = (n - 1) - 70; // 29
+        unphased_vec[k_peak1] = Complex64::new(100.0, 0.0);
+        unphased_vec[k_peak2] = Complex64::new(50.0, 0.0);
+
+        proj.ppm = Some(Array1::from_vec(ppm_vec));
+        proj.complex_spectrum_unphased = Some(Array1::from_vec(unphased_vec));
+
+        // 1. auto_pivot: 最大ピーク (i=20, 8.0 ppm, k=79) が選択されるか
+        proj.auto_pivot();
+        assert_eq!(proj.pivot_index(), k_peak1);
+        assert!((proj.pivot_ppm() - 8.0).abs() < 1e-4);
+
+        // 2. 位相を設定 (P0=30, P1=50)
+        proj.update_phase(30.0, 50.0);
+        let spec_before = proj.spectrum_real.clone().unwrap();
+
+        // 3. ピボットを第2ピーク (3.0 ppm) に変更
+        proj.set_pivot_ppm(3.0);
+        assert_eq!(proj.pivot_index(), k_peak2);
+        assert!((proj.pivot_ppm() - 3.0).abs() < 1e-4);
+
+        // ピボット変更後も波形が一切変化していないことを検証
+        let spec_after = proj.spectrum_real.clone().unwrap();
+        for i in 0..n {
+            assert!((spec_before[i] - spec_after[i]).abs() < 1e-9, "Mismatch at i={}", i);
+        }
+
+        // 4. Reference Set で化学シフトがシフトしたときのピボット追随検証
+        // ピボットは 3.0 ppm にある。Reference Set で 3.0 ppm -> 3.15 ppm にシフト (+0.15 ppm)
+        let pivot_ppm_before = proj.pivot_ppm();
+        proj.set_shift_reference(3.0, 3.15);
+        let pivot_ppm_after = proj.pivot_ppm();
+        assert!((pivot_ppm_after - (pivot_ppm_before + 0.15)).abs() < 1e-4, "Pivot PPM should track reference shift exactly");
     }
 }
 
