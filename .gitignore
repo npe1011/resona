@@ -6,14 +6,11 @@ Cargo.lock
 /test_data/
 *.jdf
 *.rsn
-*.ez
 *.npy
 
 # Previous versions and reference implementations
 /previous_version/
 /nmrglue/
-/hand_over_doc/
-/crates/
 
 # Temporary and editor files
 $null
@@ -23,5 +20,9 @@ $null
 .vscode/
 .cargo/
 TODO.txt
-
+GEMINI.MD
+SPEC.MD
+PROMPT.MD
+README.html
+/icon_work/
 

@@ -572,10 +572,16 @@ pub fn show_print_dialog(
                             .min_size(vec2(95.0, 26.0))
                             .rounding(3.0_f32);
                         if ui.add(btn_svg).clicked() {
+                            let default_svg_name = current_filepath
+                                .and_then(|p| p.file_stem())
+                                .and_then(|s| s.to_str())
+                                .map(|s| format!("{}.svg", s))
+                                .unwrap_or_else(|| "resona_report.svg".to_string());
+
                             if let Some(target) = rfd::FileDialog::new()
                                 .set_title("Export Complete Report as Vector SVG")
                                 .add_filter("Scalable Vector Graphics", &["svg"])
-                                .set_file_name("resona_report.svg")
+                                .set_file_name(&default_svg_name)
                                 .save_file()
                             {
                                 let svg = generate_complete_page_svg_with_style(
@@ -1150,21 +1156,41 @@ fn render_realtime_preview(
                         let end_tick = (mv_src_max / step).floor() as i64;
                         let decimals = if step < 0.0099 { 3 } else if step < 0.099 { 2 } else if step < 0.99 { 1 } else { 0 };
 
+                        let minor_step = step / 10.0;
+                        let start_minor = (mv_src_min / minor_step).ceil() as i64;
+                        let end_minor = (mv_src_max / minor_step).floor() as i64;
+
+                        // サブ目盛り (10分割、短め、ラベルなし)
+                        for m_idx in start_minor..=end_minor {
+                            if m_idx % 10 == 0 { continue; }
+                            let m_ppm = m_idx as f64 * minor_step;
+                            let m_x = mv_ppm_to_x(m_ppm);
+                            if m_x >= inset_rect.min.x && m_x <= inset_rect.max.x {
+                                painter.line_segment(
+                                    [Pos2::new(m_x, inset_axis_y), Pos2::new(m_x, inset_axis_y + 1.2)],
+                                    Stroke::new(0.5_f32, Color32::from_gray(120)),
+                                );
+                            }
+                        }
+
+                        // メイン目盛り
                         for t_idx in start_tick..=end_tick {
                             let tick_ppm = t_idx as f64 * step;
                             let tick_x = mv_ppm_to_x(tick_ppm);
-                            if tick_x >= inset_rect.min.x + 8.0 && tick_x <= inset_rect.max.x - 8.0 {
+                            if tick_x >= inset_rect.min.x && tick_x <= inset_rect.max.x {
                                 painter.line_segment(
                                     [Pos2::new(tick_x, inset_axis_y), Pos2::new(tick_x, inset_axis_y + 2.5)],
                                     Stroke::new(0.7_f32, Color32::BLACK),
                                 );
-                                painter.text(
-                                    Pos2::new(tick_x, inset_axis_y + 3.0),
-                                    Align2::CENTER_TOP,
-                                    format!("{:.1$}", tick_ppm, decimals),
-                                    FontId::new(6.0, FontFamily::Proportional),
-                                    Color32::BLACK,
-                                );
+                                if tick_x >= inset_rect.min.x + 8.0 && tick_x <= inset_rect.max.x - 8.0 {
+                                    painter.text(
+                                        Pos2::new(tick_x, inset_axis_y + 3.0),
+                                        Align2::CENTER_TOP,
+                                        format!("{:.1$}", tick_ppm, decimals),
+                                        FontId::new(6.0, FontFamily::Proportional),
+                                        Color32::BLACK,
+                                    );
+                                }
                             }
                         }
                     }
@@ -2019,21 +2045,48 @@ fn generate_plot_svg_content(
                 let end_tick = (mv_src_max / step).floor() as i64;
                 let decimals = if step < 0.0099 { 3 } else if step < 0.099 { 2 } else if step < 0.99 { 1 } else { 0 };
 
+                let minor_step = step / 10.0;
+                let start_minor = (mv_src_min / minor_step).ceil() as i64;
+                let end_minor = (mv_src_max / minor_step).floor() as i64;
+
+                // サブ目盛り (10分割、短め、ラベルなし)
+                for m_idx in start_minor..=end_minor {
+                    if m_idx % 10 == 0 { continue; }
+                    let m_ppm = m_idx as f64 * minor_step;
+                    let m_x = mv_ppm_to_x(m_ppm);
+                    if m_x >= inset_x + 6.0 && m_x <= inset_x + inset_w - 6.0 {
+                        svg.push_str(&format!(
+                            r##"<line x1="{tx:.1}" y1="{y1:.1}" x2="{tx:.1}" y2="{y2:.1}" stroke="#6c757d" stroke-width="0.5" />
+"##,
+                            tx = m_x,
+                            y1 = inset_axis_y,
+                            y2 = inset_axis_y + 1.5,
+                        ));
+                    }
+                }
+
+                // メイン目盛り
                 for t_idx in start_tick..=end_tick {
                     let tick_ppm = t_idx as f64 * step;
                     let tick_x = mv_ppm_to_x(tick_ppm);
-                    if tick_x >= inset_x + 10.0 && tick_x <= inset_x + inset_w - 10.0 {
+                    if tick_x >= inset_x + 6.0 && tick_x <= inset_x + inset_w - 6.0 {
                         svg.push_str(&format!(
                             r##"<line x1="{tx:.1}" y1="{y1:.1}" x2="{tx:.1}" y2="{y2:.1}" stroke="#212529" stroke-width="0.7" />
-<text x="{tx:.1}" y="{ty:.1}" font-size="7" text-anchor="middle" font-family="sans-serif" fill="#212529">{val:.prec$}</text>
 "##,
                             tx = tick_x,
                             y1 = inset_axis_y,
                             y2 = inset_axis_y + 3.0,
-                            ty = inset_axis_y + 11.0,
-                            val = tick_ppm,
-                            prec = decimals,
                         ));
+                        if tick_x >= inset_x + 10.0 && tick_x <= inset_x + inset_w - 10.0 {
+                            svg.push_str(&format!(
+                                r##"<text x="{tx:.1}" y="{ty:.1}" font-size="7" text-anchor="middle" font-family="sans-serif" fill="#212529">{val:.prec$}</text>
+"##,
+                                tx = tick_x,
+                                ty = inset_axis_y + 11.0,
+                                val = tick_ppm,
+                                prec = decimals,
+                            ));
+                        }
                     }
                 }
             }
@@ -2939,17 +2992,44 @@ fn print_windows_native(
                         SetTextColor(hdc, rgb(33, 37, 41));
                     }
 
+                    let minor_step = step / 10.0;
+                    let start_minor = (mv_src_min / minor_step).ceil() as i64;
+                    let end_minor = (mv_src_max / minor_step).floor() as i64;
+
+                    let minor_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(108, 117, 125)) };
+                    let old_minor_p = unsafe { SelectObject(hdc, minor_pen) };
+
+                    // サブ目盛り (10分割、短め、ラベルなし)
+                    for m_idx in start_minor..=end_minor {
+                        if m_idx % 10 == 0 { continue; }
+                        let m_ppm = m_idx as f64 * minor_step;
+                        let m_x = mv_ppm_to_x(m_ppm);
+                        if m_x >= inset_x + (dpi_x * 6 / 72) && m_x <= inset_x + inset_w - (dpi_x * 6 / 72) {
+                            unsafe {
+                                MoveToEx(hdc, m_x, inset_axis_y, std::ptr::null_mut());
+                                LineTo(hdc, m_x, inset_axis_y + (dpi_y * 1 / 72).max(1));
+                            }
+                        }
+                    }
+                    unsafe {
+                        SelectObject(hdc, old_minor_p);
+                        DeleteObject(minor_pen);
+                    }
+
+                    // メイン目盛り
                     for t_idx in start_tick..=end_tick {
                         let tick_ppm = t_idx as f64 * step;
                         let tick_x = mv_ppm_to_x(tick_ppm);
-                        if tick_x >= inset_x + (dpi_x * 8 / 72) && tick_x <= inset_x + inset_w - (dpi_x * 8 / 72) {
+                        if tick_x >= inset_x + (dpi_x * 6 / 72) && tick_x <= inset_x + inset_w - (dpi_x * 6 / 72) {
                             unsafe {
                                 MoveToEx(hdc, tick_x, inset_axis_y, std::ptr::null_mut());
-                                LineTo(hdc, tick_x, inset_axis_y + (dpi_y * 2 / 72));
+                                LineTo(hdc, tick_x, inset_axis_y + (dpi_y * 2 / 72).max(2));
                             }
-                            let s = to_wide(&format!("{:.1$}", tick_ppm, decimals));
-                            unsafe {
-                                TextOutW(hdc, tick_x, inset_axis_y + (dpi_y * 3 / 72), s.as_ptr(), (s.len() - 1) as i32);
+                            if tick_x >= inset_x + (dpi_x * 8 / 72) && tick_x <= inset_x + inset_w - (dpi_x * 8 / 72) {
+                                let s = to_wide(&format!("{:.1$}", tick_ppm, decimals));
+                                unsafe {
+                                    TextOutW(hdc, tick_x, inset_axis_y + (dpi_y * 3 / 72), s.as_ptr(), (s.len() - 1) as i32);
+                                }
                             }
                         }
                     }

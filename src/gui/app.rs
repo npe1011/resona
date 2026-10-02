@@ -9,9 +9,9 @@ use crate::core::{
 
 use crate::gui::dialogs::{
     show_display_dialog, show_ft_dialog, show_full_auto_dialog, show_jcoupling_dialog,
-    show_multiview_yscale_dialog, show_print_dialog, DisplayDialogState, FtDialogState,
-    FullAutoBaselineChoice, FullAutoDialogState, JCouplingDialogState,
-    MultiviewYScaleDialogState, PrintDialogState,
+    show_multiview_yscale_dialog, show_peak_list_dialog, show_print_dialog, DisplayDialogState,
+    FtDialogState, FullAutoBaselineChoice, FullAutoDialogState, JCouplingDialogState,
+    MultiviewYScaleDialogState, PeakListDialogState, PrintDialogState,
 };
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 use crate::gui::panels::{
@@ -310,6 +310,7 @@ pub struct ResonaApp {
     pub display_dialog_state: DisplayDialogState,
     pub jcoupling_dialog_state: JCouplingDialogState,
     pub multiview_yscale_dialog_state: MultiviewYScaleDialogState,
+    pub peak_list_dialog_state: PeakListDialogState,
     pub print_dialog_state: PrintDialogState,
 
     pub plot_style: PlotStyle,
@@ -375,6 +376,7 @@ impl Default for ResonaApp {
             display_dialog_state,
             jcoupling_dialog_state: JCouplingDialogState::default(),
             multiview_yscale_dialog_state: MultiviewYScaleDialogState::default(),
+            peak_list_dialog_state: PeakListDialogState::default(),
             print_dialog_state,
             plot_style,
             transform: None,
@@ -388,7 +390,7 @@ impl Default for ResonaApp {
             hovered_multiview_id: None,
             selected_j_idx: None,
             last_multiview_ratio: settings.multiview_ratio,
-            status_message: "Ready. Drag & drop .jdf or .rsn file here.".to_string(),
+            status_message: "Ready".to_string(),
             y_max_scale: 80.0,
             y_min_scale: 10.0,
             last_transform_y: None,
@@ -449,6 +451,7 @@ impl ResonaApp {
             || self.display_dialog_state.open
             || self.jcoupling_dialog_state.open
             || self.multiview_yscale_dialog_state.open
+            || self.peak_list_dialog_state.open
             || self.print_dialog_state.is_open
     }
 
@@ -884,6 +887,24 @@ impl ResonaApp {
         );
     }
 
+    /// Peak List ダイアログを開く (低磁場順・ppm降順で半角カンマ+スペース区切り)
+    pub fn open_peak_list_dialog(&mut self) {
+        let mut sorted_peaks = self.project.state.peaks.clone();
+        // 低磁場 (Downfield) から順: ppm の値が大きい順 (降順)
+        sorted_peaks.sort_by(|a, b| b.ppm.partial_cmp(&a.ppm).unwrap_or(std::cmp::Ordering::Equal));
+
+        let decimals = self.plot_style.ppm_decimals;
+        let formatted_list: Vec<String> = sorted_peaks
+            .iter()
+            .map(|pk| format!("{:.1$}", pk.ppm, decimals))
+            .collect();
+
+        self.peak_list_dialog_state.peak_count = sorted_peaks.len();
+        self.peak_list_dialog_state.text = formatted_list.join(", ");
+        self.peak_list_dialog_state.copied = false;
+        self.peak_list_dialog_state.open = true;
+    }
+
     /// Display Settings ダイアログを開く (相対パーセント、目盛り設定などを初期化)
     pub fn open_display_dialog(&mut self) {
         let max_intensity = self.project.spectrum_real.as_ref()
@@ -1134,12 +1155,15 @@ impl eframe::App for ResonaApp {
         TopBottomPanel::top("top_menu")
             .frame(egui::Frame::none()
                 .fill(Color32::WHITE)
+                .inner_margin(Margin { left: 10.0, right: 10.0, top: 4.0, bottom: 4.0 })
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(222, 226, 230))))
             .show(ctx, |ui| {
                 if is_modal_active {
                     ui.disable();
                 }
                 egui::menu::bar(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+
                     ui.menu_button("File", |ui| {
                         if ui.button("Open Data... (Ctrl+O)").clicked() {
                             self.open_file_dialog();
@@ -1156,6 +1180,11 @@ impl eframe::App for ResonaApp {
                     });
 
                     ui.menu_button("Edit", |ui| {
+                        if ui.button("Peak List").clicked() {
+                            self.open_peak_list_dialog();
+                            ui.close_menu();
+                        }
+                        ui.separator();
                         if ui.button("Undo (Ctrl+Z)").clicked() {
                             if self.project.undo() {
                                 self.sync_action_bar_from_project();
@@ -1636,8 +1665,8 @@ impl eframe::App for ResonaApp {
                         painter.text(
                             plot_rect.center(),
                             egui::Align2::CENTER_CENTER,
-                            "No NMR data loaded.\nDrop a .jdf or .rsn file here, or use File -> Open...",
-                            egui::FontId::proportional(15.0),
+                            "No Data",
+                            egui::FontId::proportional(16.0),
                             Color32::from_gray(140),
                         );
                     }
@@ -1710,11 +1739,16 @@ impl eframe::App for ResonaApp {
                                         self.active_zoom = Some(target_tool);
                                         self.action_state.clear_submodes();
                                     }
-                                } else if let Some(saved) = self.temp_zoom_saved.take() {
+                                } else if self.drag_start.is_none() {
+                                    // ドラッグ中でなければキーを離した瞬間に復帰
+                                    if let Some(saved) = self.temp_zoom_saved.take() {
+                                        self.active_zoom = saved;
+                                    }
+                                }
+                            } else if self.drag_start.is_none() {
+                                if let Some(saved) = self.temp_zoom_saved.take() {
                                     self.active_zoom = saved;
                                 }
-                            } else if let Some(saved) = self.temp_zoom_saved.take() {
-                                self.active_zoom = saved;
                             }
 
                             // 3. 矢印キー（← / →）によるデータ範囲内スクロール、および（↑ / ↓）による Y-Scale (%) 調整
@@ -1748,57 +1782,65 @@ impl eframe::App for ResonaApp {
 
                                 // 3a. 左右キー: データ範囲 (PPM端) を超えないようにスクロール & クランプ
                                 if is_left || is_right {
-                                    let x_span = (t.ppm_max - t.ppm_min).abs();
-                                    let continuous_rate = 0.6 * shift_mult * accel_mult * dt;
-                                    let step_x_cont = x_span * continuous_rate;
-                                    let discrete_rate = 0.05 * shift_mult;
-                                    let step_x_disc = x_span * discrete_rate;
-
-                                    let dx = if is_left {
-                                        if pressed_left { step_x_disc } else { step_x_cont }
-                                    } else {
-                                        -(if pressed_right { step_x_disc } else { step_x_cont })
-                                    };
-
-                                    t.ppm_min += dx;
-                                    t.ppm_max += dx;
-
-                                    // データ範囲でクランプ
+                                    // データ全体の最小・最大 PPM を算出
                                     let (data_min_ppm, data_max_ppm) = match self.project.ppm {
                                         Some(ref p) if !p.is_empty() => {
-                                            let p0 = p[0];
-                                            let p1 = p[p.len() - 1];
-                                            (p0.min(p1), p0.max(p1))
+                                            let mut mn = p[0];
+                                            let mut mx = p[0];
+                                            for &val in p.iter() {
+                                                if val < mn { mn = val; }
+                                                if val > mx { mx = val; }
+                                            }
+                                            (mn, mx)
                                         }
                                         _ => (-10.0, 200.0),
                                     };
 
                                     let cur_min = t.ppm_min.min(t.ppm_max);
                                     let cur_max = t.ppm_min.max(t.ppm_max);
-                                    let width = cur_max - cur_min;
+                                    let view_width = cur_max - cur_min;
                                     let data_width = data_max_ppm - data_min_ppm;
 
-                                    if width < data_width {
+                                    // 表示幅がデータ幅未満のときのみスクロールを許可し、端でクランプ
+                                    if view_width < data_width - 1e-5 {
+                                        let x_span = (t.ppm_max - t.ppm_min).abs();
+                                        let continuous_rate = 0.6 * shift_mult * accel_mult * dt;
+                                        let step_x_cont = x_span * continuous_rate;
+                                        let discrete_rate = 0.05 * shift_mult;
+                                        let step_x_disc = x_span * discrete_rate;
+
+                                        let dx = if is_left {
+                                            if pressed_left { step_x_disc } else { step_x_cont }
+                                        } else {
+                                            -(if pressed_right { step_x_disc } else { step_x_cont })
+                                        };
+
+                                        t.ppm_min += dx;
+                                        t.ppm_max += dx;
+
                                         let is_desc = t.ppm_min > t.ppm_max;
-                                        if cur_max > data_max_ppm {
-                                            let new_max = data_max_ppm;
-                                            let new_min = data_max_ppm - width;
+                                        let new_min = t.ppm_min.min(t.ppm_max);
+                                        let new_max = t.ppm_min.max(t.ppm_max);
+
+                                        if new_max > data_max_ppm {
+                                            let clamped_max = data_max_ppm;
+                                            let clamped_min = data_max_ppm - view_width;
                                             if is_desc {
-                                                t.ppm_min = new_max;
-                                                t.ppm_max = new_min;
+                                                t.ppm_min = clamped_max;
+                                                t.ppm_max = clamped_min;
                                             } else {
-                                                t.ppm_min = new_min;
-                                                t.ppm_max = new_max;
+                                                t.ppm_min = clamped_min;
+                                                t.ppm_max = clamped_max;
                                             }
-                                        } else if cur_min < data_min_ppm {
-                                            let new_min = data_min_ppm;
-                                            let new_max = data_min_ppm + width;
+                                        } else if new_min < data_min_ppm {
+                                            let clamped_min = data_min_ppm;
+                                            let clamped_max = data_min_ppm + view_width;
                                             if is_desc {
-                                                t.ppm_min = new_max;
-                                                t.ppm_max = new_min;
+                                                t.ppm_min = clamped_max;
+                                                t.ppm_max = clamped_min;
                                             } else {
-                                                t.ppm_min = new_min;
-                                                t.ppm_max = new_max;
+                                                t.ppm_min = clamped_min;
+                                                t.ppm_max = clamped_max;
                                             }
                                         }
                                     }
@@ -1836,13 +1878,25 @@ impl eframe::App for ResonaApp {
 
                         // 4. マウスホイール (通常: Y-scale Max, Shift: Y-scale Min)
                         if response.hovered() {
-                            let scroll_y = ctx.input(|i| i.raw_scroll_delta.y) as f64;
-                            if scroll_y.abs() > 0.1 {
-                                let is_shift = ctx.input(|i| i.modifiers.shift);
+                            let raw_delta = ctx.input(|i| i.raw_scroll_delta);
+                            let is_shift = ctx.input(|i| i.modifiers.shift);
+                            // Shift 押下時は OS により上下ホイールが横スクロール (x) に変換される場合があるため、
+                            // x と y のうち絶対値が大きい方を採用する
+                            let scroll_val = if is_shift {
+                                if raw_delta.x.abs() > raw_delta.y.abs() {
+                                    raw_delta.x as f64
+                                } else {
+                                    raw_delta.y as f64
+                                }
+                            } else {
+                                raw_delta.y as f64
+                            };
+
+                            if scroll_val.abs() > 0.1 {
                                 let max_intensity = self.project.max_intensity().max(1e-6);
                                 if is_shift {
                                     // Shift + ホイール: Min (%) 調整
-                                    let delta = (scroll_y / 30.0).clamp(-10.0, 10.0) * 2.0;
+                                    let delta = (scroll_val / 30.0).clamp(-10.0, 10.0) * 2.0;
                                     let new_min = (self.y_min_scale + delta).clamp(0.0, 10000.0);
                                     if (new_min - self.y_min_scale).abs() > 1e-4 {
                                         self.y_min_scale = new_min;
@@ -1853,7 +1907,7 @@ impl eframe::App for ResonaApp {
                                     }
                                 } else {
                                     // 通常ホイール: Max (%) 調整
-                                    let factor = 1.10_f64.powf(scroll_y / 50.0);
+                                    let factor = 1.10_f64.powf(scroll_val / 50.0);
                                     let new_max_scale = (self.y_max_scale * factor).clamp(1.0, 10000.0);
                                     if (new_max_scale - self.y_max_scale).abs() > 1e-4 {
                                         self.y_max_scale = new_max_scale;
@@ -2568,6 +2622,9 @@ impl eframe::App for ResonaApp {
                                 }
                             }
                         } else {
+                            if self.drag_start.is_none() {
+                                self.drag_start = ctx.input(|i| i.pointer.press_origin()).or(pointer_pos);
+                            }
                             self.drag_current = pointer_pos;
                         }
                     }
@@ -3126,6 +3183,18 @@ impl eframe::App for ResonaApp {
                         self.drag_start = None;
                         self.drag_current = None;
                         self.is_dragging_threshold = false;
+
+                        // 一時 Zoom 中にキーが既に離れていた場合、ドラッグ完了のこの瞬間に元のモードへ復帰
+                        if self.temp_zoom_saved.is_some() {
+                            let z_down = ctx.input(|i| i.key_down(Key::Z));
+                            let x_down = ctx.input(|i| i.key_down(Key::X));
+                            let s_down = ctx.input(|i| i.key_down(Key::S));
+                            if !z_down && !x_down && !s_down {
+                                if let Some(saved) = self.temp_zoom_saved.take() {
+                                    self.active_zoom = saved;
+                                }
+                            }
+                        }
                     }
                 }
             } else {
@@ -3281,6 +3350,8 @@ impl eframe::App for ResonaApp {
             &self.project.state.j_couplings,
             self.current_file_path.as_deref(),
         );
+
+        show_peak_list_dialog(ctx, &mut self.peak_list_dialog_state);
 
         if self.print_dialog_state.settings != prev_print_settings
             || (self.action_state.multiview_ratio - prev_multiview_ratio).abs() > 1e-6

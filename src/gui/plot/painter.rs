@@ -833,25 +833,46 @@ fn paint_multiviews(
             0
         };
 
+        let minor_step = step / 10.0;
+        let start_minor = (src_min / minor_step).ceil() as i64;
+        let end_minor = (src_max / minor_step).floor() as i64;
+
+        // 7a. サブ目盛り (10分割、数値ラベルなし、短め)
+        for m_idx in start_minor..=end_minor {
+            if m_idx % 10 == 0 {
+                continue; // メイン目盛りと一致する位置はスキップ
+            }
+            let m_ppm = m_idx as f64 * minor_step;
+            let m_x = inset_transform.ppm_to_screen_x(m_ppm);
+            if m_x >= inset_rect.min.x && m_x <= inset_rect.max.x {
+                painter.line_segment(
+                    [Pos2::new(m_x, axis_y), Pos2::new(m_x, axis_y + 1.8)],
+                    Stroke::new(0.75_f32, Color32::from_gray(100)),
+                );
+            }
+        }
+
+        // 7b. メイン目盛り (長め、数値ラベルあり)
         for t_idx in start_tick..=end_tick {
             let tick_ppm = t_idx as f64 * step;
             let tick_x = inset_transform.ppm_to_screen_x(tick_ppm);
-            // 枠線の左右 10px 以内は文字がはみ出さないようスキップ
-            if tick_x >= inset_rect.min.x + 10.0 && tick_x <= inset_rect.max.x - 10.0 {
+            if tick_x >= inset_rect.min.x && tick_x <= inset_rect.max.x {
                 // 目盛り線
                 painter.line_segment(
-                    [Pos2::new(tick_x, axis_y), Pos2::new(tick_x, axis_y + 3.0)],
+                    [Pos2::new(tick_x, axis_y), Pos2::new(tick_x, axis_y + 3.5)],
                     Stroke::new(1.0_f32, Color32::BLACK),
                 );
-                // ラベル
-                let label = format!("{:.1$}", tick_ppm, decimals);
-                painter.text(
-                    Pos2::new(tick_x, axis_y + 10.0),
-                    egui::Align2::CENTER_CENTER,
-                    label,
-                    egui::FontId::proportional(8.5),
-                    Color32::from_gray(30),
-                );
+                // 枠線の左右 10px 以内は文字がはみ出さないようスキップ
+                if tick_x >= inset_rect.min.x + 10.0 && tick_x <= inset_rect.max.x - 10.0 {
+                    let label = format!("{:.1$}", tick_ppm, decimals);
+                    painter.text(
+                        Pos2::new(tick_x, axis_y + 10.0),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(8.5),
+                        Color32::from_gray(30),
+                    );
+                }
             }
         }
 

@@ -16,6 +16,7 @@ thiserror = "2"
 egui = "0.29"
 eframe = "0.29"
 rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 approx = "0.5"
