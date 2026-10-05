@@ -37,10 +37,10 @@ echo -n "APPL????" > "${CONTENTS_DIR}/PkgInfo"
 
 # 4. Copy Icon
 echo "==> Copying app icon..."
-if [ -f "${PROJECT_DIR}/src/icon/icon_mac.icns" ]; then
-    cp "${PROJECT_DIR}/src/icon/icon_mac.icns" "${RESOURCES_DIR}/icon.icns"
+if [ -f "${PROJECT_DIR}/assets/icons/icon_mac.icns" ]; then
+    cp "${PROJECT_DIR}/assets/icons/icon_mac.icns" "${RESOURCES_DIR}/icon.icns"
 else
-    echo "Warning: src/icon/icon_mac.icns not found."
+    echo "Warning: assets/icons/icon_mac.icns not found."
 fi
 
 # 5. Ad-hoc code signing (required on modern macOS / Apple Silicon)

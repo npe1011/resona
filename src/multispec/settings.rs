@@ -26,6 +26,16 @@ pub struct MultiSpecPrintSettings {
     pub orientation: PrintOrientation,
     #[serde(default = "default_margin_mm")]
     pub margin_mm: f64,
+    #[serde(default = "default_ppm_decimals")]
+    pub ppm_decimals: usize,
+    #[serde(default = "default_integral_decimals")]
+    pub integral_decimals: usize,
+    #[serde(default = "default_auto_ticks")]
+    pub auto_ticks: bool,
+    #[serde(default = "default_tick_major")]
+    pub tick_major: f64,
+    #[serde(default = "default_tick_minor")]
+    pub tick_minor: usize,
 }
 
 fn default_title() -> String {
@@ -62,6 +72,11 @@ impl Default for MultiSpecPrintSettings {
             show_filepath: false,
             orientation: PrintOrientation::Landscape,
             margin_mm: default_margin_mm(),
+            ppm_decimals: default_ppm_decimals(),
+            integral_decimals: default_integral_decimals(),
+            auto_ticks: default_auto_ticks(),
+            tick_major: default_tick_major(),
+            tick_minor: default_tick_minor(),
         }
     }
 }

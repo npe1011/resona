@@ -167,9 +167,13 @@ pub fn show_print_style_dialog(
         return;
     }
 
+    let mut is_open = state.is_open;
+    let mut should_close = false;
+
     Window::new(RichText::new("Print Settings").strong().size(13.5))
         .collapsible(false)
         .resizable(false)
+        .open(&mut is_open)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .min_width(400.0)
         .show(ctx, |ui| {
@@ -320,13 +324,21 @@ pub fn show_print_style_dialog(
                         .fill(Color32::from_rgb(13, 110, 253))
                         .rounding(3.0_f32);
                     if ui.add(btn_close).clicked() {
-                        let _ = settings.save();
-                        state.is_open = false;
-                        state.status_message = None;
+                        should_close = true;
                     }
                 });
             });
         });
+
+    if should_close {
+        is_open = false;
+    }
+
+    if !is_open {
+        let _ = settings.save();
+        state.is_open = false;
+        state.status_message = None;
+    }
 }
 
 #[cfg(test)]

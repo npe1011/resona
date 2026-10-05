@@ -11,6 +11,8 @@ use crate::core::compute_integral;
 use crate::gui::dialogs::print_dialog::{
     fetch_system_printers, open_printer_preferences, PrintOrientation, SystemPrinter,
 };
+#[cfg(target_os = "windows")]
+use crate::gui::dialogs::print_dialog::get_or_create_devmode;
 use crate::gui::dialogs::print_style_dialog::{
     PrintStyleDialogState, PrintStyleSettings,
 };
@@ -26,6 +28,7 @@ pub struct MultiSpecPrintDialogState {
     pub status_message: Option<(String, bool)>, // (message, is_error)
     pub open_counter: usize,
     pub style_dialog_state: PrintStyleDialogState,
+    pub devmode: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl Default for MultiSpecPrintDialogState {
@@ -37,6 +40,7 @@ impl Default for MultiSpecPrintDialogState {
             status_message: None,
             open_counter: 0,
             style_dialog_state: PrintStyleDialogState::default(),
+            devmode: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -58,6 +62,10 @@ impl MultiSpecPrintDialogState {
         self.is_open = true;
         self.open_counter += 1;
         self.status_message = None;
+        self.style_dialog_state.is_open = false;
+        if let Ok(mut lock) = self.devmode.lock() {
+            *lock = None;
+        }
 
         let printers_arc = Arc::clone(&self.available_printers);
         self.is_loading_printers = true;
@@ -156,20 +164,26 @@ pub fn show_multispec_print_dialog(
                                     } else {
                                         p.name.clone()
                                     };
-                                    ui.selectable_value(
+                                    if ui.selectable_value(
                                         &mut print_settings.printer_name,
                                         p.name.clone(),
                                         label,
-                                    );
+                                    ).changed() {
+                                        if let Ok(mut lock) = dialog_state.devmode.lock() {
+                                            *lock = None;
+                                        }
+                                    }
                                 }
                             }
                         }
                     });
 
                 let p_name = print_settings.printer_name.clone();
+                let orient = print_settings.orientation;
+                let dev_arc = Arc::clone(&dialog_state.devmode);
                 if ui.button("Detail...").clicked() && !p_name.is_empty() {
                     std::thread::spawn(move || {
-                        open_printer_preferences(&p_name);
+                        open_printer_preferences(&p_name, orient, dev_arc);
                     });
                 }
 
@@ -180,16 +194,24 @@ pub fn show_multispec_print_dialog(
                 ui.separator();
 
                 ui.label(RichText::new("Orientation").strong().size(12.0));
-                ui.selectable_value(
+                if ui.selectable_value(
                     &mut print_settings.orientation,
                     PrintOrientation::Landscape,
                     "Landscape",
-                );
-                ui.selectable_value(
+                ).changed() {
+                    if let Ok(mut lock) = dialog_state.devmode.lock() {
+                        *lock = None;
+                    }
+                }
+                if ui.selectable_value(
                     &mut print_settings.orientation,
                     PrintOrientation::Portrait,
                     "Portrait",
-                );
+                ).changed() {
+                    if let Ok(mut lock) = dialog_state.devmode.lock() {
+                        *lock = None;
+                    }
+                }
             });
 
             // 2. 印刷項目 & アクションボタン
@@ -223,8 +245,12 @@ pub fn show_multispec_print_dialog(
                             .fill(Color32::from_rgb(13, 110, 253))
                             .rounding(3.0_f32);
                         if ui.add(btn_print).clicked() {
-                            match execute_multispec_native_print(state, print_settings, style_settings) {
-                                Ok(()) => {
+                            let devmode_copy = dialog_state.devmode.lock().ok().and_then(|g| g.clone());
+                            match execute_multispec_native_print(state, print_settings, style_settings, devmode_copy.as_deref()) {
+                                Ok(Some(info_msg)) => {
+                                    dialog_state.status_message = Some((info_msg, false));
+                                }
+                                Ok(None) => {
                                     should_close = true;
                                 }
                                 Err(e) => {
@@ -238,18 +264,28 @@ pub fn show_multispec_print_dialog(
                             .min_size(vec2(95.0, 26.0))
                             .rounding(3.0_f32);
                         if ui.add(btn_svg).clicked() {
-                            let default_svg_name = if let Some(first) = state.items.first() {
+                            let default_svg_name = if let Some(ref rsm) = state.rsm_path {
+                                rsm.file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| format!("{}.svg", s))
+                                    .unwrap_or_else(|| "multispec_comparison.svg".to_string())
+                            } else if let Some(first) = state.items.first() {
                                 format!("{}_multispec.svg", first.name.replace(' ', "_"))
                             } else {
                                 "multispec_comparison.svg".to_string()
                             };
 
-                            if let Some(target) = rfd::FileDialog::new()
+                            let mut dialog = rfd::FileDialog::new()
                                 .set_title("Export MultiSpec as Vector SVG")
                                 .add_filter("Scalable Vector Graphics", &["svg"])
-                                .set_file_name(&default_svg_name)
-                                .save_file()
-                            {
+                                .set_file_name(&default_svg_name);
+                            if let Some(ref rsm) = state.rsm_path {
+                                if let Some(parent) = rsm.parent() {
+                                    dialog = dialog.set_directory(parent);
+                                }
+                            }
+
+                            if let Some(target) = dialog.save_file() {
                                 let svg = export_multispec_svg(
                                     state,
                                     print_settings,
@@ -295,13 +331,17 @@ pub fn show_multispec_print_dialog(
             render_multispec_realtime_preview(ui, avail, state, print_settings, style_settings);
         });
 
-    // MultiSpec 専用スタイル設定ダイアログ表示
-    show_multispec_print_settings_dialog(ctx, &mut dialog_state.style_dialog_state, style_settings);
-
     if should_close {
         is_open = false;
     }
     dialog_state.is_open = is_open;
+
+    // 親ダイアログが閉じている場合、子ダイアログ (Print Settings) も必ず閉じる
+    if !dialog_state.is_open {
+        dialog_state.style_dialog_state.is_open = false;
+    } else {
+        show_multispec_print_settings_dialog(ctx, &mut dialog_state.style_dialog_state, style_settings);
+    }
 }
 
 /// リアルタイム用紙プレビューの描画
@@ -567,27 +607,20 @@ fn render_multispec_realtime_preview(
             Stroke::new(1.0_f32, Color32::from_rgb(33, 37, 41)),
         );
 
-        let major_step = if p_span > 50.0 {
-            10.0
-        } else if p_span > 20.0 {
-            5.0
-        } else if p_span > 8.0 {
-            1.0
-        } else if p_span > 3.0 {
-            0.5
-        } else if p_span > 1.0 {
-            0.2
-        } else {
-            0.1
-        };
+        let (step, dec) = crate::core::calc_ppm_ticks(p_span, settings.auto_ticks, settings.tick_major);
+        let minor_n = settings.tick_minor.max(1);
+        let minor_step = step / (minor_n as f64);
 
-        let first_major = (p_min.min(p_max) / major_step).floor() * major_step;
-        let last_major = (p_min.max(p_max) / major_step).ceil() * major_step;
+        let p_low = p_min.min(p_max);
+        let p_high = p_min.max(p_max);
+        let first_major = (p_low / step).floor() * step;
+        let last_major = (p_high / step).ceil() * step;
 
         let font_id = FontId::new(8.0, FontFamily::Proportional);
-        let mut cur_major = first_major;
-        while cur_major <= last_major + major_step * 0.1 {
-            if (p_min..=p_max).contains(&cur_major) || (p_max..=p_min).contains(&cur_major) {
+        let mut cur_major = first_major - step;
+        while cur_major <= last_major + step * 0.1 {
+            // 主目盛り
+            if cur_major >= p_low - 1e-9 && cur_major <= p_high + 1e-9 {
                 let x = ppm_to_screen_x(cur_major);
                 if x >= plot_rect.min.x - 1.0 && x <= plot_rect.max.x + 1.0 {
                     painter.line_segment(
@@ -595,13 +628,7 @@ fn render_multispec_realtime_preview(
                         Stroke::new(0.8_f32, Color32::from_rgb(33, 37, 41)),
                     );
 
-                    let label = if major_step < 0.1 {
-                        format!("{:.2}", cur_major)
-                    } else if major_step < 1.0 {
-                        format!("{:.1}", cur_major)
-                    } else {
-                        format!("{:.0}", cur_major)
-                    };
+                    let label = format!("{:.prec$}", cur_major, prec = dec);
 
                     painter.text(
                         Pos2::new(x, axis_y + 11.0),
@@ -611,24 +638,25 @@ fn render_multispec_realtime_preview(
                         Color32::from_rgb(33, 37, 41),
                     );
                 }
+            }
 
-                // 小目盛り
-                let sub_step = major_step / 10.0;
-                for s in 1..10 {
-                    let sub_ppm = cur_major + sub_step * (s as f64);
-                    if (p_min..=p_max).contains(&sub_ppm) || (p_max..=p_min).contains(&sub_ppm) {
+            // サブ目盛り (主目盛り外側の余白部も描画)
+            if minor_n > 1 {
+                for s in 1..minor_n {
+                    let sub_ppm = cur_major + (s as f64) * minor_step;
+                    if sub_ppm >= p_low - 1e-9 && sub_ppm <= p_high + 1e-9 {
                         let sx = ppm_to_screen_x(sub_ppm);
                         if sx >= plot_rect.min.x && sx <= plot_rect.max.x {
-                            let tick_len = if s == 5 { 3.0 } else { 2.0 };
+                            let tick_len = if minor_n % 2 == 0 && s == minor_n / 2 { 3.5 } else { 2.5 };
                             painter.line_segment(
                                 [Pos2::new(sx, axis_y), Pos2::new(sx, axis_y + tick_len)],
-                                Stroke::new(0.5_f32, Color32::from_rgb(108, 117, 125)),
+                                Stroke::new(0.6_f32, Color32::from_rgb(108, 117, 125)),
                             );
                         }
                     }
                 }
             }
-            cur_major += major_step;
+            cur_major += step;
         }
 
         // "(ppm)" 単位
@@ -647,18 +675,25 @@ pub fn execute_multispec_native_print(
     state: &MultiSpecState,
     settings: &MultiSpecPrintSettings,
     style: &PrintStyleSettings,
-) -> std::io::Result<()> {
+    devmode_opt: Option<&[u8]>,
+) -> std::io::Result<Option<String>> {
     #[cfg(target_os = "windows")]
     {
-        print_multispec_windows_native(state, settings, style)
+        print_multispec_windows_native(state, settings, style, devmode_opt).map(|_| None)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = (state, settings, style);
+        let _ = devmode_opt;
+        print_multispec_macos_native(state, settings, style)
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let _ = (state, settings, style, devmode_opt);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Direct native printing is currently supported on Windows. Please use 'Export SVG' for printing on other platforms.",
+            "Direct native printing is supported on Windows and macOS. Please use 'Export SVG' for printing on other platforms.",
         ))
     }
 }
@@ -668,6 +703,7 @@ fn print_multispec_windows_native(
     state: &MultiSpecState,
     settings: &MultiSpecPrintSettings,
     style: &PrintStyleSettings,
+    devmode_opt: Option<&[u8]>,
 ) -> std::io::Result<()> {
     #[repr(C)]
     #[allow(non_snake_case)]
@@ -771,12 +807,15 @@ fn print_multispec_windows_native(
         }
     };
 
+    let devmode_buf = get_or_create_devmode(&settings.printer_name, settings.orientation, devmode_opt);
+    let p_devmode = devmode_buf.as_ref().map(|b| b.as_ptr() as *const std::ffi::c_void).unwrap_or(std::ptr::null());
+
     let hdc = unsafe {
         CreateDCW(
             driver_name.as_ptr(),
             printer_name_wide.as_ptr(),
             std::ptr::null(),
-            std::ptr::null(),
+            p_devmode,
         )
     };
 
@@ -796,7 +835,15 @@ fn print_multispec_windows_native(
         )
     };
 
-    let doc_name = to_wide("Resona MultiSpec Report");
+    let doc_title = if let Some(ref rsm) = state.rsm_path {
+        rsm.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("Resona MultiSpec - {}", s))
+            .unwrap_or_else(|| "Resona MultiSpec Report".to_string())
+    } else {
+        "Resona MultiSpec Report".to_string()
+    };
+    let doc_name = to_wide(&doc_title);
     let doc_info = DOCINFOW {
         cbSize: std::mem::size_of::<DOCINFOW>() as i32,
         lpszDocName: doc_name.as_ptr(),
@@ -1084,22 +1131,14 @@ fn print_multispec_windows_native(
             Polyline(hdc, axis_pts.as_ptr(), 2);
         }
 
-        let major_step = if p_span > 50.0 {
-            10.0
-        } else if p_span > 20.0 {
-            5.0
-        } else if p_span > 8.0 {
-            1.0
-        } else if p_span > 3.0 {
-            0.5
-        } else if p_span > 1.0 {
-            0.2
-        } else {
-            0.1
-        };
+        let (step, dec) = crate::core::calc_ppm_ticks(p_span, settings.auto_ticks, settings.tick_major);
+        let minor_n = settings.tick_minor.max(1);
+        let minor_step = step / (minor_n as f64);
 
-        let first_major = (p_min.min(p_max) / major_step).floor() * major_step;
-        let last_major = (p_min.max(p_max) / major_step).ceil() * major_step;
+        let p_low = p_min.min(p_max);
+        let p_high = p_min.max(p_max);
+        let first_major = (p_low / step).floor() * step;
+        let last_major = (p_high / step).ceil() * step;
 
         let font = make_font(9.0, false, 0);
         let old_font = unsafe { SelectObject(hdc, font) };
@@ -1108,9 +1147,10 @@ fn print_multispec_windows_native(
             SetTextAlign(hdc, TA_CENTER | TA_TOP);
         }
 
-        let mut cur_major = first_major;
-        while cur_major <= last_major + major_step * 0.1 {
-            if (p_min..=p_max).contains(&cur_major) || (p_max..=p_min).contains(&cur_major) {
+        let mut cur_major = first_major - step;
+        while cur_major <= last_major + step * 0.1 {
+            // 主目盛り
+            if cur_major >= p_low - 1e-9 && cur_major <= p_high + 1e-9 {
                 let x = ppm_to_x(cur_major);
                 if x >= plot_x - 1 && x <= plot_x + plot_w + 1 {
                     let tick_pts = [
@@ -1121,20 +1161,34 @@ fn print_multispec_windows_native(
                         Polyline(hdc, tick_pts.as_ptr(), 2);
                     }
 
-                    let label = if major_step < 0.1 {
-                        format!("{:.2}", cur_major)
-                    } else if major_step < 1.0 {
-                        format!("{:.1}", cur_major)
-                    } else {
-                        format!("{:.0}", cur_major)
-                    };
+                    let label = format!("{:.prec$}", cur_major, prec = dec);
                     let wide = to_wide(&label);
                     unsafe {
                         TextOutW(hdc, x, axis_y + (dpi_y as f32 * 0.08) as i32, wide.as_ptr(), (wide.len() - 1) as i32);
                     }
                 }
             }
-            cur_major += major_step;
+
+            // サブ目盛り (主目盛り外側の余白部も描画)
+            if minor_n > 1 {
+                for s in 1..minor_n {
+                    let sub_ppm = cur_major + (s as f64) * minor_step;
+                    if sub_ppm >= p_low - 1e-9 && sub_ppm <= p_high + 1e-9 {
+                        let sx = ppm_to_x(sub_ppm);
+                        if sx >= plot_x && sx <= plot_x + plot_w {
+                            let tick_len = if minor_n % 2 == 0 && s == minor_n / 2 { 0.038 } else { 0.028 };
+                            let tick_pts = [
+                                POINT { x: sx, y: axis_y },
+                                POINT { x: sx, y: axis_y + (dpi_y as f32 * tick_len) as i32 },
+                            ];
+                            unsafe {
+                                Polyline(hdc, tick_pts.as_ptr(), 2);
+                            }
+                        }
+                    }
+                }
+            }
+            cur_major += step;
         }
 
         // "(ppm)" 単位
@@ -1158,6 +1212,74 @@ fn print_multispec_windows_native(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn print_multispec_macos_native(
+    state: &MultiSpecState,
+    settings: &MultiSpecPrintSettings,
+    style: &PrintStyleSettings,
+) -> std::io::Result<Option<String>> {
+    let svg = export_multispec_svg(
+        state,
+        settings,
+        style,
+        (state.common_ppm_min, state.common_ppm_max),
+    );
+
+    let temp_dir = std::env::temp_dir();
+    let file_stem = if let Some(ref rsm) = state.rsm_path {
+        rsm.file_stem().and_then(|s| s.to_str()).unwrap_or("resona_multispec_print")
+    } else {
+        "resona_multispec_print"
+    };
+    let svg_path = temp_dir.join(format!("{}.svg", file_stem));
+    fs::write(&svg_path, svg)?;
+
+    // 1. rsvg-convert (librsvg) が環境にあれば高精度 PDF に変換して CUPS 印刷
+    let has_rsvg = std::process::Command::new("rsvg-convert")
+        .arg("-v")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_rsvg {
+        let pdf_path = temp_dir.join(format!("{}.pdf", file_stem));
+        let convert_ok = std::process::Command::new("rsvg-convert")
+            .args(["-f", "pdf", "-o", pdf_path.to_str().unwrap()])
+            .arg(&svg_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if convert_ok {
+            let mut cmd = std::process::Command::new("lp");
+            if !settings.printer_name.is_empty() && settings.printer_name != "Default Printer" {
+                cmd.args(["-d", &settings.printer_name]);
+            }
+            cmd.args(["-o", "fit-to-page", pdf_path.to_str().unwrap()]);
+            let status = cmd.status()?;
+            if status.success() {
+                return Ok(None);
+            }
+        }
+    }
+
+    // 2. rsvg-convert が無い場合は、macOS 標準の Preview.app で SVG を開いて Cmd+P 印刷を案内
+    let open_status = std::process::Command::new("open")
+        .args(["-a", "Preview"])
+        .arg(&svg_path)
+        .status()
+        .or_else(|_| std::process::Command::new("open").arg(&svg_path).status())?;
+
+    if open_status.success() {
+        Ok(Some("Opened MultiSpec in Preview for high-quality printing. Please press Cmd+P.".to_string()))
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to open Preview for printing",
+        ))
+    }
+}
+
 /// MultiSpec 専用の印刷スタイル設定ダイアログ
 /// (Peak Leader line は削除、Multiview は削除、ラベルのコロンなし)
 pub fn show_multispec_print_settings_dialog(
@@ -1169,9 +1291,13 @@ pub fn show_multispec_print_settings_dialog(
         return;
     }
 
+    let mut is_open = state.is_open;
+    let mut should_close = false;
+
     Window::new(RichText::new("Print Settings").strong().size(13.5))
         .collapsible(false)
         .resizable(false)
+        .open(&mut is_open)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .min_width(320.0)
         .show(ctx, |ui| {
@@ -1207,8 +1333,16 @@ pub fn show_multispec_print_settings_dialog(
 
             ui.horizontal(|ui| {
                 if ui.button("Close").clicked() {
-                    state.is_open = false;
+                    should_close = true;
                 }
             });
         });
+
+    if should_close {
+        is_open = false;
+    }
+
+    if !is_open {
+        state.is_open = false;
+    }
 }

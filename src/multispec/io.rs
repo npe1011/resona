@@ -149,6 +149,7 @@ pub fn save_rsm<P: AsRef<Path>>(state: &mut MultiSpecState, path: P) -> Result<(
     zip.write_all(manifest_json.as_bytes())?;
 
     zip.finish()?;
+    state.rsm_path = Some(clean_path(p));
     Ok(())
 }
 
@@ -234,6 +235,7 @@ pub fn load_rsm<P: AsRef<Path>>(path: P) -> Result<MultiSpecState> {
         zoom_history: Vec::new(),
         history: crate::multispec::state::MultiSpecHistory::new(),
         next_item_num: 1,
+        rsm_path: Some(clean_path(p)),
     };
 
     if state.selected_id.is_none() {

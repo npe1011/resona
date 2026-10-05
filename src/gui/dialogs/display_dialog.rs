@@ -58,11 +58,14 @@ pub fn show_display_dialog(
         return None;
     }
 
-    Window::new("Display Settings")
+    Window::new(egui::RichText::new("Display Settings").strong().size(13.5))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .min_width(320.0)
         .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+
             // 1. X 軸表示範囲
             ui.label(egui::RichText::new("X-Axis (range)").strong());
             ui.horizontal(|ui| {

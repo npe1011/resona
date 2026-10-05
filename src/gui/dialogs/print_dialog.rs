@@ -9,7 +9,7 @@ use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    compute_integral, AcquisitionMetadata, FtSettings, IntegrationItem, JCouplingResultItem,
+    calc_ppm_ticks, compute_integral, AcquisitionMetadata, FtSettings, IntegrationItem, JCouplingResultItem,
     MultiviewItem, PeakItem,
 };
 use crate::gui::dialogs::print_style_dialog::{
@@ -93,6 +93,7 @@ pub struct PrintDialogState {
     pub open_counter: usize,
     pub style_settings: PrintStyleSettings,
     pub style_dialog_state: PrintStyleDialogState,
+    pub devmode: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl Default for PrintDialogState {
@@ -106,6 +107,7 @@ impl Default for PrintDialogState {
             open_counter: 0,
             style_settings: PrintStyleSettings::load(),
             style_dialog_state: PrintStyleDialogState::default(),
+            devmode: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -116,6 +118,10 @@ impl PrintDialogState {
         self.is_open = true;
         self.open_counter += 1;
         self.status_message = None;
+        self.style_dialog_state.is_open = false;
+        if let Ok(mut lock) = self.devmode.lock() {
+            *lock = None;
+        }
 
         let printers_arc = Arc::clone(&self.available_printers);
         self.is_loading_printers = true;
@@ -143,35 +149,223 @@ impl PrintDialogState {
     }
 }
 
-/// OSのプリンター詳細設定ダイアログ (Print Preferences) を開く関数
 #[cfg(target_os = "windows")]
-pub fn open_printer_preferences(printer_name: &str) {
-    #[link(name = "winspool")]
-    unsafe extern "system" {
-        fn OpenPrinterW(pPrinterName: *const u16, phPrinter: *mut isize, pDefault: *const std::ffi::c_void) -> i32;
-        fn ClosePrinter(hPrinter: isize) -> i32;
-        fn DocumentPropertiesW(
-            hWnd: isize,
-            hPrinter: isize,
-            pDeviceName: *const u16,
-            pDevModeOutput: *mut std::ffi::c_void,
-            pDevModeInput: *mut std::ffi::c_void,
-            fMode: u32,
-        ) -> i32;
-    }
-    const DM_IN_PROMPT: u32 = 4;
+#[repr(C)]
+#[allow(non_snake_case)]
+pub struct DEVMODEW {
+    pub dmDeviceName: [u16; 32],
+    pub dmSpecVersion: u16,
+    pub dmDriverVersion: u16,
+    pub dmSize: u16,
+    pub dmDriverExtra: u16,
+    pub dmFields: u32,
+    pub dmOrientation: i16,
+    pub dmPaperSize: i16,
+    pub dmPaperLength: i16,
+    pub dmPaperWidth: i16,
+    pub dmScale: i16,
+    pub dmCopies: i16,
+    pub dmDefaultSource: i16,
+    pub dmPrintQuality: i16,
+    pub dmColor: i16,
+    pub dmDuplex: i16,
+    pub dmYResolution: i16,
+    pub dmTTOption: i16,
+    pub dmCollate: i16,
+    pub dmFormName: [u16; 32],
+    pub dmLogPixels: u16,
+    pub dmBitsPerPel: u32,
+    pub dmPelsWidth: u32,
+    pub dmPelsHeight: u32,
+    pub dmDisplayFlags: u32,
+    pub dmDisplayFrequency: u32,
+    pub dmICMMethod: u32,
+    pub dmICMIntent: u32,
+    pub dmMediaType: u32,
+    pub dmDitherType: u32,
+    pub dmReserved1: u32,
+    pub dmReserved2: u32,
+    pub dmPanningWidth: u32,
+    pub dmPanningHeight: u32,
+}
+
+#[cfg(target_os = "windows")]
+pub const DM_ORIENTATION: u32 = 0x00000001;
+#[cfg(target_os = "windows")]
+pub const DM_COLOR: u32 = 0x00000800;
+#[cfg(target_os = "windows")]
+pub const DMORIENT_PORTRAIT: i16 = 1;
+#[cfg(target_os = "windows")]
+pub const DMORIENT_LANDSCAPE: i16 = 2;
+#[cfg(target_os = "windows")]
+pub const DMCOLOR_MONOCHROME: i16 = 1;
+#[cfg(target_os = "windows")]
+pub const DMCOLOR_COLOR: i16 = 2;
+#[cfg(target_os = "windows")]
+pub const DM_IN_BUFFER: u32 = 8;
+#[cfg(target_os = "windows")]
+pub const DM_IN_PROMPT: u32 = 4;
+#[cfg(target_os = "windows")]
+pub const DM_OUT_BUFFER: u32 = 2;
+
+#[cfg(target_os = "windows")]
+#[link(name = "winspool")]
+unsafe extern "system" {
+    fn OpenPrinterW(pPrinterName: *const u16, phPrinter: *mut isize, pDefault: *const std::ffi::c_void) -> i32;
+    fn ClosePrinter(hPrinter: isize) -> i32;
+    fn DocumentPropertiesW(
+        hWnd: isize,
+        hPrinter: isize,
+        pDeviceName: *const u16,
+        pDevModeOutput: *mut std::ffi::c_void,
+        pDevModeInput: *mut std::ffi::c_void,
+        fMode: u32,
+    ) -> i32;
+}
+
+/// プリンターの DEVMODEW を取得または構築し、カラー設定・用紙向きを反映する
+#[cfg(target_os = "windows")]
+pub fn get_or_create_devmode(
+    printer_name: &str,
+    orientation: PrintOrientation,
+    existing_devmode: Option<&[u8]>,
+) -> Option<Vec<u8>> {
     let wide_name: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
     let mut h_printer: isize = 0;
     unsafe {
-        if OpenPrinterW(wide_name.as_ptr(), &mut h_printer, std::ptr::null()) != 0 {
-            DocumentPropertiesW(0, h_printer, wide_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(), DM_IN_PROMPT);
-            ClosePrinter(h_printer);
+        if OpenPrinterW(wide_name.as_ptr(), &mut h_printer, std::ptr::null()) == 0 {
+            return None;
         }
+
+        let needed = DocumentPropertiesW(0, h_printer, wide_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(), 0);
+        if needed <= 0 {
+            ClosePrinter(h_printer);
+            return None;
+        }
+
+        let mut buf = if let Some(existing) = existing_devmode {
+            if existing.len() >= needed as usize {
+                existing.to_vec()
+            } else {
+                vec![0u8; needed as usize]
+            }
+        } else {
+            vec![0u8; needed as usize]
+        };
+
+        if existing_devmode.is_none() {
+            let ret = DocumentPropertiesW(
+                0,
+                h_printer,
+                wide_name.as_ptr(),
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                std::ptr::null_mut(),
+                DM_OUT_BUFFER,
+            );
+            if ret < 0 {
+                ClosePrinter(h_printer);
+                return None;
+            }
+        }
+
+        if buf.len() >= std::mem::size_of::<DEVMODEW>() {
+            let dm = buf.as_mut_ptr() as *mut DEVMODEW;
+            (*dm).dmFields |= DM_COLOR | DM_ORIENTATION;
+            (*dm).dmColor = DMCOLOR_COLOR;
+            (*dm).dmOrientation = match orientation {
+                PrintOrientation::Landscape => DMORIENT_LANDSCAPE,
+                PrintOrientation::Portrait => DMORIENT_PORTRAIT,
+            };
+
+            DocumentPropertiesW(
+                0,
+                h_printer,
+                wide_name.as_ptr(),
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.as_ptr() as *mut std::ffi::c_void,
+                DM_IN_BUFFER | DM_OUT_BUFFER,
+            );
+        }
+
+        ClosePrinter(h_printer);
+        Some(buf)
+    }
+}
+
+/// OSのプリンター詳細設定ダイアログ (Print Preferences) を開き、設定変更を devmode に保存する関数
+#[cfg(target_os = "windows")]
+pub fn open_printer_preferences(
+    printer_name: &str,
+    orientation: PrintOrientation,
+    devmode_arc: Arc<Mutex<Option<Vec<u8>>>>,
+) {
+    let wide_name: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut h_printer: isize = 0;
+    unsafe {
+        if OpenPrinterW(wide_name.as_ptr(), &mut h_printer, std::ptr::null()) == 0 {
+            return;
+        }
+
+        let needed = DocumentPropertiesW(0, h_printer, wide_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(), 0);
+        if needed <= 0 {
+            ClosePrinter(h_printer);
+            return;
+        }
+
+        let existing = devmode_arc.lock().ok().and_then(|g| g.clone());
+        let mut buf = if let Some(ext) = existing {
+            if ext.len() >= needed as usize {
+                ext
+            } else {
+                vec![0u8; needed as usize]
+            }
+        } else {
+            let mut init_buf = vec![0u8; needed as usize];
+            let ret = DocumentPropertiesW(
+                0,
+                h_printer,
+                wide_name.as_ptr(),
+                init_buf.as_mut_ptr() as *mut std::ffi::c_void,
+                std::ptr::null_mut(),
+                DM_OUT_BUFFER,
+            );
+            if ret >= 0 && init_buf.len() >= std::mem::size_of::<DEVMODEW>() {
+                let dm = init_buf.as_mut_ptr() as *mut DEVMODEW;
+                (*dm).dmFields |= DM_COLOR | DM_ORIENTATION;
+                (*dm).dmColor = DMCOLOR_COLOR;
+                (*dm).dmOrientation = match orientation {
+                    PrintOrientation::Landscape => DMORIENT_LANDSCAPE,
+                    PrintOrientation::Portrait => DMORIENT_PORTRAIT,
+                };
+            }
+            init_buf
+        };
+
+        let ret = DocumentPropertiesW(
+            0,
+            h_printer,
+            wide_name.as_ptr(),
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            buf.as_ptr() as *mut std::ffi::c_void,
+            DM_IN_BUFFER | DM_IN_PROMPT | DM_OUT_BUFFER,
+        );
+
+        if ret == 1 {
+            if let Ok(mut g) = devmode_arc.lock() {
+                *g = Some(buf);
+            }
+        }
+
+        ClosePrinter(h_printer);
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn open_printer_preferences(_printer_name: &str) {}
+pub fn open_printer_preferences(
+    _printer_name: &str,
+    _orientation: PrintOrientation,
+    _devmode_arc: Arc<Mutex<Option<Vec<u8>>>>,
+) {}
 
 /// OSネイティブにプリンター一覧を検出する関数
 pub fn fetch_system_printers() -> Vec<SystemPrinter> {
@@ -468,20 +662,26 @@ pub fn show_print_dialog(
                                     } else {
                                         p.name.clone()
                                     };
-                                    ui.selectable_value(
+                                    if ui.selectable_value(
                                         &mut state.settings.printer_name,
                                         p.name.clone(),
                                         label,
-                                    );
+                                    ).changed() {
+                                        if let Ok(mut lock) = state.devmode.lock() {
+                                            *lock = None;
+                                        }
+                                    }
                                 }
                             }
                         }
                     });
 
                 let p_name = state.settings.printer_name.clone();
+                let orient = state.settings.orientation;
+                let dev_arc = Arc::clone(&state.devmode);
                 if ui.button("Detail...").clicked() && !p_name.is_empty() {
                     std::thread::spawn(move || {
-                        open_printer_preferences(&p_name);
+                        open_printer_preferences(&p_name, orient, dev_arc);
                     });
                 }
 
@@ -492,16 +692,24 @@ pub fn show_print_dialog(
                 ui.separator();
 
                 ui.label(RichText::new("Orientation").strong().size(12.0));
-                ui.selectable_value(
+                if ui.selectable_value(
                     &mut state.settings.orientation,
                     PrintOrientation::Landscape,
                     "Landscape",
-                );
-                ui.selectable_value(
+                ).changed() {
+                    if let Ok(mut lock) = state.devmode.lock() {
+                        *lock = None;
+                    }
+                }
+                if ui.selectable_value(
                     &mut state.settings.orientation,
                     PrintOrientation::Portrait,
                     "Portrait",
-                );
+                ).changed() {
+                    if let Ok(mut lock) = state.devmode.lock() {
+                        *lock = None;
+                    }
+                }
             });
 
             // 2. 印刷項目チェックボックス & アクションボタン (横並びでマウス動線を改善)
@@ -542,6 +750,7 @@ pub fn show_print_dialog(
                             .fill(Color32::from_rgb(13, 110, 253))
                             .rounding(3.0_f32);
                         if ui.add(btn_print).clicked() {
+                            let devmode_copy = state.devmode.lock().ok().and_then(|g| g.clone());
                             match execute_native_print(
                                 &state.settings,
                                 &state.style_settings,
@@ -558,8 +767,12 @@ pub fn show_print_dialog(
                                 ft_settings,
                                 j_couplings,
                                 current_filepath,
+                                devmode_copy.as_deref(),
                             ) {
-                                Ok(()) => {
+                                Ok(Some(info_msg)) => {
+                                    state.status_message = Some((info_msg, false));
+                                }
+                                Ok(None) => {
                                     should_close = true;
                                 }
                                 Err(e) => {
@@ -661,12 +874,17 @@ pub fn show_print_dialog(
             );
         });
 
-    show_print_style_dialog(ctx, &mut state.style_dialog_state, &mut state.style_settings);
-
     if should_close {
         is_open = false;
     }
     state.is_open = is_open;
+
+    // 親ダイアログが閉じている場合、子ダイアログ (Print Settings) も必ず閉じる
+    if !state.is_open {
+        state.style_dialog_state.is_open = false;
+    } else {
+        show_print_style_dialog(ctx, &mut state.style_dialog_state, &mut state.style_settings);
+    }
 }
 
 /// ダイアログ内のリアルタイムプレビュー描画 (画面見た目通りに忠実再現)
@@ -789,27 +1007,7 @@ fn render_realtime_preview(
 
             // X軸目盛り & PPM ラベル
             let span = (p_max - p_min).abs();
-            let (tick_interval, tick_dec) = if !settings.auto_ticks && settings.tick_major > 1e-4 {
-                let s = settings.tick_major;
-                let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-                (s, d)
-            } else {
-                let s = if span > 300.0 {
-                    20.0
-                } else if span > 25.0 {
-                    10.0
-                } else if span > 12.0 {
-                    2.0
-                } else if span > 4.0 {
-                    1.0
-                } else if span > 1.5 {
-                    0.5
-                } else {
-                    0.1
-                };
-                let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-                (s, d)
-            };
+            let (tick_interval, tick_dec) = calc_ppm_ticks(span, settings.auto_ticks, settings.tick_major);
 
             let p_low = p_min.min(p_max);
             let p_high = p_min.max(p_max);
@@ -1000,9 +1198,11 @@ fn render_realtime_preview(
                             mv_y_max = 1.0;
                         }
 
-                        let h_diff = (mv_y_max - mv_y_min).max(1e-6);
-                        let y_min_adj = mv_y_min - 0.05 * h_diff;
-                        let y_max_adj = mv_y_max + 0.50 * h_diff;
+                        let y_min_val = mv.src_y_min.unwrap_or_else(|| mv_y_min.min(0.0));
+                        let y_max_val = mv.src_y_max.unwrap_or(mv_y_max);
+                        let h_diff = (y_max_val - y_min_val).max(1e-6);
+                        let y_min_adj = y_min_val - 0.02 * h_diff;
+                        let y_max_adj = y_max_val + 0.40 * h_diff;
 
                         let inset_axis_y = inset_rect.max.y - 12.0;
                         let inset_plot_h = (inset_axis_y - inset_rect.min.y - 4.0).max(10.0);
@@ -1290,8 +1490,8 @@ fn render_realtime_preview(
             );
             text_y += 10.0;
 
-            for (i, jc) in j_couplings.iter().take(5).enumerate() {
-                let s = format!("#{}: {}", i + 1, jc.text);
+            for jc in j_couplings.iter().take(5) {
+                let s = jc.text.clone();
                 painter.text(
                     Pos2::new(side_rect.min.x, text_y),
                     Align2::LEFT_TOP,
@@ -1517,13 +1717,12 @@ pub fn generate_complete_page_svg_with_style(
             ));
             side_y += 20.0;
 
-            for (i, jc) in j_couplings.iter().enumerate() {
+            for jc in j_couplings.iter() {
                 svg.push_str(&format!(
-                    r##"<text x="{tx1}" y="{ty}" font-size="8" font-family="sans-serif" fill="#212529">#{idx} {text}</text>
+                    r##"<text x="{tx1}" y="{ty}" font-size="8" font-family="sans-serif" fill="#212529">{text}</text>
 "##,
                     tx1 = side_x + 4.0,
                     ty = side_y + 10.0,
-                    idx = i + 1,
                     text = html_escape(&jc.text),
                 ));
                 side_y += 14.0;
@@ -1587,34 +1786,64 @@ fn generate_plot_svg_content(
 
     let mut svg = String::new();
 
-    // 1. スペクトル曲線
+    // 0. プロット領域のクリッピングパス定義 (はみ出し防止)
+    svg.push_str(&format!(
+        r##"<defs><clipPath id="main-plot-clip"><rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" /></clipPath></defs>
+"##,
+        x = plot_x,
+        y = plot_y,
+        w = plot_w,
+        h = actual_plot_h + 1.0,
+    ));
+
+    // 1. スペクトル曲線 (Min/Max リサンプリングで微細ピークの欠落を防止)
     if settings.spectrum && !ppm.is_empty() && !spectrum.is_empty() {
         let n_pts = ppm.len().min(spectrum.len());
-        let mut path_data = String::new();
-        let target_res = (plot_w * 2.0) as usize;
-        let step = (n_pts / target_res).max(1);
+        let mut points_str = String::with_capacity(n_pts.min(16384) * 12);
+        let mut prev_x = -9999.0_f64;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
 
-        let mut first = true;
-        for i in (0..n_pts).step_by(step) {
+        for i in 0..n_pts {
             let p = ppm[i];
-            if p >= p_low && p <= p_high {
-                let sx = ppm_to_x(p);
-                let sy = y_to_y(spectrum[i]).min(axis_y);
-                if first {
-                    path_data.push_str(&format!("M {:.2} {:.2} ", sx, sy));
-                    first = false;
-                } else {
-                    path_data.push_str(&format!("L {:.2} {:.2} ", sx, sy));
+            if p < p_low || p > p_high {
+                continue;
+            }
+            let sx = ppm_to_x(p);
+            let sy = y_to_y(spectrum[i]).min(axis_y);
+
+            let px = (sx * 2.0).round() / 2.0; // 0.5px サンプリング
+            if (px - prev_x).abs() >= 0.5 {
+                if prev_x >= plot_x - 5.0 && min_y <= max_y {
+                    points_str.push_str(&format!("{:.1},{:.1} ", prev_x, min_y));
+                    if (max_y - min_y).abs() > 0.3 {
+                        points_str.push_str(&format!("{:.1},{:.1} ", prev_x, max_y));
+                    }
                 }
+                prev_x = px;
+                min_y = sy;
+                max_y = sy;
+            } else {
+                if sy < min_y { min_y = sy; }
+                if sy > max_y { max_y = sy; }
             }
         }
-        svg.push_str(&format!(
-            r##"<path d="{}" stroke="{}" stroke-width="{:.2}" fill="none" />
+        if prev_x >= plot_x - 5.0 && min_y <= max_y {
+            points_str.push_str(&format!("{:.1},{:.1} ", prev_x, min_y));
+            if (max_y - min_y).abs() > 0.3 {
+                points_str.push_str(&format!("{:.1},{:.1} ", prev_x, max_y));
+            }
+        }
+
+        if !points_str.is_empty() {
+            svg.push_str(&format!(
+                r##"<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="{w:.2}" clip-path="url(#main-plot-clip)" />
 "##,
-            path_data,
-            style.main_spectrum.line_color.to_hex(),
-            style.main_spectrum.line_width,
-        ));
+                pts = points_str.trim_end(),
+                color = style.main_spectrum.line_color.to_hex(),
+                w = style.main_spectrum.line_width,
+            ));
+        }
     }
 
     // 2. X軸 (PPM軸 & 目盛り & ラベル)
@@ -1627,27 +1856,7 @@ fn generate_plot_svg_content(
     ));
 
     let span = (p_max - p_min).abs();
-    let (tick_interval, tick_dec) = if !settings.auto_ticks && settings.tick_major > 1e-4 {
-        let s = settings.tick_major;
-        let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-        (s, d)
-    } else {
-        let s = if span > 300.0 {
-            20.0
-        } else if span > 25.0 {
-            10.0
-        } else if span > 12.0 {
-            2.0
-        } else if span > 4.0 {
-            1.0
-        } else if span > 1.5 {
-            0.5
-        } else {
-            0.1
-        };
-        let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-        (s, d)
-    };
+    let (tick_interval, tick_dec) = calc_ppm_ticks(span, settings.auto_ticks, settings.tick_major);
 
     let minor_n = settings.tick_minor.max(1);
     let minor_step = tick_interval / (minor_n as f64);
@@ -1857,9 +2066,11 @@ fn generate_plot_svg_content(
                     mv_y_max = 1.0;
                 }
 
-                let h_diff = (mv_y_max - mv_y_min).max(1e-6);
-                let y_min_adj = mv_y_min - 0.05 * h_diff;
-                let y_max_adj = mv_y_max + 0.50 * h_diff;
+                let y_min_val = mv.src_y_min.unwrap_or_else(|| mv_y_min.min(0.0));
+                let y_max_val = mv.src_y_max.unwrap_or(mv_y_max);
+                let h_diff = (y_max_val - y_min_val).max(1e-6);
+                let y_min_adj = y_min_val - 0.02 * h_diff;
+                let y_max_adj = y_max_val + 0.40 * h_diff;
 
                 let inset_axis_y = inset_y + inset_h - 16.0;
                 let inset_plot_h = (inset_axis_y - inset_y - 6.0).max(10.0);
@@ -2114,7 +2325,8 @@ fn execute_native_print(
     ft_settings: &FtSettings,
     j_couplings: &[JCouplingResultItem],
     current_filepath: Option<&Path>,
-) -> std::io::Result<()> {
+    devmode_opt: Option<&[u8]>,
+) -> std::io::Result<Option<String>> {
     #[cfg(target_os = "windows")]
     {
         print_windows_native(
@@ -2133,11 +2345,13 @@ fn execute_native_print(
             ft_settings,
             j_couplings,
             current_filepath,
+            devmode_opt,
         )
     }
 
     #[cfg(target_os = "macos")]
     {
+        let _ = devmode_opt;
         print_macos_native(
             settings,
             style,
@@ -2159,6 +2373,7 @@ fn execute_native_print(
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
+        let _ = devmode_opt;
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Printing is not supported on this OS"))
     }
 }
@@ -2183,7 +2398,8 @@ fn print_windows_native(
     ft_settings: &FtSettings,
     j_couplings: &[JCouplingResultItem],
     current_filepath: Option<&Path>,
-) -> std::io::Result<()> {
+    devmode_opt: Option<&[u8]>,
+) -> std::io::Result<Option<String>> {
     #[repr(C)]
     #[allow(non_snake_case)]
     struct DOCINFOW {
@@ -2317,12 +2533,15 @@ fn print_windows_native(
         }
     };
 
+    let devmode_buf = get_or_create_devmode(&settings.printer_name, settings.orientation, devmode_opt);
+    let p_devmode = devmode_buf.as_ref().map(|b| b.as_ptr() as *const std::ffi::c_void).unwrap_or(std::ptr::null());
+
     let hdc = unsafe {
         CreateDCW(
             driver_name.as_ptr(),
             printer_name_wide.as_ptr(),
             std::ptr::null(),
-            std::ptr::null(),
+            p_devmode,
         )
     };
 
@@ -2510,27 +2729,7 @@ fn print_windows_native(
         unsafe { SetTextColor(hdc, rgb(33, 37, 41)) };
 
         let span = (p_max - p_min).abs();
-        let (tick_interval, tick_dec) = if !settings.auto_ticks && settings.tick_major > 1e-4 {
-            let s = settings.tick_major;
-            let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-            (s, d)
-        } else {
-            let s = if span > 300.0 {
-                20.0
-            } else if span > 25.0 {
-                10.0
-            } else if span > 12.0 {
-                2.0
-            } else if span > 4.0 {
-                1.0
-            } else if span > 1.5 {
-                0.5
-            } else {
-                0.1
-            };
-            let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-            (s, d)
-        };
+        let (tick_interval, tick_dec) = calc_ppm_ticks(span, settings.auto_ticks, settings.tick_major);
 
         let minor_n = settings.tick_minor.max(1);
         let minor_step = tick_interval / (minor_n as f64);
@@ -2770,9 +2969,11 @@ fn print_windows_native(
                         mv_y_max = 1.0;
                     }
 
-                    let h_diff = (mv_y_max - mv_y_min).max(1e-6);
-                    let y_min_adj = mv_y_min - 0.05 * h_diff;
-                    let y_max_adj = mv_y_max + 0.50 * h_diff;
+                    let y_min_val = mv.src_y_min.unwrap_or_else(|| mv_y_min.min(0.0));
+                    let y_max_val = mv.src_y_max.unwrap_or(mv_y_max);
+                    let h_diff = (y_max_val - y_min_val).max(1e-6);
+                    let y_min_adj = y_min_val - 0.02 * h_diff;
+                    let y_max_adj = y_max_val + 0.40 * h_diff;
 
                     let inset_axis_y = inset_y + inset_h - (dpi_y * 14 / 72);
                     let inset_plot_h = (inset_axis_y - inset_y - (dpi_y * 6 / 72)).max(10);
@@ -3123,8 +3324,8 @@ fn print_windows_native(
             }
             text_y += dpi_y * 12 / 72;
 
-            for (i, jc) in j_couplings.iter().take(6).enumerate() {
-                let s = to_wide(&format!("#{}: {}", i + 1, jc.text));
+            for jc in j_couplings.iter().take(6) {
+                let s = to_wide(&jc.text);
                 unsafe {
                     TextOutW(hdc, side_x, text_y, s.as_ptr(), (s.len() - 1) as i32);
                 }
@@ -3144,7 +3345,7 @@ fn print_windows_native(
         DeleteDC(hdc);
     }
 
-    Ok(())
+    Ok(None)
 }
 
 // ----------------------------------------------------------------------------
@@ -3167,7 +3368,7 @@ fn print_macos_native(
     ft_settings: &FtSettings,
     j_couplings: &[JCouplingResultItem],
     current_filepath: Option<&Path>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<String>> {
     let temp_dir = std::env::temp_dir();
     let svg_path = temp_dir.join("resona_print_job.svg");
 
@@ -3191,16 +3392,50 @@ fn print_macos_native(
 
     fs::write(&svg_path, svg_content)?;
 
-    let mut cmd = std::process::Command::new("lp");
-    if !settings.printer_name.is_empty() && settings.printer_name != "Default Printer" {
-        cmd.args(["-d", &settings.printer_name]);
+    // 1. rsvg-convert (librsvg) が環境にあれば高精度 PDF に変換して CUPS 印刷
+    let has_rsvg = std::process::Command::new("rsvg-convert")
+        .arg("-v")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_rsvg {
+        let pdf_path = temp_dir.join("resona_print_job.pdf");
+        let convert_ok = std::process::Command::new("rsvg-convert")
+            .args(["-f", "pdf", "-o", pdf_path.to_str().unwrap()])
+            .arg(&svg_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if convert_ok {
+            let mut cmd = std::process::Command::new("lp");
+            if !settings.printer_name.is_empty() && settings.printer_name != "Default Printer" {
+                cmd.args(["-d", &settings.printer_name]);
+            }
+            cmd.args(["-o", "fit-to-page", pdf_path.to_str().unwrap()]);
+            let status = cmd.status()?;
+            if status.success() {
+                return Ok(None);
+            }
+        }
     }
-    cmd.args(["-o", "fit-to-page", &svg_path.to_string_lossy()]);
-    let status = cmd.status()?;
-    if !status.success() {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "lp command failed"));
+
+    // 2. rsvg-convert が無い場合は、macOS 標準の Preview.app で SVG を開いて Cmd+P 印刷を案内
+    let open_status = std::process::Command::new("open")
+        .args(["-a", "Preview"])
+        .arg(&svg_path)
+        .status()
+        .or_else(|_| std::process::Command::new("open").arg(&svg_path).status())?;
+
+    if open_status.success() {
+        Ok(Some("Opened report in Preview for high-quality printing. Please press Cmd+P.".to_string()))
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to open Preview for printing",
+        ))
     }
-    Ok(())
 }
 
 fn html_escape(s: &str) -> String {

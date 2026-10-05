@@ -27,6 +27,6 @@ pub use project::{
 };
 pub use signal::{
     apply_phase_and_extract_real, apply_phase_complex, apply_window, apply_zerofill,
-    compute_ppm_scale, compute_window_curve, find_highest_peak_in_range, forward_fft,
-    remove_fractional_delay, WindowFunction,
+    calc_ppm_ticks, compute_ppm_scale, compute_window_curve, find_highest_peak_in_range,
+    forward_fft, remove_fractional_delay, WindowFunction,
 };

@@ -3,7 +3,7 @@ use egui::{
     epaint::PathShape, vec2, Color32, FontFamily, FontId, Pos2, Rect, Stroke, Ui,
 };
 use ndarray::Array1;
-use crate::core::{compute_integral, IntegrationItem, MultiviewItem, PeakItem};
+use crate::core::{calc_ppm_ticks, compute_integral, IntegrationItem, MultiviewItem, PeakItem};
 
 use super::transform::PlotTransform;
 
@@ -291,34 +291,7 @@ fn paint_ppm_axis(ui: &Ui, transform: &PlotTransform, axis_y: f32, style: &PlotS
         return;
     }
 
-    let (step, dec) = if !style.auto_ticks && style.tick_major > 1e-4 {
-        let s = style.tick_major;
-        let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-        (s, d)
-    } else {
-        // 13C NMR (通常スパン 30〜300 ppm) は 10.0 ppm を標準とする
-        if span >= 30.0 && span <= 300.0 {
-            (10.0, 0)
-        } else {
-            let approx_ticks = 8.0;
-            let rough_step = span / approx_ticks;
-            let exponent = (rough_step.log10().floor()) as i32;
-            let base = 10.0_f64.powi(exponent);
-            let fraction = rough_step / base;
-
-            let s = if fraction < 1.5 {
-                1.0 * base
-            } else if fraction < 3.0 {
-                2.0 * base
-            } else if fraction < 7.0 {
-                5.0 * base
-            } else {
-                10.0 * base
-            };
-            let d = (-exponent).max(0) as usize;
-            (s, d)
-        }
-    };
+    let (step, dec) = calc_ppm_ticks(span, style.auto_ticks, style.tick_major);
 
     let minor_n = style.tick_minor.max(1);
     let minor_step = step / (minor_n as f64);

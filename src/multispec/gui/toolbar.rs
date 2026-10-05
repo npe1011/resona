@@ -142,15 +142,14 @@ pub fn show_multispec_toolbar(
                 event = MultiSpecToolbarEvent::UnifyYScale;
             }
 
-            // 右寄せで Display と Print ボタンを配置
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if light_button(ui, "Print", false, 58.0).clicked() {
-                    event = MultiSpecToolbarEvent::Print;
-                }
-                if light_button(ui, "Display", false, 58.0).clicked() {
-                    event = MultiSpecToolbarEvent::Display;
-                }
-            });
+            ui.separator();
+
+            if light_button(ui, "Display", false, 58.0).clicked() {
+                event = MultiSpecToolbarEvent::Display;
+            }
+            if light_button(ui, "Print", false, 58.0).clicked() {
+                event = MultiSpecToolbarEvent::Print;
+            }
         });
     });
 

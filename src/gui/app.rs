@@ -466,6 +466,7 @@ impl ResonaApp {
             || self.multiview_yscale_dialog_state.open
             || self.peak_list_dialog_state.open
             || self.print_dialog_state.is_open
+            || self.print_dialog_state.style_dialog_state.is_open
     }
 
     /// ファイルまたはディレクトリを開く
@@ -1254,6 +1255,9 @@ impl eframe::App for ResonaApp {
                         self.print_dialog_state.open();
                     }
                     ModeBarEvent::OpenMultiSpec => {
+                        if !self.multispec_open {
+                            self.multispec_ui_state = MultiSpecUiState::default();
+                        }
                         self.multispec_open = true;
                     }
                 }

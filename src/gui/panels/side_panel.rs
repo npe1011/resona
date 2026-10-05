@@ -91,7 +91,7 @@ pub fn show_side_panel(
                     .inner_margin(egui::Margin::symmetric(4.0, 2.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let label = format!("#{}  {}", i + 1, jc.text);
+                            let label = jc.text.clone();
                             let text_color = if is_selected {
                                 Color32::from_rgb(8, 66, 152)
                             } else {

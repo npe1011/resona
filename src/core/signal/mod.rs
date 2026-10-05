@@ -12,6 +12,6 @@ pub use phase::{
     apply_phase_complex_with_pivot, convert_p0_for_new_pivot, find_highest_peak_in_range,
     find_max_magnitude_index,
 };
-pub use scale::compute_ppm_scale;
+pub use scale::{calc_ppm_ticks, compute_ppm_scale};
 pub use window::{apply_window, compute_window_curve, WindowFunction};
 pub use zerofill::apply_zerofill;

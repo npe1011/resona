@@ -195,6 +195,7 @@ pub struct MultiSpecState {
     pub zoom_history: Vec<(f64, f64)>,
     pub history: MultiSpecHistory,
     pub next_item_num: usize,
+    pub rsm_path: Option<PathBuf>,
 }
 
 impl Default for MultiSpecState {
@@ -212,6 +213,7 @@ impl Default for MultiSpecState {
             zoom_history: Vec::new(),
             history: MultiSpecHistory::new(),
             next_item_num: 1,
+            rsm_path: None,
         }
     }
 }

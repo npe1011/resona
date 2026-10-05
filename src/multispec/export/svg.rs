@@ -121,29 +121,22 @@ pub fn export_multispec_svg(
 
         let color_hex = format!("#{:02x}{:02x}{:02x}", it.color[0], it.color[1], it.color[2]);
 
-        // 3.1 スペクトル名タグ (波形左上に配置)
+        // 3.1 スペクトル名 (波形左上に直接色文字テキストで描画)
         if print_settings.show_spectrum_names && !it.name.is_empty() {
             let escaped_name = html_escape(&it.name);
-            let approx_tag_w = (it.name.len() as f64 * 7.0 + 14.0).max(40.0);
-            let tag_h = 16.0;
             let tag_x = plot_x + 8.0;
             let tag_y = if state.is_overlay {
-                cur_y + 8.0 + (step_idx as f64 * 20.0)
+                cur_y + 14.0 + (step_idx as f64 * 18.0)
             } else {
-                slot_top + 6.0
+                slot_top + 14.0
             };
 
             svg.push_str(&format!(
-                r##"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="3" fill="{color}" />
-<text x="{tx}" y="{ty}" font-size="10" font-family="sans-serif" font-weight="600" fill="#ffffff">{name}</text>
+                r##"<text x="{x}" y="{y}" font-size="10.5" font-family="sans-serif" font-weight="600" fill="{color}">{name}</text>
 "##,
                 x = tag_x,
                 y = tag_y,
-                w = approx_tag_w,
-                h = tag_h,
                 color = color_hex,
-                tx = tag_x + 6.0,
-                ty = tag_y + 11.5,
                 name = escaped_name,
             ));
         }
@@ -274,27 +267,20 @@ pub fn export_multispec_svg(
             x2 = plot_x + plot_w,
         ));
 
-        // 目盛り計算 (1.0 ppm または適切なステップ)
-        let major_step = if p_span > 50.0 {
-            10.0
-        } else if p_span > 20.0 {
-            5.0
-        } else if p_span > 8.0 {
-            1.0
-        } else if p_span > 3.0 {
-            0.5
-        } else if p_span > 1.0 {
-            0.2
-        } else {
-            0.1
-        };
+        // 目盛り計算 (calc_ppm_ticks 共通ロジックに統一)
+        let (step, dec) = crate::core::calc_ppm_ticks(p_span, print_settings.auto_ticks, print_settings.tick_major);
+        let minor_n = print_settings.tick_minor.max(1);
+        let minor_step = step / (minor_n as f64);
 
-        let first_major = (p_min.min(p_max) / major_step).floor() * major_step;
-        let last_major = (p_min.max(p_max) / major_step).ceil() * major_step;
+        let p_low = p_min.min(p_max);
+        let p_high = p_min.max(p_max);
+        let first_major = (p_low / step).floor() * step;
+        let last_major = (p_high / step).ceil() * step;
 
-        let mut cur_major = first_major;
-        while cur_major <= last_major + major_step * 0.1 {
-            if (p_min..=p_max).contains(&cur_major) || (p_max..=p_min).contains(&cur_major) {
+        let mut cur_major = first_major - step;
+        while cur_major <= last_major + step * 0.1 {
+            // 主目盛り
+            if cur_major >= p_low - 1e-9 && cur_major <= p_high + 1e-9 {
                 let x = ppm_to_x(cur_major);
                 if x >= plot_x - 1.0 && x <= plot_x + plot_w + 1.0 {
                     // 主目盛り線
@@ -307,13 +293,7 @@ pub fn export_multispec_svg(
                     ));
 
                     // 数値ラベル
-                    let label = if major_step < 0.1 {
-                        format!("{:.2}", cur_major)
-                    } else if major_step < 1.0 {
-                        format!("{:.1}", cur_major)
-                    } else {
-                        format!("{:.0}", cur_major)
-                    };
+                    let label = format!("{:.prec$}", cur_major, prec = dec);
                     svg.push_str(&format!(
                         r##"<text x="{x}" y="{y}" font-size="10" font-family="sans-serif" text-anchor="middle" fill="#212529">{lbl}</text>
 "##,
@@ -322,17 +302,18 @@ pub fn export_multispec_svg(
                         lbl = label,
                     ));
                 }
+            }
 
-                // サブ目盛り (10分割)
-                let sub_step = major_step / 10.0;
-                for s in 1..10 {
-                    let sub_ppm = cur_major + sub_step * (s as f64);
-                    if (p_min..=p_max).contains(&sub_ppm) || (p_max..=p_min).contains(&sub_ppm) {
+            // サブ目盛り (主目盛り外側の余白部も描画)
+            if minor_n > 1 {
+                for s in 1..minor_n {
+                    let sub_ppm = cur_major + (s as f64) * minor_step;
+                    if sub_ppm >= p_low - 1e-9 && sub_ppm <= p_high + 1e-9 {
                         let sx = ppm_to_x(sub_ppm);
                         if sx >= plot_x && sx <= plot_x + plot_w {
-                            let tick_len = if s == 5 { 4.0 } else { 2.5 };
+                            let tick_len = if minor_n % 2 == 0 && s == minor_n / 2 { 4.5 } else { 3.5 };
                             svg.push_str(&format!(
-                                r##"<line x1="{x}" y1="{y1}" x2="{x}" y2="{y2}" stroke="#6c757d" stroke-width="0.7" />
+                                r##"<line x1="{x}" y1="{y1}" x2="{x}" y2="{y2}" stroke="#495057" stroke-width="0.8" />
 "##,
                                 x = sx,
                                 y1 = axis_y,
@@ -342,7 +323,8 @@ pub fn export_multispec_svg(
                     }
                 }
             }
-            cur_major += major_step;
+
+            cur_major += step;
         }
 
         // "(ppm)" 単位ラベル

@@ -42,7 +42,7 @@ fn main() -> eframe::Result<()> {
 
 /// アプリアイコン (.ico 内の PNG ストリーム) をデコードして egui::IconData を生成
 fn load_app_icon() -> Option<egui::IconData> {
-    const ICO_BYTES: &[u8] = include_bytes!("icon/icon_windows.ico");
+    const ICO_BYTES: &[u8] = include_bytes!("../assets/icons/icon_windows.ico");
     // ICO 内から最大の解像度（256x256）の PNG を探索
     let png_magic = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     let mut last_png_offset = None;

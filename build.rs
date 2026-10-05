@@ -6,11 +6,11 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
-    println!("cargo:rerun-if-changed=src/icon/icon_windows.ico");
+    println!("cargo:rerun-if-changed=assets/icons/icon_windows.ico");
 
     if target_os == "windows" {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-        let ico_path = PathBuf::from(&manifest_dir).join("src").join("icon").join("icon_windows.ico");
+        let ico_path = PathBuf::from(&manifest_dir).join("assets").join("icons").join("icon_windows.ico");
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let rc_path = out_dir.join("resona.rc");
         let res_path = out_dir.join("resona.res");

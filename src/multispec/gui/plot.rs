@@ -410,6 +410,10 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
     slot_h: f32,
     plot_top: f32,
 ) {
+    if !ui.is_enabled() {
+        return;
+    }
+
     let is_ctrl = ui.input(|i| i.modifiers.ctrl);
     let is_shift = ui.input(|i| i.modifiers.shift);
     let mut any_changed = false;
@@ -546,71 +550,60 @@ fn paint_common_ppm_axis(
         return;
     }
 
-    let (step, dec) = if !settings.auto_ticks && settings.tick_major > 1e-4 {
-        let s = settings.tick_major;
-        let d = if s < 0.0099 { 3 } else if s < 0.099 { 2 } else if s < 0.99 { 1 } else { 0 };
-        (s, d)
-    } else {
-        let approx_ticks = 8.0;
-        let rough_step = span / approx_ticks;
-        let exponent = rough_step.log10().floor() as i32;
-        let base = 10.0_f64.powi(exponent);
-        let fraction = rough_step / base;
-
-        let s = if fraction < 1.5 {
-            1.0 * base
-        } else if fraction < 3.0 {
-            2.0 * base
-        } else if fraction < 7.0 {
-            5.0 * base
-        } else {
-            10.0 * base
-        };
-        let d = (-exponent).max(0) as usize;
-        (s, d)
-    };
+    let (step, dec) = crate::core::calc_ppm_ticks(span, settings.auto_ticks, settings.tick_major);
 
     let font_axis = FontId::new(11.0, FontFamily::Proportional);
-
-    let first_tick = (p_min / step).ceil() as i64;
-    let last_tick = (p_max / step).floor() as i64;
 
     let ppm_to_x = |ppm: f64| -> f32 {
         let ratio = ((p_max - ppm) / span) as f32;
         rect.min.x + ratio * rect.width()
     };
 
-    let sub_div = settings.tick_minor.max(1);
-    let sub_step = step / sub_div as f64;
-    let first_sub = (p_min / sub_step).ceil() as i64;
-    let last_sub = (p_max / sub_step).floor() as i64;
+    let minor_n = settings.tick_minor.max(1);
+    let minor_step = step / (minor_n as f64);
 
-    // サブ目盛り (2.5px)
-    let stroke_sub = Stroke::new(0.6_f32, Color32::from_gray(140));
-    for k in first_sub..=last_sub {
-        let p = k as f64 * sub_step;
-        let sx = ppm_to_x(p);
-        if sx >= rect.min.x && sx <= rect.max.x {
-            painter.line_segment([Pos2::new(sx, axis_y), Pos2::new(sx, axis_y + 2.5)], stroke_sub);
+    let p_low = p_min.min(p_max);
+    let p_high = p_min.max(p_max);
+    let start_ppm = (p_low / step).floor() * step;
+    let end_ppm = (p_high / step).ceil() * step;
+
+    let stroke_sub = Stroke::new(0.8_f32, Color32::from_gray(90));
+
+    let mut current_ppm = start_ppm - step;
+    while current_ppm <= end_ppm + step * 0.1 {
+        // 主目盛り
+        if current_ppm >= p_low - 1e-9 && current_ppm <= p_high + 1e-9 {
+            let sx = ppm_to_x(current_ppm);
+            if sx >= rect.min.x + 2.0 && sx <= rect.max.x - 2.0 {
+                // メイン目盛り (5.0px)
+                painter.line_segment([Pos2::new(sx, axis_y), Pos2::new(sx, axis_y + 5.0)], stroke_axis);
+
+                let label = format!("{:.prec$}", current_ppm, prec = dec);
+                painter.text(
+                    Pos2::new(sx, axis_y + 8.0),
+                    egui::Align2::CENTER_TOP,
+                    label,
+                    font_axis.clone(),
+                    Color32::from_rgb(33, 37, 41),
+                );
+            }
         }
-    }
 
-    // メイン目盛り (5.0px) & 数値ラベル
-    for k in first_tick..=last_tick {
-        let p = k as f64 * step;
-        let sx = ppm_to_x(p);
-        if sx >= rect.min.x + 2.0 && sx <= rect.max.x - 2.0 {
-            painter.line_segment([Pos2::new(sx, axis_y), Pos2::new(sx, axis_y + 5.0)], stroke_axis);
-
-            let label = format!("{:.prec$}", p, prec = dec);
-            painter.text(
-                Pos2::new(sx, axis_y + 8.0),
-                egui::Align2::CENTER_TOP,
-                label,
-                font_axis.clone(),
-                Color32::from_rgb(33, 37, 41),
-            );
+        // サブ目盛り (3.5px / 中央は4.5px, 主目盛りの外側も描画)
+        if minor_n > 1 {
+            for m in 1..minor_n {
+                let sub_ppm = current_ppm + (m as f64) * minor_step;
+                if sub_ppm >= p_low - 1e-9 && sub_ppm <= p_high + 1e-9 {
+                    let sub_sx = ppm_to_x(sub_ppm);
+                    if sub_sx >= rect.min.x && sub_sx <= rect.max.x {
+                        let sub_len = if minor_n % 2 == 0 && m == minor_n / 2 { 4.5 } else { 3.5 };
+                        painter.line_segment([Pos2::new(sub_sx, axis_y), Pos2::new(sub_sx, axis_y + sub_len)], stroke_sub);
+                    }
+                }
+            }
         }
+
+        current_ppm += step;
     }
 
     // 単位表示 (ppm)
