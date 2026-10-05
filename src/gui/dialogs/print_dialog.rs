@@ -18,8 +18,9 @@ use crate::gui::dialogs::print_style_dialog::{
 use crate::gui::plot::transform::PlotTransform;
 
 /// 印刷の向き設定
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PrintOrientation {
+    #[default]
     Landscape,
     Portrait,
 }
@@ -173,7 +174,7 @@ pub fn open_printer_preferences(printer_name: &str) {
 pub fn open_printer_preferences(_printer_name: &str) {}
 
 /// OSネイティブにプリンター一覧を検出する関数
-fn fetch_system_printers() -> Vec<SystemPrinter> {
+pub fn fetch_system_printers() -> Vec<SystemPrinter> {
     #[cfg(target_os = "windows")]
     {
         fetch_windows_printers()

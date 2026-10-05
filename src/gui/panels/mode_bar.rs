@@ -10,6 +10,7 @@ pub enum ModeBarEvent {
     OpenReFt,
     OpenDisplay,
     OpenPrint,
+    OpenMultiSpec,
 }
 
 /// ezNMRライトテーマ準拠のモードボタン用スタイル
@@ -119,6 +120,16 @@ pub fn show_mode_bar(
             .rounding(3.0_f32);
         if ui.add(btn_print).clicked() {
             event = ModeBarEvent::OpenPrint;
+        }
+
+        // 5. MultiSpec ボタン (通常ボタン: スタック比較専用独立ウィンドウ呼び出し)
+        let btn_multispec = Button::new(RichText::new("MultiSpec").size(13.0).color(txt))
+            .min_size(vec2(74.0, 26.0))
+            .fill(fill)
+            .stroke(strk)
+            .rounding(3.0_f32);
+        if ui.add(btn_multispec).clicked() {
+            event = ModeBarEvent::OpenMultiSpec;
         }
 
         // 5. 右寄せ: Auto Sensitivity 選択 UI (デフォルト: Middle)

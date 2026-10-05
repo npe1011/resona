@@ -18,6 +18,7 @@ use crate::gui::panels::{
     show_action_bar, show_mode_bar, show_side_panel, ActionEvent, ActionBarState, ModeBarEvent,
 };
 use crate::gui::plot::{paint_spectrum, PlotStyle, PlotTransform};
+use crate::multispec::{show_multispec_window, MultiSpecSettings, MultiSpecState, MultiSpecUiState};
 
 /// Integrate Edit モードでのドラッグ対象
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -313,6 +314,12 @@ pub struct ResonaApp {
     pub peak_list_dialog_state: PeakListDialogState,
     pub print_dialog_state: PrintDialogState,
 
+    // MultiSpec (マルチスペクトル比較独立ウィンドウ)
+    pub multispec_open: bool,
+    pub multispec_state: MultiSpecState,
+    pub multispec_ui_state: MultiSpecUiState,
+    pub multispec_settings: MultiSpecSettings,
+
     pub plot_style: PlotStyle,
     pub transform: Option<PlotTransform>,
     pub zoom_history: Vec<(f64, f64, f64, f64)>, // (ppm_min, ppm_max, y_min, y_max)
@@ -379,6 +386,10 @@ impl Default for ResonaApp {
             multiview_yscale_dialog_state: MultiviewYScaleDialogState::default(),
             peak_list_dialog_state: PeakListDialogState::default(),
             print_dialog_state,
+            multispec_open: false,
+            multispec_state: MultiSpecState::default(),
+            multispec_ui_state: MultiSpecUiState::default(),
+            multispec_settings: MultiSpecSettings::load(),
             plot_style,
             transform: None,
             zoom_history: Vec::new(),
@@ -1241,6 +1252,9 @@ impl eframe::App for ResonaApp {
                     }
                     ModeBarEvent::OpenPrint => {
                         self.print_dialog_state.open();
+                    }
+                    ModeBarEvent::OpenMultiSpec => {
+                        self.multispec_open = true;
                     }
                 }
             });
@@ -3510,6 +3524,18 @@ impl eframe::App for ResonaApp {
 
         show_peak_list_dialog(ctx, &mut self.peak_list_dialog_state);
 
+        // MultiSpec 独立ウィンドウ (メインウィンドウをロックしない独立 OS ウィンドウ)
+        if self.multispec_open {
+            show_multispec_window(
+                ctx,
+                &mut self.multispec_open,
+                &mut self.multispec_state,
+                &mut self.multispec_ui_state,
+                &mut self.multispec_settings,
+                &mut self.print_dialog_state.style_settings,
+            );
+        }
+
         if self.print_dialog_state.settings != prev_print_settings
             || (self.action_state.multiview_ratio - prev_multiview_ratio).abs() > 1e-6
         {
@@ -3519,6 +3545,7 @@ impl eframe::App for ResonaApp {
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         self.save_app_settings();
+        self.multispec_settings.save();
     }
 }
 
