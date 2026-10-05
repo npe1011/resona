@@ -345,6 +345,9 @@ pub struct ResonaApp {
     last_transform_y: Option<(f64, f64)>,
     pub arrow_key_hold_time: f64,
     pub temp_zoom_saved: Option<Option<ZoomTool>>,
+    pub is_dirty: bool,
+    pub show_close_confirm: bool,
+    pub prev_mode: Option<AppMode>,
 }
 
 impl Default for ResonaApp {
@@ -409,6 +412,9 @@ impl Default for ResonaApp {
             last_transform_y: None,
             arrow_key_hold_time: 0.0,
             temp_zoom_saved: None,
+            is_dirty: false,
+            show_close_confirm: false,
+            prev_mode: None,
         }
     }
 }
@@ -455,6 +461,27 @@ impl ResonaApp {
             eprintln!("Warning: Failed to reset settings to default: {}", e);
         }
         self.status_message = "Settings reset to default".to_string();
+    }
+
+    /// 化学シフトのリファレンスを設定し、表示範囲とズーム履歴も連動して追従させる
+    pub fn apply_shift_reference(&mut self, current_ppm: f64, target_ppm: f64) {
+        let shift = target_ppm - current_ppm;
+        self.project.set_shift_reference(current_ppm, target_ppm);
+        if let Some(ref mut t) = self.transform {
+            t.ppm_min += shift;
+            t.ppm_max += shift;
+        }
+        for (z_min, z_max, _, _) in &mut self.zoom_history {
+            *z_min += shift;
+            *z_max += shift;
+        }
+        self.is_dirty = true;
+    }
+
+    /// 履歴に現在の解析状態を記録し、未保存フラグを立てる
+    pub fn push_history(&mut self) {
+        self.project.push_history();
+        self.is_dirty = true;
     }
 
     /// いずれかのモーダルダイアログが開いているか判定
@@ -541,6 +568,32 @@ impl ResonaApp {
                 self.sync_action_bar_from_project();
                 self.zoom_history.clear();
                 self.reset_zoom();
+
+                if ext == "rsn" {
+                    let ds = &self.project.state.display_settings;
+                    if let (Some(x_min), Some(x_max)) = (ds.x_min, ds.x_max) {
+                        if let Some(ref mut t) = self.transform {
+                            t.ppm_min = x_min;
+                            t.ppm_max = x_max;
+                        }
+                    }
+                    if let Some(y_min) = ds.y_min_scale {
+                        self.y_min_scale = y_min;
+                    }
+                    if let Some(y_max) = ds.y_max_scale {
+                        self.y_max_scale = y_max;
+                    }
+                    if let Some(ref mut t) = self.transform {
+                        if let Some(spec) = &self.project.spectrum_real {
+                            let max_intensity = spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1e-6);
+                            let top_pct = self.y_max_scale.max(1.0);
+                            t.y_max = max_intensity * (100.0 / top_pct);
+                            t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                            self.last_transform_y = Some((t.y_min, t.y_max));
+                        }
+                    }
+                }
+                self.is_dirty = false;
                 self.status_message = format!("Loaded {}", abs_path.display());
 
                 // 生データ読み込み時はFTダイアログを開き、パラメータを選べるようにする
@@ -582,13 +635,21 @@ impl ResonaApp {
     }
 
     /// ファイル保存 (.rsn)
-    pub fn save_file<P: AsRef<Path>>(&mut self, path: P) {
+    pub fn save_file<P: AsRef<Path>>(&mut self, path: P) -> bool {
         let p = path.as_ref();
         let abs_path = if p.is_relative() {
             std::env::current_dir().unwrap_or_default().join(p)
         } else {
             p.to_path_buf()
         };
+
+        if let Some(ref t) = self.transform {
+            self.project.state.display_settings.x_min = Some(t.ppm_min);
+            self.project.state.display_settings.x_max = Some(t.ppm_max);
+            self.project.state.display_settings.y_min_scale = Some(self.y_min_scale);
+            self.project.state.display_settings.y_max_scale = Some(self.y_max_scale);
+        }
+
         match self.project.save_rsn(&abs_path) {
             Ok(_) => {
                 // 一回でも保存した状態は rsn ファイルのフルパスに切り替える
@@ -596,12 +657,15 @@ impl ResonaApp {
                 if let Some(parent) = abs_path.parent() {
                     self.current_directory = Some(parent.to_path_buf());
                 }
+                self.is_dirty = false;
                 self.save_app_settings();
                 self.status_message = format!("Saved project {}", abs_path.display());
+                true
             }
             Err(e) => {
                 eprintln!("Error saving project {}", e);
                 self.status_message = format!("Error saving project {} ({})", abs_path.display(), e);
+                false
             }
         }
     }
@@ -688,7 +752,7 @@ impl ResonaApp {
     /// アスペクト比（w/h）を維持して拡大・縮小する (Adjust-Y)
     pub fn adjust_y_multiviews(&mut self) {
         if let Some(target_h) = self.adjust_y_multiviews_internal() {
-            self.project.push_history();
+            self.push_history();
             self.status_message = format!("Adjusted multiview heights to top-left {:.0}px", target_h);
         }
     }
@@ -754,7 +818,7 @@ impl ResonaApp {
             return;
         }
         self.align_multiviews_internal(plot_rect);
-        self.project.push_history();
+        self.push_history();
         self.status_message = "Aligned multiview insets".to_string();
     }
 
@@ -810,7 +874,7 @@ impl ResonaApp {
             cur_x += w + gap;
         }
 
-        self.project.push_history();
+        self.push_history();
         self.status_message = "Aligned multiview insets in 1 row".to_string();
     }
 
@@ -893,7 +957,7 @@ impl ResonaApp {
         // Auto で追加したときは必ず Adjust-Y + Align を実行 (履歴は 1-step)
         self.adjust_y_multiviews_internal();
         self.align_multiviews_internal(plot_rect);
-        self.project.push_history();
+        self.push_history();
         self.status_message = format!(
             "Auto-created {} multiview insets from integrals (sensitivity={})",
             self.project.state.multiviews.len(),
@@ -1013,14 +1077,15 @@ impl ResonaApp {
         }
     }
 
-    /// 直上書きや確認なしセーブは行わず、常に Save as rsn ダイアログを呼ぶ
-    pub fn quick_save(&mut self) {
-        self.save_rsn_dialog();
+    /// プロジェクトを保存する (常に Save As 挙動でダイアログを開き、確認なし上書きを防ぐ)
+    pub fn handle_save(&mut self) -> bool {
+        self.save_rsn_dialog()
     }
 
     /// 外部ダイアログ経由でプロジェクトを保存する (Save as rsn)
-    pub fn save_rsn_dialog(&mut self) {
+    pub fn save_rsn_dialog(&mut self) -> bool {
         let mut dialog = rfd::FileDialog::new()
+            .set_title("Save as RSN")
             .add_filter("Resona Project (*.rsn)", &["rsn"]);
 
         if let Some(ref dir) = self.current_directory {
@@ -1046,7 +1111,9 @@ impl ResonaApp {
             if path.extension().is_none() {
                 path.set_extension("rsn");
             }
-            self.save_file(path);
+            self.save_file(path)
+        } else {
+            false
         }
     }
 
@@ -1066,15 +1133,16 @@ impl ResonaApp {
             self.open_file_dialog();
         }
 
-        // Ctrl + S: Save as rsn (常にダイアログ要求)
+        // Ctrl + S: Save
         if ctrl_or_cmd && input.key_pressed(Key::S) {
-            self.save_rsn_dialog();
+            self.handle_save();
         }
 
         // Ctrl + Z: Undo
         if ctrl_or_cmd && !input.modifiers.shift && input.key_pressed(Key::Z) {
             if self.project.undo() {
                 self.sync_action_bar_from_project();
+                self.is_dirty = true;
                 self.status_message = "Undo performed".to_string();
             }
         }
@@ -1085,6 +1153,7 @@ impl ResonaApp {
         {
             if self.project.redo() {
                 self.sync_action_bar_from_project();
+                self.is_dirty = true;
                 self.status_message = "Redo performed".to_string();
             }
         }
@@ -1110,7 +1179,7 @@ impl ResonaApp {
                         let count = self.selected_multiview_ids.len();
                         self.project.state.multiviews.retain(|mv| !self.selected_multiview_ids.contains(&mv.id));
                         self.selected_multiview_ids.clear();
-                        self.project.push_history();
+                        self.push_history();
                         self.status_message = format!("Deleted {} selected multiview inset(s)", count);
                     }
                 } else if mode == AppMode::JCoupling {
@@ -1118,7 +1187,7 @@ impl ResonaApp {
                         if idx < self.project.state.j_couplings.len() {
                             self.project.state.j_couplings.remove(idx);
                             self.selected_j_idx = None;
-                            self.project.push_history();
+                            self.push_history();
                             self.status_message = "Deleted selected J-coupling result".to_string();
                         }
                     }
@@ -1153,17 +1222,38 @@ impl eframe::App for ResonaApp {
         visuals.panel_fill = Color32::from_rgb(248, 249, 250); // #f8f9fa
         ctx.set_visuals(visuals);
 
-        // ウィンドウタイトルの更新: 未ロード時は "Resona"、ロード時は "Resona - (フルパス)"
+        // モード変更検知とクリーンアップ
+        if self.mode != self.prev_mode {
+            self.action_state.clear_submodes();
+            self.drag_start = None;
+            self.drag_current = None;
+            self.is_dragging_threshold = false;
+            self.is_dragging_pivot = false;
+            self.integrate_drag = None;
+            self.multiview_drag = None;
+            self.prev_mode = self.mode;
+        }
+
+        // ウィンドウ閉じる要求の検知 (Dirty Flag が立っていれば保存確認ダイアログを開く)
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.is_dirty {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.show_close_confirm = true;
+            }
+        }
+
+        // ウィンドウタイトルの更新: 未ロード時は "Resona"、ロード時は "Resona - (フルパス)"、未保存変更があれば "*"
+        let dirty_suffix = if self.is_dirty { " *" } else { "" };
         let window_title = match &self.current_file_path {
-            Some(path) => format!("Resona - {}", path.display()),
-            None => "Resona".to_string(),
+            Some(path) => format!("Resona - {}{}", path.display(), dirty_suffix),
+            None => format!("Resona{}", dirty_suffix),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
 
         self.handle_shortcuts(ctx);
         self.handle_drag_and_drop(ctx);
 
-        let is_modal_active = self.has_open_dialog();
+        let is_modal_active = self.has_open_dialog() || self.show_close_confirm;
 
         // 1. トップメニューバー
         TopBottomPanel::top("top_menu")
@@ -1184,12 +1274,16 @@ impl eframe::App for ResonaApp {
                             ui.close_menu();
                         }
                         if ui.button("Save as rsn... (Ctrl+S)").clicked() {
-                            self.save_rsn_dialog();
+                            self.handle_save();
                             ui.close_menu();
                         }
                         ui.separator();
                         if ui.button("Exit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            if self.is_dirty {
+                                self.show_close_confirm = true;
+                            } else {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
                         }
                     });
 
@@ -1340,8 +1434,12 @@ impl eframe::App for ResonaApp {
 
         if (p0 - self.project.state.p0).abs() > 1e-4 || (p1 - self.project.state.p1).abs() > 1e-4 {
             self.project.update_phase(p0, p1);
+            self.is_dirty = true;
         }
-        self.project.state.integration_scale = int_scale;
+        if (self.project.state.integration_scale - int_scale).abs() > 1e-4 {
+            self.project.state.integration_scale = int_scale;
+            self.is_dirty = true;
+        }
 
         // アクションイベントの実行
         match action_event {
@@ -1359,7 +1457,7 @@ impl eframe::App for ResonaApp {
             }
             ActionEvent::AutoPhase => {
                 let (new_p0, new_p1) = self.project.auto_phase();
-                self.project.push_history();
+                self.push_history();
                 self.status_message = format!(
                     "ACME Autophase applied with Pivot at {:.3} ppm (P0={:.2}°, P1={:.2}°)",
                     self.project.pivot_ppm(), new_p0, new_p1
@@ -1367,13 +1465,13 @@ impl eframe::App for ResonaApp {
             }
             ActionEvent::AutoPivot => {
                 if let Some(ppm) = self.project.auto_pivot() {
-                    self.project.push_history();
+                    self.push_history();
                     self.status_message = format!("Auto Pivot set to {:.3} ppm", ppm);
                 }
             }
             ActionEvent::ApplyBaseline { method } => {
                 self.project.apply_baseline(method);
-                self.project.push_history();
+                self.push_history();
                 self.action_state.baseline_applied = true;
                 let method_desc = match method {
                     crate::core::baseline::BaselineMethod::AirPLS { log_lambda, .. } => {
@@ -1388,7 +1486,7 @@ impl eframe::App for ResonaApp {
             }
             ActionEvent::ClearBaseline => {
                 self.project.clear_baseline();
-                self.project.push_history();
+                self.push_history();
                 self.action_state.baseline_applied = false;
                 self.status_message = "Baseline correction cleared".to_string();
             }
@@ -1418,8 +1516,8 @@ impl eframe::App for ResonaApp {
                     let noise = self.project.noise_level();
                     if let Some(peak_ppm) = best_p {
                         if max_val > noise * 2.0 {
-                            self.project.set_shift_reference(peak_ppm, target);
-                            self.project.push_history();
+                            self.apply_shift_reference(peak_ppm, target);
+                            self.push_history();
                             self.status_message = format!(
                                 "Auto referenced: {:.3} ppm -> {:.3} ppm (Δ = {:+.3} ppm)",
                                 peak_ppm,
@@ -1441,8 +1539,8 @@ impl eframe::App for ResonaApp {
                 }
             }
             ActionEvent::ApplyShiftReference { peak_ppm, target_ppm } => {
-                self.project.set_shift_reference(peak_ppm, target_ppm);
-                self.project.push_history();
+                self.apply_shift_reference(peak_ppm, target_ppm);
+                self.push_history();
                 self.status_message = format!("Referenced peak at {:.3} ppm -> {:.3} ppm", peak_ppm, target_ppm);
             }
             ActionEvent::AutoPeak => {
@@ -1453,7 +1551,7 @@ impl eframe::App for ResonaApp {
                     self.action_state.peak_threshold = thresh;
                     self.project.state.peak_threshold = Some(thresh);
                     self.project.state.peaks = pick_peaks(spec, ppm, thresh, &self.project.state.peaks);
-                    self.project.push_history();
+                    self.push_history();
                     self.status_message = format!(
                         "Auto detected {} peaks (thresh={:.1}, sensitivity={})",
                         self.project.state.peaks.len(),
@@ -1467,13 +1565,13 @@ impl eframe::App for ResonaApp {
                     self.action_state.peak_threshold = threshold;
                     self.project.state.peak_threshold = Some(threshold);
                     self.project.state.peaks = pick_peaks(spec, ppm, threshold, &self.project.state.peaks);
-                    self.project.push_history();
+                    self.push_history();
                     self.status_message = format!("Picked {} peaks with threshold {:.1}", self.project.state.peaks.len(), threshold);
                 }
             }
             ActionEvent::ClearPeaks => {
                 self.project.state.peaks.clear();
-                self.project.push_history();
+                self.push_history();
                 self.status_message = "All peaks cleared".to_string();
             }
             ActionEvent::AutoIntegrate => {
@@ -1493,7 +1591,7 @@ impl eframe::App for ResonaApp {
                         self.project.state.integration_ref_area = max_area;
                         self.project.state.integration_ref_value = 1.0;
                     }
-                    self.project.push_history();
+                    self.push_history();
                     self.status_message = format!(
                         "Auto detected {} integration regions (sensitivity={})",
                         self.project.state.integrations.len(),
@@ -1503,7 +1601,7 @@ impl eframe::App for ResonaApp {
             }
             ActionEvent::ClearIntegrations => {
                 self.project.state.integrations.clear();
-                self.project.push_history();
+                self.push_history();
                 self.status_message = "All integrations cleared".to_string();
             }
             ActionEvent::AutoMultiview => {
@@ -1525,13 +1623,13 @@ impl eframe::App for ResonaApp {
             ActionEvent::ResetMultiview => {
                 self.project.state.multiviews.clear();
                 self.selected_multiview_ids.clear();
-                self.project.push_history();
+                self.push_history();
                 self.status_message = "All multiview insets cleared".to_string();
             }
             ActionEvent::ClearJCoupling => {
                 self.project.state.j_couplings.clear();
                 self.selected_j_idx = None;
-                self.project.push_history();
+                self.push_history();
                 self.status_message = "All J-coupling results cleared".to_string();
             }
             ActionEvent::CloseMode => {
@@ -1610,8 +1708,7 @@ impl eframe::App for ResonaApp {
 
                     // プロット描画
                     if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
-                        let ref_factor = self.project.state.integration_ref_value
-                            / self.project.state.integration_ref_area.max(1e-12);
+                        let ref_factor = self.project.state.integration_ref_factor();
                         let is_peak_mode = self.mode == Some(AppMode::Peak);
                         let ref_drag_range = if self.mode == Some(AppMode::Reference) && self.action_state.ref_set_active {
                             if let (Some(s), Some(c)) = (self.drag_start, self.drag_current) {
@@ -2090,6 +2187,7 @@ impl eframe::App for ResonaApp {
                                     };
                                     self.project.set_pivot_ppm(target_ppm);
                                     self.project.push_history();
+                                    self.is_dirty = true;
                                     self.status_message = format!("Set pivot to {:.3} ppm", self.project.pivot_ppm());
                                 } else if is_thresh_submode {
                                     let new_thresh = t.screen_y_to_y(pos.y).abs();
@@ -2101,6 +2199,7 @@ impl eframe::App for ResonaApp {
                                             self.project.state.multiviews.retain(|m| &m.id != hid);
                                             self.selected_multiview_ids.remove(hid);
                                             self.project.push_history();
+                                            self.is_dirty = true;
                                             self.status_message = "Deleted multiview inset".to_string();
                                         }
                                     } else {
@@ -2134,6 +2233,7 @@ impl eframe::App for ResonaApp {
                                                 self.project.state.peaks = add_peak_in_range(spec, ppm, p_low, p_high, &self.project.state.peaks);
                                                 if self.project.state.peaks.len() > before_count {
                                                     self.project.push_history();
+                                                    self.is_dirty = true;
                                                     self.status_message = format!("Added peak near {:.3} ppm", click_ppm);
                                                 }
                                             }
@@ -2143,6 +2243,7 @@ impl eframe::App for ResonaApp {
                                                 self.project.state.peaks.retain(|pk| (pk.ppm - click_ppm).abs() > tol);
                                                 if self.project.state.peaks.len() < before_count {
                                                     self.project.push_history();
+                                                    self.is_dirty = true;
                                                     self.status_message = format!("Deleted peak near {:.3} ppm", click_ppm);
                                                 }
                                             }
@@ -2156,6 +2257,7 @@ impl eframe::App for ResonaApp {
                                             self.project.state.integrations.retain(|item| !item.contains_ppm(click_ppm));
                                             if self.project.state.integrations.len() < before_count {
                                                 self.project.push_history();
+                                                self.is_dirty = true;
                                                 self.status_message = "Deleted integration".to_string();
                                             }
                                         }
@@ -2189,6 +2291,7 @@ impl eframe::App for ResonaApp {
                                                 self.project.state.integrations.insert(idx, d2);
                                                 self.project.state.integrations.insert(idx, d1);
                                                 self.project.push_history();
+                                                self.is_dirty = true;
                                                 self.status_message = format!("Split integration at {:.3} ppm", click_ppm);
                                             }
                                         }
@@ -2209,6 +2312,7 @@ impl eframe::App for ResonaApp {
                                                             self.project.state.integration_ref_area = res.total_area;
                                                             self.project.state.integration_ref_value = target_val;
                                                             self.project.push_history();
+                                                            self.is_dirty = true;
                                                             self.status_message = format!("Set reference integral to {:.2}", target_val);
                                                         }
                                                     }
@@ -2231,6 +2335,7 @@ impl eframe::App for ResonaApp {
                         self.project.state.multiviews.retain(|m| !self.selected_multiview_ids.contains(&m.id));
                         self.selected_multiview_ids.clear();
                         self.project.push_history();
+                        self.is_dirty = true;
                         self.status_message = format!("Deleted {} multiview inset(s) (Delete key)", count);
                     }
 
@@ -2265,7 +2370,7 @@ impl eframe::App for ResonaApp {
                                 ctx.set_cursor_icon(egui::CursorIcon::Grab);
                                 self.status_message = "Drag to adjust baseline handle position".to_string();
                             } else if let (Some(spec), Some(ppm_arr)) = (&self.project.spectrum_real, &self.project.ppm) {
-                                let ref_factor = self.project.state.integration_ref_value / self.project.state.integration_ref_area.max(1e-12);
+                                let ref_factor = self.project.state.integration_ref_factor();
                                 let mut detected = None;
                                 for intg in &self.project.state.integrations {
                                     if let Some(target) = detect_integrate_edit_target(
@@ -2407,7 +2512,7 @@ impl eframe::App for ResonaApp {
                                     self.integrate_drag = Some(target);
                                 } else if let (Some(spec), Some(ppm_arr)) = (&self.project.spectrum_real, &self.project.ppm) {
                                     let (ppm, _) = t.screen_to_data(pos);
-                                    let ref_factor = self.project.state.integration_ref_value / self.project.state.integration_ref_area.max(1e-12);
+                                    let ref_factor = self.project.state.integration_ref_factor();
                                     let mut detected = None;
                                     for intg in &self.project.state.integrations {
                                         if let Some(target) = detect_integrate_edit_target(
@@ -2792,11 +2897,7 @@ impl eframe::App for ResonaApp {
                                                     } else {
                                                         self.project.state.integration_scale
                                                     };
-                                                    let ref_factor = if self.project.state.integration_ref_area > 1e-12 {
-                                                        self.project.state.integration_ref_value / self.project.state.integration_ref_area
-                                                    } else {
-                                                        1.0
-                                                    };
+                                                    let ref_factor = self.project.state.integration_ref_factor();
                                                     if let Some(res) = compute_integral(spec, ppm, &temp_item, scale, ref_factor, 0.03) {
                                                         if res.ppm.len() > 1 && res.ppm.len() == res.curve_y.len() {
                                                             let mut pts: Vec<Pos2> = Vec::with_capacity(res.ppm.len());
@@ -2991,15 +3092,15 @@ impl eframe::App for ResonaApp {
                                     cur_ppm
                                 };
                                 self.project.set_pivot_ppm(target_ppm);
-                                self.project.push_history();
+                                self.push_history();
                                 self.status_message = format!("Set pivot to {:.3} ppm", self.project.pivot_ppm());
                             }
                         } else if self.multiview_drag.is_some() {
                             self.multiview_drag = None;
-                            self.project.push_history();
+                            self.push_history();
                         } else if self.integrate_drag.is_some() {
                             self.integrate_drag = None;
-                            self.project.push_history();
+                            self.push_history();
                         } else if self.is_dragging_threshold {
                             self.is_dragging_threshold = false;
                             self.status_message = format!("Threshold set to {:.2}", self.action_state.peak_threshold);
@@ -3052,8 +3153,8 @@ impl eframe::App for ResonaApp {
                                                 }
                                                 if let Some(peak_ppm) = best_p {
                                                     let target = self.action_state.ref_target_ppm;
-                                                    self.project.set_shift_reference(peak_ppm, target);
-                                                    self.project.push_history();
+                                                    self.apply_shift_reference(peak_ppm, target);
+                                                    self.push_history();
                                                     self.status_message = format!("Referenced peak at {:.3} ppm -> {:.3} ppm", peak_ppm, target);
                                                 }
                                             }
@@ -3069,7 +3170,7 @@ impl eframe::App for ResonaApp {
                                                     let before_count = self.project.state.peaks.len();
                                                     self.project.state.peaks = add_peak_in_range(spec, ppm, p_low, p_high, &self.project.state.peaks);
                                                     if self.project.state.peaks.len() > before_count {
-                                                        self.project.push_history();
+                                                        self.push_history();
                                                         self.status_message = format!("Added peak in range [{:.3}, {:.3}] ppm", p_low, p_high);
                                                     } else {
                                                         self.status_message = "Peak already exists in selected range".to_string();
@@ -3078,7 +3179,7 @@ impl eframe::App for ResonaApp {
                                                     let before_count = self.project.state.peaks.len();
                                                     self.project.state.peaks.retain(|pk| pk.ppm < p_low || pk.ppm > p_high);
                                                     if self.project.state.peaks.len() < before_count {
-                                                        self.project.push_history();
+                                                        self.push_history();
                                                         self.status_message = "Deleted peaks in selected range".to_string();
                                                     }
                                                 }
@@ -3124,7 +3225,7 @@ impl eframe::App for ResonaApp {
                                                     }
 
                                                     self.project.state.integrations.push(new_item);
-                                                    self.project.push_history();
+                                                    self.push_history();
                                                     self.status_message = format!("Added integration {:.3} ~ {:.3} ppm", s_ppm, e_ppm);
                                                 }
                                             }
@@ -3137,7 +3238,7 @@ impl eframe::App for ResonaApp {
                                                         !(p_low.max(item_low) <= p_high.min(item_high))
                                                     });
                                                     if self.project.state.integrations.len() != before_len {
-                                                        self.project.push_history();
+                                                        self.push_history();
                                                         self.status_message = "Deleted integrations in range".to_string();
                                                     }
                                                 }
@@ -3172,7 +3273,7 @@ impl eframe::App for ResonaApp {
                                                     };
                                                     self.project.state.integrations.insert(idx, d2);
                                                     self.project.state.integrations.insert(idx, d1);
-                                                    self.project.push_history();
+                                                    self.push_history();
                                                     self.status_message = format!("Split integration at {:.3} ppm", split_ppm);
                                                 }
                                             }
@@ -3193,7 +3294,7 @@ impl eframe::App for ResonaApp {
                                                                 let target_val = self.action_state.integration_ref_val;
                                                                 self.project.state.integration_ref_area = res.total_area;
                                                                 self.project.state.integration_ref_value = target_val;
-                                                                self.project.push_history();
+                                                                self.push_history();
                                                                 self.status_message = format!("Set reference integral to {:.2}", target_val);
                                                             }
                                                         }
@@ -3240,7 +3341,7 @@ impl eframe::App for ResonaApp {
                                                     self.adjust_y_multiviews_internal();
                                                     self.align_multiviews_internal(plot_rect);
                                                 }
-                                                self.project.push_history();
+                                                self.push_history();
                                                 self.status_message = format!("Added multiview inset {:.3} ~ {:.3} ppm", p_high, p_low);
                                             }
                                         }
@@ -3277,8 +3378,7 @@ impl eframe::App for ResonaApp {
                                                 // 2. プロトン数 (積分値) の算出
                                                 let mut raw_protons = 1.0_f64;
                                                 if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
-                                                    let ref_factor = self.project.state.integration_ref_value
-                                                        / self.project.state.integration_ref_area.max(1e-12);
+                                                    let ref_factor = self.project.state.integration_ref_factor();
 
                                                     // 重なる既存の積分区間を探索
                                                     let mut matched_intg = None;
@@ -3413,7 +3513,7 @@ impl eframe::App for ResonaApp {
 
                         // フロント側から自動位相補正を自動実行
                         let (p0, p1) = self.project.auto_phase();
-                        self.project.push_history();
+                        self.push_history();
                         self.reset_zoom();
                         self.status_message = format!("Fourier Transform applied (All analyses reset; Autophased: P0={:.2}°, P1={:.2}°)", p0, p1);
                     }
@@ -3439,7 +3539,7 @@ impl eframe::App for ResonaApp {
             self.action_state.clear_submodes();
 
             // 4. Undo 履歴にコミット
-            self.project.push_history();
+            self.push_history();
 
             // 5. 設定保存
             self.save_app_settings();
@@ -3482,7 +3582,7 @@ impl eframe::App for ResonaApp {
                 let ppm_b = parse_jcoupling_sort_ppm(&b.text).unwrap_or(b.ppm);
                 ppm_b.partial_cmp(&ppm_a).unwrap_or(std::cmp::Ordering::Equal)
             });
-            self.project.push_history();
+            self.push_history();
             self.status_message = "Added J-coupling multiplet to results".to_string();
         }
 
@@ -3490,16 +3590,12 @@ impl eframe::App for ResonaApp {
             if let Some(mv) = self.project.state.multiviews.iter_mut().find(|m| m.id == res.target_id) {
                 mv.src_y_min = res.y_min;
                 mv.src_y_max = res.y_max;
-                self.project.push_history();
+                self.push_history();
                 self.status_message = format!("Updated Y-scale for inset {}", res.target_id);
             }
         }
 
-        let ref_factor = if self.project.state.integration_ref_area > 0.0 {
-            self.project.state.integration_ref_value / self.project.state.integration_ref_area
-        } else {
-            1.0
-        };
+        let ref_factor = self.project.state.integration_ref_factor();
 
         // 印刷ダイアログへ現在のスタイル設定（桁数・目盛り設定）を同期
         self.print_dialog_state.settings.ppm_decimals = self.plot_style.ppm_decimals;
@@ -3538,6 +3634,56 @@ impl eframe::App for ResonaApp {
                 &mut self.multispec_settings,
                 &mut self.print_dialog_state.style_settings,
             );
+        }
+
+        if self.show_close_confirm {
+            let mut show_confirm = true;
+            let mut do_save = false;
+            let mut do_dont_save = false;
+            let mut do_cancel = false;
+            let file_label = self.current_file_path.as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("current project")
+                .to_string();
+
+            egui::Window::new("Save Changes?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .open(&mut show_confirm)
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
+                    ui.label(format!("Do you want to save changes to \"{}\" before closing?", file_label));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Cancel").clicked() {
+                                do_cancel = true;
+                            }
+                            if ui.button("Don't Save").clicked() {
+                                do_dont_save = true;
+                            }
+                            if ui.button("Save").clicked() {
+                                do_save = true;
+                            }
+                        });
+                    });
+                });
+
+            if !show_confirm || do_cancel {
+                self.show_close_confirm = false;
+            } else if do_dont_save {
+                self.is_dirty = false;
+                self.show_close_confirm = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if do_save {
+                if self.handle_save() {
+                    self.is_dirty = false;
+                    self.show_close_confirm = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
         }
 
         if self.print_dialog_state.settings != prev_print_settings

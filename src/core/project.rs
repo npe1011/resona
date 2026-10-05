@@ -120,6 +120,17 @@ pub struct ProjectState {
     pub auto_sensitivity: AutoSensitivity,
 }
 
+impl ProjectState {
+    /// 基準積分に対する倍率 (ref_factor) を安全に取得
+    pub fn integration_ref_factor(&self) -> f64 {
+        if self.integration_ref_area > 1e-12 {
+            self.integration_ref_value / self.integration_ref_area
+        } else {
+            1.0
+        }
+    }
+}
+
 fn default_scale() -> f64 {
     1.0
 }

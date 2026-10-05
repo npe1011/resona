@@ -196,6 +196,7 @@ pub struct MultiSpecState {
     pub history: MultiSpecHistory,
     pub next_item_num: usize,
     pub rsm_path: Option<PathBuf>,
+    pub is_dirty: bool,
 }
 
 impl Default for MultiSpecState {
@@ -214,6 +215,7 @@ impl Default for MultiSpecState {
             history: MultiSpecHistory::new(),
             next_item_num: 1,
             rsm_path: None,
+            is_dirty: false,
         }
     }
 }
@@ -489,12 +491,14 @@ impl MultiSpecState {
     pub fn push_history(&mut self) {
         let snap = self.create_snapshot();
         self.history.commit(snap);
+        self.is_dirty = true;
     }
 
     /// Undo を実行
     pub fn undo(&mut self) -> bool {
         if let Some(snap) = self.history.undo().cloned() {
             self.apply_snapshot(&snap);
+            self.is_dirty = true;
             true
         } else {
             false
@@ -505,6 +509,7 @@ impl MultiSpecState {
     pub fn redo(&mut self) -> bool {
         if let Some(snap) = self.history.redo().cloned() {
             self.apply_snapshot(&snap);
+            self.is_dirty = true;
             true
         } else {
             false

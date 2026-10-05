@@ -315,11 +315,7 @@ fn paint_spectrum_slot<F: Fn(f64) -> f32>(
 
     // 4. 積分曲線 & 90度回転数値ラベル
     if item.show_integral && !proj.state.integrations.is_empty() {
-        let ref_factor = if proj.state.integration_ref_area > 1e-12 {
-            proj.state.integration_ref_value / proj.state.integration_ref_area
-        } else {
-            1.0
-        };
+        let ref_factor = proj.state.integration_ref_factor();
 
         for intg in &proj.state.integrations {
             if let Some(res) = compute_integral(

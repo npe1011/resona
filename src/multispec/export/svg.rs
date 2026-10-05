@@ -194,11 +194,7 @@ pub fn export_multispec_svg(
 
         // 3.3 積分曲線 & 90度回転縦書き数値ラベル
         if print_settings.show_integrals && it.show_integral && !proj.state.integrations.is_empty() {
-            let ref_factor = if proj.state.integration_ref_area > 1e-12 {
-                proj.state.integration_ref_value / proj.state.integration_ref_area
-            } else {
-                1.0
-            };
+            let ref_factor = proj.state.integration_ref_factor();
 
             for intg in &proj.state.integrations {
                 if let Some(res) = compute_integral(
@@ -241,7 +237,7 @@ pub fn export_multispec_svg(
                         let y_norm_top = (max_curve_y - min_val) / val_span;
                         let sy_top = base_y - y_norm_top * unit_h;
                         let text_y = sy_top - 6.0;
-                        let val_str = format!("{:.2}", res.normalized_value);
+                        let val_str = format!("{:.prec$}", res.normalized_value, prec = print_settings.integral_decimals);
                         svg.push_str(&format!(
                             r##"<text x="{x}" y="{y}" font-size="9" font-family="sans-serif" fill="{color}" transform="rotate(90, {x}, {y})" text-anchor="start">{val}</text>
 "##,

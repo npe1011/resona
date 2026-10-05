@@ -236,6 +236,7 @@ pub fn load_rsm<P: AsRef<Path>>(path: P) -> Result<MultiSpecState> {
         history: crate::multispec::state::MultiSpecHistory::new(),
         next_item_num: 1,
         rsm_path: Some(clean_path(p)),
+        is_dirty: false,
     };
 
     if state.selected_id.is_none() {

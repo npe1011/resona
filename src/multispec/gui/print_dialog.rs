@@ -536,11 +536,7 @@ fn render_multispec_realtime_preview(
 
         // 2.3 積分曲線 & 90度回転縦書き数値ラベル
         if settings.show_integrals && it.show_integral && !proj.state.integrations.is_empty() {
-            let ref_factor = if proj.state.integration_ref_area > 1e-12 {
-                proj.state.integration_ref_value / proj.state.integration_ref_area
-            } else {
-                1.0
-            };
+            let ref_factor = proj.state.integration_ref_factor();
 
             for intg in &proj.state.integrations {
                 if let Some(res) = compute_integral(
@@ -582,7 +578,7 @@ fn render_multispec_realtime_preview(
                         let y_norm_top = ((max_curve_y - min_val) / val_span) as f32;
                         let sy_top = base_y - y_norm_top * unit_h;
                         let text_y = sy_top - 4.0;
-                        let val_str = format!("{:.2}", res.normalized_value);
+                        let val_str = format!("{:.prec$}", res.normalized_value, prec = settings.integral_decimals);
 
                         let font_id = FontId::new(7.5, FontFamily::Proportional);
                         let text_shape = TextShape::new(
@@ -1052,11 +1048,7 @@ fn print_multispec_windows_native(
 
         // 2.3 積分曲線 & 90度回転縦書き数値ラベル
         if settings.show_integrals && it.show_integral && !proj.state.integrations.is_empty() {
-            let ref_factor = if proj.state.integration_ref_area > 1e-12 {
-                proj.state.integration_ref_value / proj.state.integration_ref_area
-            } else {
-                1.0
-            };
+            let ref_factor = proj.state.integration_ref_factor();
 
             for intg in &proj.state.integrations {
                 if let Some(res) = compute_integral(
@@ -1101,7 +1093,7 @@ fn print_multispec_windows_native(
                         let y_norm_top = (max_curve_y - min_val) / val_span;
                         let sy_top = base_y - (y_norm_top * unit_h).round() as i32;
                         let text_y = sy_top - (dpi_y as f32 * 0.05) as i32;
-                        let val_str = format!("{:.2}", res.normalized_value);
+                        let val_str = format!("{:.prec$}", res.normalized_value, prec = settings.integral_decimals);
 
                         let font = make_font(8.5, false, 2700);
                         let old_font = unsafe { SelectObject(hdc, font) };

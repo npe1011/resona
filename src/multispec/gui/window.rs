@@ -22,6 +22,7 @@ pub struct MultiSpecUiState {
     pub y_scale_dialog_state: MultiSpecYScaleDialogState,
     pub dragging_item_id: Option<String>,
     pub drop_target_slot: Option<usize>,
+    pub show_close_confirm: bool,
 }
 
 impl Default for MultiSpecUiState {
@@ -36,6 +37,7 @@ impl Default for MultiSpecUiState {
             y_scale_dialog_state: MultiSpecYScaleDialogState::default(),
             dragging_item_id: None,
             drop_target_slot: None,
+            show_close_confirm: false,
         }
     }
 }
@@ -53,27 +55,36 @@ pub fn show_multispec_window(
         return;
     }
 
+    let dirty_suffix = if state.is_dirty { " *" } else { "" };
     let win_title = if let Some(ref path) = state.rsm_path {
-        format!("Resona MultiSpec - {}", clean_path(path).display())
+        format!("Resona MultiSpec - {}{}", clean_path(path).display(), dirty_suffix)
     } else {
-        "Resona MultiSpec".to_string()
+        format!("Resona MultiSpec{}", dirty_suffix)
     };
 
     let viewport_id = ViewportId::from_hash_of("resona_multispec_viewport");
     let viewport_builder = ViewportBuilder::default()
-        .with_title(win_title)
+        .with_title(win_title.clone())
         .with_inner_size([1150.0, 780.0])
         .with_min_inner_size([700.0, 480.0]);
 
     ctx.show_viewport_immediate(viewport_id, viewport_builder, |ctx, _class| {
-        // ウィンドウ閉じる要求の検知 -> 状態およびUIダイアログ状態を空にリセット
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(win_title.clone()));
+
+        // ウィンドウ閉じる要求の検知 -> 未保存なら確認ダイアログ
         if ctx.input(|i| i.viewport().close_requested()) {
-            close_multispec_window(open, state, ui_state);
+            if state.is_dirty && !state.items.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ui_state.show_close_confirm = true;
+            } else {
+                close_multispec_window(open, state, ui_state);
+            }
         }
 
         let modal_locked = ui_state.print_dialog_state.is_open
             || ui_state.display_dialog_state.is_open
-            || ui_state.y_scale_dialog_state.is_open;
+            || ui_state.y_scale_dialog_state.is_open
+            || ui_state.show_close_confirm;
 
         // キーボードショートカットの処理 (モーダルダイアログ非表示時のみ)
         let (shortcut_new, shortcut_open_rsn, shortcut_open_rsm, shortcut_save, shortcut_undo, shortcut_redo, shortcut_close) =
@@ -112,7 +123,11 @@ pub fn show_multispec_window(
             action_redo(state);
         }
         if shortcut_close {
-            close_multispec_window(open, state, ui_state);
+            if state.is_dirty && !state.items.is_empty() {
+                ui_state.show_close_confirm = true;
+            } else {
+                close_multispec_window(open, state, ui_state);
+            }
         }
 
         // 1. ファイルドラッグ＆ドロップ受け入れ (.rsn / .rsm)
@@ -137,6 +152,7 @@ pub fn show_multispec_window(
                 } else if ext == "rsm" {
                     if let Ok(mut loaded) = load_rsm(&path) {
                         loaded.rsm_path = Some(clean_path(&path));
+                        loaded.is_dirty = false;
                         *state = loaded;
                         if let Some(parent) = path.parent() {
                             settings.current_directory = Some(parent.to_path_buf());
@@ -169,7 +185,11 @@ pub fn show_multispec_window(
                     }
                     ui.separator();
                     if ui.button("Close (Ctrl+W)").clicked() {
-                        close_multispec_window(open, state, ui_state);
+                        if state.is_dirty && !state.items.is_empty() {
+                            ui_state.show_close_confirm = true;
+                        } else {
+                            close_multispec_window(open, state, ui_state);
+                        }
                         ui.close_menu();
                     }
                 });
@@ -279,6 +299,55 @@ pub fn show_multispec_window(
                 style_settings,
             );
         }
+
+        // 8. 保存確認ダイアログ
+        if ui_state.show_close_confirm {
+            let mut show_confirm = true;
+            let mut do_cancel = false;
+            let mut do_dont_save = false;
+            let mut do_save = false;
+            let label = if let Some(ref path) = state.rsm_path {
+                path.file_name().and_then(|s| s.to_str()).unwrap_or("comparison.rsm").to_string()
+            } else {
+                "current MultiSpec project".to_string()
+            };
+
+            egui::Window::new("Save MultiSpec Changes?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .open(&mut show_confirm)
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
+                    ui.label(format!("Do you want to save changes to \"{}\" before closing?", label));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Cancel").clicked() {
+                                do_cancel = true;
+                            }
+                            if ui.button("Don't Save").clicked() {
+                                do_dont_save = true;
+                            }
+                            if ui.button("Save").clicked() {
+                                do_save = true;
+                            }
+                        });
+                    });
+                });
+
+            if !show_confirm || do_cancel {
+                ui_state.show_close_confirm = false;
+            } else if do_dont_save {
+                ui_state.show_close_confirm = false;
+                close_multispec_window(open, state, ui_state);
+            } else if do_save {
+                if action_save_rsm(state, settings) {
+                    ui_state.show_close_confirm = false;
+                    close_multispec_window(open, state, ui_state);
+                }
+            }
+        }
     });
 }
 
@@ -295,7 +364,9 @@ fn close_multispec_window(
 fn action_new(state: &mut MultiSpecState, ui_state: &mut MultiSpecUiState) {
     *state = MultiSpecState::default();
     *ui_state = MultiSpecUiState::default();
+    state.is_dirty = false;
     state.push_history();
+    state.is_dirty = false;
 }
 
 fn action_open_rsn(state: &mut MultiSpecState, settings: &mut MultiSpecSettings) {
@@ -338,6 +409,7 @@ fn action_open_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings)
     if let Some(path) = dialog.pick_file() {
         if let Ok(mut loaded) = load_rsm(&path) {
             loaded.rsm_path = Some(clean_path(&path));
+            loaded.is_dirty = false;
             *state = loaded;
             if let Some(parent) = path.parent() {
                 settings.current_directory = Some(parent.to_path_buf());
@@ -347,7 +419,7 @@ fn action_open_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings)
     }
 }
 
-fn action_save_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings) {
+fn action_save_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings) -> bool {
     let default_name = if let Some(ref rsm) = state.rsm_path {
         rsm.file_name().and_then(|s| s.to_str()).unwrap_or("comparison.rsm").to_string()
     } else if let Some(first) = state.items.first() {
@@ -366,11 +438,17 @@ fn action_save_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings)
     if let Some(path) = dialog.save_file() {
         if save_rsm(state, &path).is_ok() {
             state.rsm_path = Some(clean_path(&path));
+            state.is_dirty = false;
             if let Some(parent) = path.parent() {
                 settings.current_directory = Some(parent.to_path_buf());
                 settings.save();
             }
+            true
+        } else {
+            false
         }
+    } else {
+        false
     }
 }
 
