@@ -84,13 +84,23 @@ pub fn save_rsm<P: AsRef<Path>>(state: &mut MultiSpecState, path: P) -> Result<(
     }
 
     let p = path.as_ref();
-    if let Some(parent) = p.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+    let parent = p.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.as_os_str().is_empty() && !parent.exists() {
+        let _ = std::fs::create_dir_all(parent);
     }
 
-    let file = File::create(p)?;
+    let temp_file_name = format!(
+        ".{}_{}_{}.tmp",
+        p.file_name().and_then(|n| n.to_str()).unwrap_or("multispec"),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let temp_path = parent.join(temp_file_name);
+
+    let file = File::create(&temp_path)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
@@ -149,6 +159,29 @@ pub fn save_rsm<P: AsRef<Path>>(state: &mut MultiSpecState, path: P) -> Result<(
     zip.write_all(manifest_json.as_bytes())?;
 
     zip.finish()?;
+
+    // 一時ファイルを本番パスにアトミック置換
+    if let Err(e) = std::fs::rename(&temp_path, p) {
+        #[cfg(target_os = "windows")]
+        {
+            if p.exists() {
+                let backup_path = parent.join(format!(".{}_{}.bak", p.file_name().and_then(|n| n.to_str()).unwrap_or("multispec"), std::process::id()));
+                if std::fs::rename(p, &backup_path).is_ok() {
+                    if let Err(re_err) = std::fs::rename(&temp_path, p) {
+                        let _ = std::fs::rename(&backup_path, p);
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err(re_err.into());
+                    }
+                    let _ = std::fs::remove_file(&backup_path);
+                    state.rsm_path = Some(clean_path(p));
+                    return Ok(());
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e.into());
+    }
+
     state.rsm_path = Some(clean_path(p));
     Ok(())
 }

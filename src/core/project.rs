@@ -789,12 +789,24 @@ impl Project {
     /// プロジェクトを .rsn (または旧 .ez) ファイル (ZIPアーカイブ) として保存する
     pub fn save_rsn<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let p = path.as_ref();
-        if let Some(parent) = p.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        let parent = p.parent().unwrap_or_else(|| Path::new("."));
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            let _ = std::fs::create_dir_all(parent);
         }
-        let file = File::create(p)?;
+
+        // 同一ディレクトリ内に安全な一時ファイルを作成して書き込み、完了後にアトミック置換
+        let temp_file_name = format!(
+            ".{}_{}_{}.tmp",
+            p.file_name().and_then(|n| n.to_str()).unwrap_or("resona"),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let temp_path = parent.join(temp_file_name);
+
+        let file = File::create(&temp_path)?;
         let mut zip = ZipWriter::new(file);
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
@@ -854,6 +866,28 @@ impl Project {
         zip.write_all(json_str.as_bytes())?;
 
         zip.finish()?;
+
+        // 一時ファイルを本番パスにアトミック置換
+        if let Err(e) = std::fs::rename(&temp_path, p) {
+            #[cfg(target_os = "windows")]
+            {
+                if p.exists() {
+                    let backup_path = parent.join(format!(".{}_{}.bak", p.file_name().and_then(|n| n.to_str()).unwrap_or("resona"), std::process::id()));
+                    if std::fs::rename(p, &backup_path).is_ok() {
+                        if let Err(re_err) = std::fs::rename(&temp_path, p) {
+                            let _ = std::fs::rename(&backup_path, p);
+                            let _ = std::fs::remove_file(&temp_path);
+                            return Err(re_err.into());
+                        }
+                        let _ = std::fs::remove_file(&backup_path);
+                        return Ok(());
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.into());
+        }
+
         Ok(())
     }
 
@@ -1210,6 +1244,30 @@ mod tests {
         proj.set_shift_reference(3.0, 3.15);
         let pivot_ppm_after = proj.pivot_ppm();
         assert!((pivot_ppm_after - (pivot_ppm_before + 0.15)).abs() < 1e-4, "Pivot PPM should track reference shift exactly");
+    }
+
+    #[test]
+    fn test_project_save_rsn_overwrite() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_resona_overwrite.rsn");
+
+        let mut proj = Project::new();
+        proj.ppm = Some(Array1::linspace(10.0, 0.0, 100));
+        proj.complex_spectrum_unphased = Some(Array1::zeros(100));
+        proj.spectrum_real = Some(Array1::zeros(100));
+
+        // 1回目の保存
+        proj.save_rsn(&test_file).expect("First save failed");
+
+        // 2回目の保存 (上書き)
+        proj.save_rsn(&test_file).expect("Overwrite save failed");
+
+        // 読み込み直後に上書き
+        let mut loaded = Project::new();
+        loaded.load_rsn(&test_file).expect("Load failed");
+        loaded.save_rsn(&test_file).expect("Save after load failed");
+
+        let _ = std::fs::remove_file(&test_file);
     }
 }
 

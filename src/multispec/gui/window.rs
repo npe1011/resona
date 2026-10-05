@@ -11,6 +11,18 @@ use crate::multispec::io::{load_rsm, save_rsm};
 use crate::multispec::settings::MultiSpecSettings;
 use crate::multispec::state::{clean_path, MultiSpecState};
 
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Debug, Clone)]
+pub enum MultiSpecDialogResult {
+    OpenRsn(Vec<PathBuf>),
+    OpenRsm(PathBuf),
+    SaveRsm(PathBuf),
+    SaveCancelled,
+}
+
 /// MultiSpec ウィンドウ固有の UI インタラクション状態
 pub struct MultiSpecUiState {
     pub zoom_mode: MultiSpecZoomMode,
@@ -23,6 +35,9 @@ pub struct MultiSpecUiState {
     pub dragging_item_id: Option<String>,
     pub drop_target_slot: Option<usize>,
     pub show_close_confirm: bool,
+    pub is_file_dialog_open: Arc<AtomicBool>,
+    pub file_dialog_result: Arc<Mutex<Option<MultiSpecDialogResult>>>,
+    pub close_after_save: bool,
 }
 
 impl Default for MultiSpecUiState {
@@ -38,6 +53,9 @@ impl Default for MultiSpecUiState {
             dragging_item_id: None,
             drop_target_slot: None,
             show_close_confirm: false,
+            is_file_dialog_open: Arc::new(AtomicBool::new(false)),
+            file_dialog_result: Arc::new(Mutex::new(None)),
+            close_after_save: false,
         }
     }
 }
@@ -71,6 +89,64 @@ pub fn show_multispec_window(
     ctx.show_viewport_immediate(viewport_id, viewport_builder, |ctx, _class| {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(win_title.clone()));
 
+        // バックグラウンドスレッドからのファイルダイアログ結果を受信
+        let dialog_result = if let Ok(mut lock) = ui_state.file_dialog_result.lock() {
+            lock.take()
+        } else {
+            None
+        };
+        if let Some(res) = dialog_result {
+            match res {
+                MultiSpecDialogResult::OpenRsn(paths) => {
+                    let was_empty = state.items.is_empty();
+                    for path in &paths {
+                        let _ = state.add_rsn_file(path);
+                    }
+                    if was_empty && !state.items.is_empty() {
+                        state.set_stack();
+                    }
+                    state.update_common_ppm_range();
+                    state.push_history();
+                    if state.rsm_path.is_none() {
+                        if let Some(first_path) = paths.first() {
+                            if let Some(parent) = first_path.parent() {
+                                settings.current_directory = Some(parent.to_path_buf());
+                                settings.save();
+                            }
+                        }
+                    }
+                }
+                MultiSpecDialogResult::OpenRsm(path) => {
+                    if let Ok(mut loaded) = load_rsm(&path) {
+                        loaded.rsm_path = Some(clean_path(&path));
+                        loaded.is_dirty = false;
+                        *state = loaded;
+                        if let Some(parent) = path.parent() {
+                            settings.current_directory = Some(parent.to_path_buf());
+                            settings.save();
+                        }
+                    }
+                }
+                MultiSpecDialogResult::SaveRsm(path) => {
+                    if save_rsm(state, &path).is_ok() {
+                        state.rsm_path = Some(clean_path(&path));
+                        state.is_dirty = false;
+                        if let Some(parent) = path.parent() {
+                            settings.current_directory = Some(parent.to_path_buf());
+                            settings.save();
+                        }
+                        if ui_state.close_after_save {
+                            close_multispec_window(open, state, ui_state);
+                        }
+                    }
+                    ui_state.close_after_save = false;
+                }
+                MultiSpecDialogResult::SaveCancelled => {
+                    ui_state.close_after_save = false;
+                }
+            }
+        }
+
         // ウィンドウ閉じる要求の検知 -> 未保存なら確認ダイアログ
         if ctx.input(|i| i.viewport().close_requested()) {
             if state.is_dirty && !state.items.is_empty() {
@@ -84,7 +160,8 @@ pub fn show_multispec_window(
         let modal_locked = ui_state.print_dialog_state.is_open
             || ui_state.display_dialog_state.is_open
             || ui_state.y_scale_dialog_state.is_open
-            || ui_state.show_close_confirm;
+            || ui_state.show_close_confirm
+            || ui_state.is_file_dialog_open.load(Ordering::SeqCst);
 
         // キーボードショートカットの処理 (モーダルダイアログ非表示時のみ)
         let (shortcut_new, shortcut_open_rsn, shortcut_open_rsm, shortcut_save, shortcut_undo, shortcut_redo, shortcut_close) =
@@ -108,13 +185,13 @@ pub fn show_multispec_window(
             action_new(state, ui_state);
         }
         if shortcut_open_rsn {
-            action_open_rsn(state, settings);
+            action_open_rsn(ui_state, settings, ctx);
         }
         if shortcut_open_rsm {
-            action_open_rsm(state, settings);
+            action_open_rsm(ui_state, settings, ctx);
         }
         if shortcut_save {
-            action_save_rsm(state, settings);
+            action_save_rsm(state, ui_state, settings, ctx);
         }
         if shortcut_undo {
             action_undo(state);
@@ -172,15 +249,15 @@ pub fn show_multispec_window(
                         ui.close_menu();
                     }
                     if ui.button("Open RSN... (Ctrl+O)").clicked() {
-                        action_open_rsn(state, settings);
+                        action_open_rsn(ui_state, settings, ctx);
                         ui.close_menu();
                     }
                     if ui.button("Open RSM... (Ctrl+Shift+O)").clicked() {
-                        action_open_rsm(state, settings);
+                        action_open_rsm(ui_state, settings, ctx);
                         ui.close_menu();
                     }
                     if ui.button("Save as RSM... (Ctrl+S)").clicked() {
-                        action_save_rsm(state, settings);
+                        action_save_rsm(state, ui_state, settings, ctx);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -342,10 +419,9 @@ pub fn show_multispec_window(
                 ui_state.show_close_confirm = false;
                 close_multispec_window(open, state, ui_state);
             } else if do_save {
-                if action_save_rsm(state, settings) {
-                    ui_state.show_close_confirm = false;
-                    close_multispec_window(open, state, ui_state);
-                }
+                ui_state.close_after_save = true;
+                action_save_rsm(state, ui_state, settings, ctx);
+                ui_state.show_close_confirm = false;
             }
         }
     });
@@ -369,57 +445,68 @@ fn action_new(state: &mut MultiSpecState, ui_state: &mut MultiSpecUiState) {
     state.is_dirty = false;
 }
 
-fn action_open_rsn(state: &mut MultiSpecState, settings: &mut MultiSpecSettings) {
+fn action_open_rsn(ui_state: &mut MultiSpecUiState, settings: &MultiSpecSettings, ctx: &Context) {
+    if ui_state.is_file_dialog_open.load(Ordering::SeqCst) {
+        return;
+    }
+    ui_state.is_file_dialog_open.store(true, Ordering::SeqCst);
     let mut dialog = rfd::FileDialog::new()
         .set_title("Add Spectrum from RSN File(s)")
         .add_filter("Resona Project", &["rsn"]);
     if let Some(ref dir) = settings.current_directory {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(paths) = dialog.pick_files() {
-        let was_empty = state.items.is_empty();
-        for path in &paths {
-            let _ = state.add_rsn_file(path);
-        }
-        if was_empty && !state.items.is_empty() {
-            state.set_stack();
-        }
-        state.update_common_ppm_range();
-        state.push_history();
-
-        // RSM が既に存在する場合はカレントディレクトリを更新せず、なければ最初の RSN の親ディレクトリで更新
-        if state.rsm_path.is_none() {
-            if let Some(first_path) = paths.first() {
-                if let Some(parent) = first_path.parent() {
-                    settings.current_directory = Some(parent.to_path_buf());
-                    settings.save();
-                }
+    let is_open = Arc::clone(&ui_state.is_file_dialog_open);
+    let slot = Arc::clone(&ui_state.file_dialog_result);
+    let ctx_clone = ctx.clone();
+    std::thread::spawn(move || {
+        let res = dialog.pick_files();
+        is_open.store(false, Ordering::SeqCst);
+        if let Some(paths) = res {
+            if let Ok(mut lock) = slot.lock() {
+                *lock = Some(MultiSpecDialogResult::OpenRsn(paths));
             }
+            ctx_clone.request_repaint();
         }
-    }
+    });
 }
 
-fn action_open_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings) {
+fn action_open_rsm(ui_state: &mut MultiSpecUiState, settings: &MultiSpecSettings, ctx: &Context) {
+    if ui_state.is_file_dialog_open.load(Ordering::SeqCst) {
+        return;
+    }
+    ui_state.is_file_dialog_open.store(true, Ordering::SeqCst);
     let mut dialog = rfd::FileDialog::new()
         .set_title("Open MultiSpec Archive (.rsm)")
         .add_filter("MultiSpec Archive", &["rsm"]);
     if let Some(ref dir) = settings.current_directory {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(path) = dialog.pick_file() {
-        if let Ok(mut loaded) = load_rsm(&path) {
-            loaded.rsm_path = Some(clean_path(&path));
-            loaded.is_dirty = false;
-            *state = loaded;
-            if let Some(parent) = path.parent() {
-                settings.current_directory = Some(parent.to_path_buf());
-                settings.save();
+    let is_open = Arc::clone(&ui_state.is_file_dialog_open);
+    let slot = Arc::clone(&ui_state.file_dialog_result);
+    let ctx_clone = ctx.clone();
+    std::thread::spawn(move || {
+        let res = dialog.pick_file();
+        is_open.store(false, Ordering::SeqCst);
+        if let Some(path) = res {
+            if let Ok(mut lock) = slot.lock() {
+                *lock = Some(MultiSpecDialogResult::OpenRsm(path));
             }
+            ctx_clone.request_repaint();
         }
-    }
+    });
 }
 
-fn action_save_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings) -> bool {
+fn action_save_rsm(
+    state: &MultiSpecState,
+    ui_state: &mut MultiSpecUiState,
+    settings: &MultiSpecSettings,
+    ctx: &Context,
+) {
+    if ui_state.is_file_dialog_open.load(Ordering::SeqCst) {
+        return;
+    }
+    ui_state.is_file_dialog_open.store(true, Ordering::SeqCst);
     let default_name = if let Some(ref rsm) = state.rsm_path {
         rsm.file_name().and_then(|s| s.to_str()).unwrap_or("comparison.rsm").to_string()
     } else if let Some(first) = state.items.first() {
@@ -435,21 +522,24 @@ fn action_save_rsm(state: &mut MultiSpecState, settings: &mut MultiSpecSettings)
     if let Some(ref dir) = settings.current_directory {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(path) = dialog.save_file() {
-        if save_rsm(state, &path).is_ok() {
-            state.rsm_path = Some(clean_path(&path));
-            state.is_dirty = false;
-            if let Some(parent) = path.parent() {
-                settings.current_directory = Some(parent.to_path_buf());
-                settings.save();
+    let is_open = Arc::clone(&ui_state.is_file_dialog_open);
+    let slot = Arc::clone(&ui_state.file_dialog_result);
+    let ctx_clone = ctx.clone();
+    std::thread::spawn(move || {
+        let res = dialog.save_file();
+        is_open.store(false, Ordering::SeqCst);
+        if let Some(mut path) = res {
+            if path.extension().is_none() {
+                path.set_extension("rsm");
             }
-            true
-        } else {
-            false
+            if let Ok(mut lock) = slot.lock() {
+                *lock = Some(MultiSpecDialogResult::SaveRsm(path));
+            }
+        } else if let Ok(mut lock) = slot.lock() {
+            *lock = Some(MultiSpecDialogResult::SaveCancelled);
         }
-    } else {
-        false
-    }
+        ctx_clone.request_repaint();
+    });
 }
 
 fn action_undo(state: &mut MultiSpecState) {
