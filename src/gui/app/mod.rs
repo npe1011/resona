@@ -7,10 +7,11 @@ use crate::core::{
 };
 
 use crate::gui::dialogs::{
-    show_display_dialog, show_ft_dialog, show_full_auto_dialog, show_jcoupling_dialog,
-    show_multiview_yscale_dialog, show_peak_list_dialog, show_print_dialog, DisplayDialogState,
-    FtDialogState, FullAutoBaselineChoice, FullAutoDialogState, JCouplingDialogState,
-    MultiviewYScaleDialogState, PeakListDialogState, PrintDialogState,
+    show_about_dialog, show_display_dialog, show_ft_dialog, show_full_auto_dialog,
+    show_jcoupling_dialog, show_multiview_yscale_dialog, show_peak_list_dialog, show_print_dialog,
+    AboutDialogState, DisplayDialogState, FtDialogState, FullAutoBaselineChoice,
+    FullAutoDialogState, JCouplingDialogState, MultiviewYScaleDialogState, PeakListDialogState,
+    PrintDialogState,
 };
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 use crate::gui::panels::{
@@ -41,6 +42,7 @@ pub struct ResonaApp {
     pub multiview_yscale_dialog_state: MultiviewYScaleDialogState,
     pub peak_list_dialog_state: PeakListDialogState,
     pub print_dialog_state: PrintDialogState,
+    pub about_dialog_state: AboutDialogState,
 
     // MultiSpec (マルチスペクトル比較独立ウィンドウ)
     pub multispec_open: bool,
@@ -121,6 +123,7 @@ impl Default for ResonaApp {
             multiview_yscale_dialog_state: MultiviewYScaleDialogState::default(),
             peak_list_dialog_state: PeakListDialogState::default(),
             print_dialog_state,
+            about_dialog_state: AboutDialogState::default(),
 
             multispec_open: false,
             multispec_state: MultiSpecState::default(),
@@ -171,6 +174,7 @@ impl ResonaApp {
             || self.peak_list_dialog_state.open
             || self.print_dialog_state.is_open
             || self.print_dialog_state.style_dialog_state.is_open
+            || self.about_dialog_state.open
             || self.is_file_dialog_open.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -297,6 +301,13 @@ impl eframe::App for ResonaApp {
                     ui.menu_button("Settings", |ui| {
                         if ui.button("Default").clicked() {
                             self.reset_settings_to_default();
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button("About", |ui| {
+                        if ui.button("About Resona...").clicked() {
+                            self.about_dialog_state.open = true;
                             ui.close_menu();
                         }
                     });
@@ -733,6 +744,7 @@ impl eframe::App for ResonaApp {
         );
 
         show_peak_list_dialog(ctx, &mut self.peak_list_dialog_state);
+        show_about_dialog(ctx, &mut self.about_dialog_state);
 
         // MultiSpec 独立ウィンドウ (メインウィンドウをロックしない独立 OS ウィンドウ)
         if self.multispec_open {

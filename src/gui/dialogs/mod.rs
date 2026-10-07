@@ -1,3 +1,4 @@
+pub mod about_dialog;
 pub mod display_dialog;
 pub mod ft_dialog;
 pub mod full_auto_dialog;
@@ -7,6 +8,7 @@ pub mod peak_list_dialog;
 pub mod print_dialog;
 pub mod print_style_dialog;
 
+pub use about_dialog::{show_about_dialog, AboutDialogState};
 pub use display_dialog::{show_display_dialog, DisplayDialogState, DisplaySettingsResult};
 pub use ft_dialog::{show_ft_dialog, FtDialogState};
 pub use full_auto_dialog::{

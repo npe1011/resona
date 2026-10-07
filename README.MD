@@ -70,6 +70,7 @@
 - [19. その他の機能](#19-その他の機能)
   - [19.1 ピークリスト](#191-ピークリスト)
 - [20. 参考にしたソフトウェア等](#20-参考にしたソフトウェア等)
+- [21. ライセンス (License)](#21-ライセンス-license)
 
 
 # 1. インストールと実行
@@ -312,5 +313,8 @@ Edit > Peak Listから既存のピークリストをテキストで出力でき�
 - nmrglue [https://github.com/jjhelmus/nmrglue]　データの読み込みと様々な処理を参考にしました。
 - ssnake [https://github.com/smeerten/ssnake]　JEOLのJDFデータのデジタルフィルター用前処理を参考にしました。
 
-またGUIの挙動等はJEOLのdeltaやAlice1Dを参考にしています。
+
+# 21. ライセンス (License)
+本ソフトウェアは [MIT License](LICENSE) の下で公開されています。
+依存ライブラリ、内蔵フォント、および参考にした先行ソフトウェアのライセンスと著作権表示の詳細は [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) をご覧ください。
 

@@ -1,7 +1,11 @@
 [package]
 name = "resona"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
+authors = ["Tatsuhiko Yoshino"]
+license = "MIT"
+description = "A lightweight simple 1D NMR spectroscopy analysis application in Rust"
+readme = "README.MD"
 
 [dependencies]
 ndarray = { version = "0.16", features = ["serde"] }
