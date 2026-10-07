@@ -84,7 +84,7 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    name: Build macOS (Universal Binary: Apple Silicon + Intel)
+    name: "Build macOS (Universal Binary: Apple Silicon + Intel)"
     needs: resolve-version
     runs-on: macos-latest
     steps:
