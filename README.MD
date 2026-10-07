@@ -92,7 +92,9 @@ Rustで書かれた軽量でシンプルな1D NMR解析ソフトです。Google 
 
 ## 1.2. Mac版
 Resona.Appをアプリケーションフォルダにおきます。さらに下記コマンドを実行します。
+
 ```chmod +x /Applications/Resona.app/Contents/MacOS/resona```
+
 これはGihub Actionを使ってビルド・圧縮しているときにパーミッションの設定がおかしくなっているための措置です。
 （上記のファイルに実行権限xを付与しています）
 
