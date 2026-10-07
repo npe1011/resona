@@ -73,14 +73,13 @@ jobs:
           if (Test-Path THIRD_PARTY_LICENSES.md) {
             Copy-Item THIRD_PARTY_LICENSES.md $pkgDir/
           }
-          Compress-Archive -Path $pkgDir -DestinationPath "${pkgDir}.zip"
-          echo "ZIP_NAME=${pkgDir}.zip" >> $env:GITHUB_ENV
+          echo "PKG_DIR=$pkgDir" >> $env:GITHUB_ENV
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: resona-windows-x86_64
-          path: ${{ env.ZIP_NAME }}
+          name: resona-v${{ needs.resolve-version.outputs.version }}-windows-x86_64
+          path: ${{ env.PKG_DIR }}
           if-no-files-found: error
 
   build-macos:
@@ -150,21 +149,19 @@ jobs:
       - name: Package macOS Release
         run: |
           VER="${{ needs.resolve-version.outputs.version }}"
-          PKG_NAME="resona-v${VER}-macos-universal.zip"
-          
-          EXTRA_FILES=()
-          [ -f "README.MD" ] && EXTRA_FILES+=("README.MD")
-          [ -f "LICENSE" ] && EXTRA_FILES+=("LICENSE")
-          [ -f "THIRD_PARTY_LICENSES.md" ] && EXTRA_FILES+=("THIRD_PARTY_LICENSES.md")
-          
-          zip -r "${PKG_NAME}" Resona.app "${EXTRA_FILES[@]}"
-          echo "ZIP_NAME=${PKG_NAME}" >> $GITHUB_ENV
+          PKG_DIR="resona-v${VER}-macos-universal"
+          mkdir -p "${PKG_DIR}"
+          cp -R Resona.app "${PKG_DIR}/"
+          [ -f "README.MD" ] && cp README.MD "${PKG_DIR}/"
+          [ -f "LICENSE" ] && cp LICENSE "${PKG_DIR}/"
+          [ -f "THIRD_PARTY_LICENSES.md" ] && cp THIRD_PARTY_LICENSES.md "${PKG_DIR}/"
+          echo "PKG_DIR=${PKG_DIR}" >> $GITHUB_ENV
 
       - name: Upload macOS Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: resona-macos-universal
-          path: ${{ env.ZIP_NAME }}
+          name: resona-v${{ needs.resolve-version.outputs.version }}-macos-universal
+          path: ${{ env.PKG_DIR }}
           if-no-files-found: error
 
   create-release:
@@ -178,6 +175,14 @@ jobs:
         with:
           path: artifacts
 
+      - name: Create Release Zip Archives
+        run: |
+          cd artifacts
+          for dir in resona-*/; do
+            dir_name="${dir%/}"
+            zip -r "${dir_name}.zip" "${dir_name}"
+          done
+
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
@@ -185,6 +190,4 @@ jobs:
           name: Release ${{ needs.resolve-version.outputs.tag }}
           draft: false
           prerelease: false
-          files: |
-            artifacts/resona-windows-x86_64/*.zip
-            artifacts/resona-macos-universal/*.zip
+          files: artifacts/*.zip
