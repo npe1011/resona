@@ -522,8 +522,9 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
         }
     }
 
-    // 7. Home キー: 全体表示にリセット
-    if ui.input(|i| i.key_pressed(Key::Home)) {
+    // 7. Home または Ctrl + 0 キー: 全体表示にリセット
+    let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+    if ui.input(|i| i.key_pressed(Key::Home) || (is_ctrl && i.key_pressed(Key::Num0))) {
         state.reset_zoom();
         state.push_history();
     }

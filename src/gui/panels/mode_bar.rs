@@ -108,7 +108,7 @@ pub fn show_mode_bar(
             .fill(fill)
             .stroke(strk)
             .rounding(3.0_f32);
-        if ui.add(btn_display).clicked() {
+        if ui.add(btn_display).on_hover_text("Display settings (Ctrl+D)").clicked() {
             event = ModeBarEvent::OpenDisplay;
         }
 
@@ -118,7 +118,7 @@ pub fn show_mode_bar(
             .fill(fill)
             .stroke(strk)
             .rounding(3.0_f32);
-        if ui.add(btn_print).clicked() {
+        if ui.add(btn_print).on_hover_text("Print dialog (Ctrl+P)").clicked() {
             event = ModeBarEvent::OpenPrint;
         }
 
@@ -128,7 +128,7 @@ pub fn show_mode_bar(
             .fill(fill)
             .stroke(strk)
             .rounding(3.0_f32);
-        if ui.add(btn_multispec).clicked() {
+        if ui.add(btn_multispec).on_hover_text("Open MultiSpec window (Ctrl+M)").clicked() {
             event = ModeBarEvent::OpenMultiSpec;
         }
 

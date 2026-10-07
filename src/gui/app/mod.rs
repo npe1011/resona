@@ -269,12 +269,18 @@ impl eframe::App for ResonaApp {
                             ui.close_menu();
                         }
                         ui.separator();
-                        if ui.button("Exit").clicked() {
+                        if ui.button("Print... (Ctrl+P)").clicked() {
+                            self.print_dialog_state.open();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Exit (Ctrl+W)").clicked() {
                             if self.is_dirty {
                                 self.show_close_confirm = true;
                             } else {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
+                            ui.close_menu();
                         }
                     });
 

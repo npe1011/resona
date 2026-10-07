@@ -23,6 +23,30 @@ impl ResonaApp {
             self.handle_save(ctx);
         }
 
+        // Ctrl + P: Print Dialog
+        if ctrl_or_cmd && input.key_pressed(Key::P) {
+            self.print_dialog_state.open();
+        }
+
+        // Ctrl + D: Display Dialog
+        if ctrl_or_cmd && input.key_pressed(Key::D) {
+            self.open_display_dialog();
+        }
+
+        // Ctrl + M: Open MultiSpec Window
+        if ctrl_or_cmd && input.key_pressed(Key::M) {
+            self.multispec_open = true;
+        }
+
+        // Ctrl + W: Exit / Close
+        if ctrl_or_cmd && input.key_pressed(Key::W) {
+            if self.is_dirty {
+                self.show_close_confirm = true;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
         // Ctrl + Z: Undo
         if ctrl_or_cmd && !input.modifiers.shift && input.key_pressed(Key::Z) {
             if self.project.undo() {
@@ -51,8 +75,8 @@ impl ResonaApp {
             self.status_message = "Mode cleared".to_string();
         }
 
-        // Home: Reset Zoom (常に動作)
-        if input.key_pressed(Key::Home) {
+        // Home or Ctrl + 0: Reset Zoom (常に動作)
+        if input.key_pressed(Key::Home) || (ctrl_or_cmd && input.key_pressed(Key::Num0)) {
             self.reset_zoom();
         }
 

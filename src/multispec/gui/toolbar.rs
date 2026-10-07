@@ -84,7 +84,10 @@ pub fn show_multispec_toolbar(
             }
 
             // 3. Reset Zoom
-            if light_button(ui, "Reset Zoom", false, 72.0).clicked() {
+            if light_button(ui, "Reset Zoom", false, 72.0)
+                .on_hover_text("Reset zoom to full range (Ctrl+0 / Home)")
+                .clicked()
+            {
                 *zoom_mode = MultiSpecZoomMode::None;
                 event = MultiSpecToolbarEvent::ResetZoom;
             }
@@ -144,10 +147,16 @@ pub fn show_multispec_toolbar(
 
             ui.separator();
 
-            if light_button(ui, "Display", false, 58.0).clicked() {
+            if light_button(ui, "Display", false, 58.0)
+                .on_hover_text("Display settings (Ctrl+D)")
+                .clicked()
+            {
                 event = MultiSpecToolbarEvent::Display;
             }
-            if light_button(ui, "Print", false, 58.0).clicked() {
+            if light_button(ui, "Print", false, 58.0)
+                .on_hover_text("Print dialog (Ctrl+P)")
+                .clicked()
+            {
                 event = MultiSpecToolbarEvent::Print;
             }
         });

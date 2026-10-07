@@ -164,22 +164,35 @@ pub fn show_multispec_window(
             || ui_state.is_file_dialog_open.load(Ordering::SeqCst);
 
         // キーボードショートカットの処理 (モーダルダイアログ非表示時のみ)
-        let (shortcut_new, shortcut_open_rsn, shortcut_open_rsm, shortcut_save, shortcut_undo, shortcut_redo, shortcut_close) =
-            if !modal_locked {
-                ctx.input_mut(|i| {
-                    (
-                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::N),
-                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
-                        i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::O),
-                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
-                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
-                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y),
-                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
-                    )
-                })
-            } else {
-                (false, false, false, false, false, false, false)
-            };
+        let (
+            shortcut_new,
+            shortcut_open_rsn,
+            shortcut_open_rsm,
+            shortcut_save,
+            shortcut_undo,
+            shortcut_redo,
+            shortcut_print,
+            shortcut_display,
+            shortcut_reset_zoom,
+            shortcut_close,
+        ) = if !modal_locked {
+            ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::N),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
+                    i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::O),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::P),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::D),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0) || i.consume_key(egui::Modifiers::NONE, egui::Key::Home),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
+                )
+            })
+        } else {
+            (false, false, false, false, false, false, false, false, false, false)
+        };
 
         if shortcut_new {
             action_new(state, ui_state);
@@ -198,6 +211,16 @@ pub fn show_multispec_window(
         }
         if shortcut_redo {
             action_redo(state);
+        }
+        if shortcut_print {
+            ui_state.print_dialog_state.open();
+        }
+        if shortcut_display {
+            ui_state.display_dialog_state.open_from(state, settings);
+        }
+        if shortcut_reset_zoom {
+            state.reset_zoom();
+            state.push_history();
         }
         if shortcut_close {
             if state.is_dirty && !state.items.is_empty() {
@@ -258,6 +281,11 @@ pub fn show_multispec_window(
                     }
                     if ui.button("Save as RSM... (Ctrl+S)").clicked() {
                         action_save_rsm(state, ui_state, settings, ctx);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Print... (Ctrl+P)").clicked() {
+                        ui_state.print_dialog_state.open();
                         ui.close_menu();
                     }
                     ui.separator();
