@@ -1,0 +1,190 @@
+name: Build Release (Windows & macOS)
+
+# 実行は GitHub 上で手動実行 (workflow_dispatch) のみ
+# commit や tag による自動実行は行いません
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub Release?'
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Release tag (leave blank to auto-detect from Cargo.toml)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-version:
+    name: Resolve Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      tag: ${{ steps.get_version.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine version from Cargo.toml
+        id: get_version
+        run: |
+          INPUT_TAG="${{ inputs.release_tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            VER="${INPUT_TAG#v}"
+            TAG="v${VER}"
+          else
+            VER=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f 2)
+            TAG="v${VER}"
+          fi
+          echo "version=${VER}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Resolved version: ${VER}, tag: ${TAG}"
+
+  build-windows:
+    name: Build Windows (x86_64)
+    needs: resolve-version
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Package Windows Release
+        shell: pwsh
+        run: |
+          $ver = "${{ needs.resolve-version.outputs.version }}"
+          $pkgDir = "resona-v${ver}-windows-x86_64"
+          New-Item -ItemType Directory -Path $pkgDir
+          Copy-Item target/x86_64-pc-windows-msvc/release/resona.exe $pkgDir/
+          Copy-Item README.MD $pkgDir/
+          Copy-Item LICENSE $pkgDir/
+          if (Test-Path THIRD_PARTY_LICENSES.md) {
+            Copy-Item THIRD_PARTY_LICENSES.md $pkgDir/
+          }
+          Compress-Archive -Path $pkgDir -DestinationPath "${pkgDir}.zip"
+          echo "ZIP_NAME=${pkgDir}.zip" >> $env:GITHUB_ENV
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: resona-windows-x86_64
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS (Universal Binary: Apple Silicon + Intel)
+    needs: resolve-version
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build Apple Silicon binary (aarch64)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build Intel binary (x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Create Universal Binary & macOS App Bundle
+        run: |
+          VER="${{ needs.resolve-version.outputs.version }}"
+
+          mkdir -p target/universal/release
+          lipo -create -output target/universal/release/resona \
+            target/aarch64-apple-darwin/release/resona \
+            target/x86_64-apple-darwin/release/resona
+
+          APP_DIR="Resona.app"
+          CONTENTS_DIR="${APP_DIR}/Contents"
+          MACOS_DIR="${CONTENTS_DIR}/MacOS"
+          RESOURCES_DIR="${CONTENTS_DIR}/Resources"
+
+          rm -rf "${APP_DIR}"
+          mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
+
+          # 1. バイナリのコピー
+          cp target/universal/release/resona "${MACOS_DIR}/resona"
+          chmod +x "${MACOS_DIR}/resona"
+
+          # 2. Info.plist のコピー & バージョン自動注入
+          cp macos/Info.plist "${CONTENTS_DIR}/Info.plist"
+          python3 -c "
+          import plistlib
+          with open('${CONTENTS_DIR}/Info.plist', 'rb') as f:
+              p = plistlib.load(f)
+          p['CFBundleShortVersionString'] = '${VER}'
+          p['CFBundleVersion'] = '${VER}'
+          with open('${CONTENTS_DIR}/Info.plist', 'wb') as f:
+              plistlib.dump(p, f)
+          print('Successfully synced Info.plist version to ${VER}')
+          "
+
+          # 3. PkgInfo の生成
+          echo -n "APPL????" > "${CONTENTS_DIR}/PkgInfo"
+
+          # 4. アイコンのコピー
+          if [ -f "assets/icons/icon_mac.icns" ]; then
+            cp assets/icons/icon_mac.icns "${RESOURCES_DIR}/icon.icns"
+          fi
+
+          # 5. Ad-hoc コード署名
+          codesign --force --deep --sign - "${APP_DIR}"
+
+      - name: Package macOS Release
+        run: |
+          VER="${{ needs.resolve-version.outputs.version }}"
+          PKG_NAME="resona-v${VER}-macos-universal.zip"
+          
+          EXTRA_FILES=()
+          [ -f "README.MD" ] && EXTRA_FILES+=("README.MD")
+          [ -f "LICENSE" ] && EXTRA_FILES+=("LICENSE")
+          [ -f "THIRD_PARTY_LICENSES.md" ] && EXTRA_FILES+=("THIRD_PARTY_LICENSES.md")
+          
+          zip -r "${PKG_NAME}" Resona.app "${EXTRA_FILES[@]}"
+          echo "ZIP_NAME=${PKG_NAME}" >> $GITHUB_ENV
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: resona-macos-universal
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+  create-release:
+    name: Publish GitHub Release
+    if: inputs.create_release == true
+    needs: [resolve-version, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.tag }}
+          name: Release ${{ needs.resolve-version.outputs.tag }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/resona-windows-x86_64/*.zip
+            artifacts/resona-macos-universal/*.zip

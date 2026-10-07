@@ -25,16 +25,58 @@ fn main() {
     let build_date = format!("{:04}-{:02}-{:02}", y, m, d);
     println!("cargo:rustc-env=RESONA_BUILD_DATE={}", build_date);
 
-    println!("cargo:rerun-if-changed=assets/icons/icon_windows.ico");
-
     if target_os == "windows" {
+        println!("cargo:rerun-if-changed=assets/icons/icon_windows.ico");
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         let ico_path = PathBuf::from(&manifest_dir).join("assets").join("icons").join("icon_windows.ico");
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let rc_path = out_dir.join("resona.rc");
         let res_path = out_dir.join("resona.res");
 
-        let rc_content = format!("1 ICON \"{}\"\n", ico_path.to_string_lossy().replace('\\', "\\\\"));
+        let version_str = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+        let version_parts: Vec<u32> = version_str
+            .split('.')
+            .filter_map(|s| s.parse::<u32>().ok())
+            .collect();
+        let major = version_parts.first().copied().unwrap_or(0);
+        let minor = version_parts.get(1).copied().unwrap_or(0);
+        let patch = version_parts.get(2).copied().unwrap_or(0);
+
+        let rc_content = format!(
+            "1 ICON \"{ico}\"\n\
+            1 VERSIONINFO\n\
+            FILEVERSION {major},{minor},{patch},0\n\
+            PRODUCTVERSION {major},{minor},{patch},0\n\
+            FILEFLAGSMASK 0x3fL\n\
+            FILEFLAGS 0x0L\n\
+            FILEOS 0x40004L\n\
+            FILETYPE 0x1L\n\
+            FILESUBTYPE 0x0L\n\
+            BEGIN\n\
+                BLOCK \"StringFileInfo\"\n\
+                BEGIN\n\
+                    BLOCK \"040904b0\"\n\
+                    BEGIN\n\
+                        VALUE \"FileDescription\", \"Resona - 1D NMR Analysis\\0\"\n\
+                        VALUE \"FileVersion\", \"{version_str}\\0\"\n\
+                        VALUE \"InternalName\", \"resona\\0\"\n\
+                        VALUE \"LegalCopyright\", \"Copyright (c) 2026 Tatsuhiko Yoshino\\0\"\n\
+                        VALUE \"OriginalFilename\", \"resona.exe\\0\"\n\
+                        VALUE \"ProductName\", \"Resona\\0\"\n\
+                        VALUE \"ProductVersion\", \"{version_str}\\0\"\n\
+                    END\n\
+                END\n\
+                BLOCK \"VarFileInfo\"\n\
+                BEGIN\n\
+                    VALUE \"Translation\", 0x409, 1200\n\
+                END\n\
+            END\n",
+            ico = ico_path.to_string_lossy().replace('\\', "\\\\"),
+            major = major,
+            minor = minor,
+            patch = patch,
+            version_str = version_str,
+        );
         if let Err(e) = std::fs::write(&rc_path, rc_content) {
             eprintln!("cargo:warning=Failed to write resona.rc: {}", e);
             return;
