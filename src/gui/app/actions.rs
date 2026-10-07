@@ -415,8 +415,6 @@ impl ResonaApp {
 
         for mv in &mut self.project.state.multiviews {
             if mv.geometry.h > 0.0 {
-                let scale = target_h / mv.geometry.h;
-                mv.geometry.w *= scale;
                 mv.geometry.h = target_h;
             }
         }
@@ -521,13 +519,12 @@ impl ResonaApp {
         let sum_w: f32 = self.project.state.multiviews.iter().map(|mv| mv.geometry.w).sum();
         let total_needed = sum_w + total_gap;
 
-        // 画面幅を超える場合は、アスペクト比を維持して均等縮小
+        // 画面幅を超える場合は、各拡大図の相対的な幅を維持して縮小 (Rx 倍)。高さは維持
         if total_needed > available_w && sum_w > 0.0 {
             let available_for_insets = (available_w - total_gap).max(count as f32 * 30.0);
-            let scale = (available_for_insets / sum_w).clamp(0.05, 1.0);
+            let rx = (available_for_insets / sum_w).clamp(0.05, 1.0);
             for mv in &mut self.project.state.multiviews {
-                mv.geometry.w *= scale;
-                mv.geometry.h *= scale;
+                mv.geometry.w *= rx;
             }
         }
 
@@ -604,12 +601,11 @@ impl ResonaApp {
             let src_min = x1 - pad;
             let src_max = x2 + pad;
 
-            // Auto 実行時に Ratio を全体反映 (Ratio = 5.0 を基準幅約 220px とし、Ratio に比例してスケール)
-            let scale = ((ratio / 5.0) as f32).max(0.2);
             let dx = (src_max - src_min).abs();
             let w_main = (dx / view_ppm_span.max(1e-6)) * (plot_width as f64);
-            let w = ((200.0 + (w_main as f32) * 4.0) * scale).clamp(90.0, 800.0);
-            let h = (w * 0.70).clamp(65.0, 560.0);
+            let raw_w = (w_main * ratio) as f32;
+            let w = raw_w.clamp(70.0, (plot_width * 0.9).max(100.0));
+            let h = (plot_rect.height() * 0.25).clamp(100.0, 250.0);
 
             let geom = RectF {
                 x: plot_rect.min.x + 20.0 + (i as f32) * 20.0,

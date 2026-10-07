@@ -891,4 +891,86 @@ mod tests {
         assert_eq!(new_h, 120.0);
         assert_eq!(new_w / new_h, aspect);
     }
+
+    #[test]
+    fn test_multiview_adjust_y_preserves_width() {
+        let mut app = ResonaApp::default();
+        // 異なる幅と高さを持つ2つのインセット
+        app.project.state.multiviews.push(MultiviewItem {
+            id: "mv-1".to_string(),
+            src_x_min: 7.0,
+            src_x_max: 7.5,
+            src_y_min: None,
+            src_y_max: None,
+            ratio: 3.0,
+            geometry: RectF { x: 50.0, y: 50.0, w: 120.0, h: 100.0 }, // 一番左上 (target_h = 100.0)
+        });
+        app.project.state.multiviews.push(MultiviewItem {
+            id: "mv-2".to_string(),
+            src_x_min: 2.0,
+            src_x_max: 3.0,
+            src_y_min: None,
+            src_y_max: None,
+            ratio: 3.0,
+            geometry: RectF { x: 200.0, y: 50.0, w: 260.0, h: 180.0 }, // 幅260, 高さ180
+        });
+
+        let target_h = app.adjust_y_multiviews_internal().unwrap();
+        assert_eq!(target_h, 100.0);
+
+        // 高さは両方 100.0 に揃うが、横幅 (w) はアスペクト比で変更されず元の大きさを維持
+        assert_eq!(app.project.state.multiviews[0].geometry.w, 120.0);
+        assert_eq!(app.project.state.multiviews[0].geometry.h, 100.0);
+        assert_eq!(app.project.state.multiviews[1].geometry.w, 260.0);
+        assert_eq!(app.project.state.multiviews[1].geometry.h, 100.0);
+    }
+
+    #[test]
+    fn test_multiview_align_one_row_rx_scaling() {
+        let mut app = ResonaApp::default();
+        // 幅 200, 300, 400 のインセット (合計幅 900 + gap 30 = 930)
+        app.project.state.multiviews.push(MultiviewItem {
+            id: "mv-1".to_string(),
+            src_x_min: 7.0,
+            src_x_max: 8.0,
+            src_y_min: None,
+            src_y_max: None,
+            ratio: 3.0,
+            geometry: RectF { x: 0.0, y: 0.0, w: 200.0, h: 140.0 },
+        });
+        app.project.state.multiviews.push(MultiviewItem {
+            id: "mv-2".to_string(),
+            src_x_min: 4.0,
+            src_x_max: 5.0,
+            src_y_min: None,
+            src_y_max: None,
+            ratio: 3.0,
+            geometry: RectF { x: 0.0, y: 0.0, w: 300.0, h: 140.0 },
+        });
+        app.project.state.multiviews.push(MultiviewItem {
+            id: "mv-3".to_string(),
+            src_x_min: 1.0,
+            src_x_max: 2.0,
+            src_y_min: None,
+            src_y_max: None,
+            ratio: 3.0,
+            geometry: RectF { x: 0.0, y: 0.0, w: 400.0, h: 140.0 },
+        });
+
+        // plot_rect 幅が 600.0 の場合 (available_w = 600 - 30 = 570)
+        // total_gap = 30.0 なので available_for_insets = 540.0
+        // rx = 540 / 900 = 0.6
+        let plot_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 500.0));
+        app.align_multiviews_one_row(plot_rect);
+
+        // 各インセットの幅が相対比を維持して 0.6 倍に縮小されていること
+        assert!((app.project.state.multiviews[0].geometry.w - 120.0).abs() < 1e-4);
+        assert!((app.project.state.multiviews[1].geometry.w - 180.0).abs() < 1e-4);
+        assert!((app.project.state.multiviews[2].geometry.w - 240.0).abs() < 1e-4);
+
+        // 高さは一切縮小されず 140.0 のままであること
+        for mv in &app.project.state.multiviews {
+            assert_eq!(mv.geometry.h, 140.0);
+        }
+    }
 }

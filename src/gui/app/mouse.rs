@@ -1718,8 +1718,21 @@ impl ResonaApp {
                                             let view_ppm_span = (t.ppm_max - t.ppm_min).abs().max(1e-6);
                                             let px_w = plot_rect.width();
                                             let w_main = ((p_high - p_low) / view_ppm_span) * (px_w as f64);
-                                            let w = (240.0 + (w_main * ratio) as f32 * 0.5).clamp(240.0, 600.0);
-                                            let h = (w * 0.70).clamp(160.0, 420.0);
+                                            let raw_w = (w_main * ratio) as f32;
+                                            let w = raw_w.clamp(70.0, (px_w * 0.9).max(100.0));
+
+                                            // 案2+3: 既存インセットがあれば一番左上の高さを引き継ぎ、無ければプロット高さの25%
+                                            let h = if let Some(target_mv) = self.project.state.multiviews.iter().min_by(|a, b| {
+                                                if (a.geometry.y - b.geometry.y).abs() < 10.0 {
+                                                    a.geometry.x.partial_cmp(&b.geometry.x).unwrap_or(std::cmp::Ordering::Equal)
+                                                } else {
+                                                    a.geometry.y.partial_cmp(&b.geometry.y).unwrap_or(std::cmp::Ordering::Equal)
+                                                }
+                                            }) {
+                                                target_mv.geometry.h
+                                            } else {
+                                                (plot_rect.height() * 0.25).clamp(100.0, 250.0)
+                                            };
                                             // 既存の拡大図に被らないように左上から順に空き位置を探索
                                             let pos = find_non_overlapping_multiview_pos(&self.project.state.multiviews, plot_rect, w, h);
                                             let geom = RectF {
