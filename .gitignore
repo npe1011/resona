@@ -4,13 +4,10 @@ Cargo.lock
 
 # Test data & raw NMR data
 /test_data/
+/doc-dev/
 *.jdf
 *.rsn
 *.npy
-
-# Previous versions and reference implementations
-/previous_version/
-/nmrglue/
 
 # Temporary and editor files
 $null
