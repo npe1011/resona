@@ -6,6 +6,12 @@ use crate::multispec::gui::window::MultiSpecUiState;
 use crate::multispec::io::{reload_all_from_disk, reload_item_from_disk};
 use crate::multispec::state::{clean_path, MultiSpecState};
 
+enum SelectionAction {
+    Single(String),
+    Toggle(String),
+    Range(String),
+}
+
 pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state: &mut MultiSpecUiState) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
@@ -57,7 +63,7 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
         ui.separator();
 
         // 3. スペクトル一覧スクロール領域 (カードのドラッグ＆ドロップ並び替え対応)
-        ScrollArea::vertical()
+        let scroll_output = ScrollArea::vertical()
             .auto_shrink([false, false])
             .drag_to_scroll(false)
             .show(ui, |ui| {
@@ -69,13 +75,16 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
 
                 let mut to_remove = None;
                 let mut any_changed = false;
+                let mut selection_action = None;
 
                 let selected_id = state.selected_id.clone();
+                let selected_ids = state.selected_ids.clone();
                 let mut card_rects = Vec::with_capacity(state.items.len());
 
                 for item in state.items.iter_mut() {
-                    let is_selected = selected_id.as_deref() == Some(&item.id);
-                    let is_being_dragged = ui_state.dragging_item_id.as_deref() == Some(&item.id);
+                    let is_selected = selected_ids.contains(&item.id) || selected_id.as_deref() == Some(&item.id);
+                    let is_drag_origin = ui_state.dragging_item_id.as_deref() == Some(&item.id);
+                    let is_being_dragged = is_drag_origin || (ui_state.dragging_item_id.is_some() && is_selected);
 
                     let border_color = if is_being_dragged {
                         Color32::from_rgb(13, 110, 253)
@@ -113,11 +122,21 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                             }
                             if handle_resp.clicked() {
-                                state.selected_id = Some(item.id.clone());
+                                let is_shift = ui.input(|i| i.modifiers.shift);
+                                let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                                if is_shift {
+                                    selection_action = Some(SelectionAction::Range(item.id.clone()));
+                                } else if is_ctrl {
+                                    selection_action = Some(SelectionAction::Toggle(item.id.clone()));
+                                } else {
+                                    selection_action = Some(SelectionAction::Single(item.id.clone()));
+                                }
                             }
                             if handle_resp.drag_started() || (handle_resp.dragged() && ui_state.dragging_item_id.is_none()) {
                                 ui_state.dragging_item_id = Some(item.id.clone());
-                                state.selected_id = Some(item.id.clone());
+                                if !is_selected {
+                                    selection_action = Some(SelectionAction::Single(item.id.clone()));
+                                }
                             }
 
                             // ハンドル背景描画
@@ -242,7 +261,15 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                                         )
                                         .on_hover_text(&full_path_str);
                                     if path_label.clicked() {
-                                        state.selected_id = Some(item.id.clone());
+                                        let is_shift = ui.input(|i| i.modifiers.shift);
+                                        let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                                        if is_shift {
+                                            selection_action = Some(SelectionAction::Range(item.id.clone()));
+                                        } else if is_ctrl {
+                                            selection_action = Some(SelectionAction::Toggle(item.id.clone()));
+                                        } else {
+                                            selection_action = Some(SelectionAction::Single(item.id.clone()));
+                                        }
                                     }
                                 } else {
                                     ui.label(RichText::new("[Embedded]").size(10.0).color(Color32::from_rgb(100, 116, 139)));
@@ -288,8 +315,25 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                     let card_rect = card_response.response.rect;
                     card_rects.push(card_rect);
 
-                    if card_response.response.clicked() {
-                        state.selected_id = Some(item.id.clone());
+                    let card_interact = ui.interact(card_rect, ui.id().with("card_click").with(&item.id), egui::Sense::click());
+                    if card_interact.clicked() && to_remove.is_none() {
+                        let is_shift = ui.input(|i| i.modifiers.shift);
+                        let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                        if is_shift {
+                            selection_action = Some(SelectionAction::Range(item.id.clone()));
+                        } else if is_ctrl {
+                            selection_action = Some(SelectionAction::Toggle(item.id.clone()));
+                        } else {
+                            selection_action = Some(SelectionAction::Single(item.id.clone()));
+                        }
+                    }
+                }
+
+                if let Some(action) = selection_action {
+                    match action {
+                        SelectionAction::Single(id) => state.select_single(id),
+                        SelectionAction::Toggle(id) => state.toggle_select(&id),
+                        SelectionAction::Range(id) => state.select_range(&id),
                     }
                 }
 
@@ -313,9 +357,9 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                     }
 
                     // 2. 有効な挿入先であれば、青い挿入インジケーターラインを描画
-                    // (自分自身の直前 slot == f_idx, または直後 slot == f_idx + 1 には描画しない)
                     if let (Some(slot), Some(f_idx)) = (ui_state.drop_target_slot, from_idx) {
-                        let is_noop = slot == f_idx || slot == f_idx + 1;
+                        let is_multi = state.selected_ids.len() > 1 && state.is_selected(from_id);
+                        let is_noop = !is_multi && (slot == f_idx || slot == f_idx + 1);
                         if !is_noop && !card_rects.is_empty() {
                             let indicator_y = if slot == 0 {
                                 card_rects[0].min.y - 3.0
@@ -340,7 +384,9 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                     // 3. マウス追従ゴーストカード描画 (フローティング表示)
                     if let (Some(pos), Some(f_idx)) = (mouse_pos, from_idx) {
                         let drag_item = &state.items[f_idx];
-                        let ghost_rect = Rect::from_min_size(pos + vec2(12.0, 10.0), vec2(190.0, 36.0));
+                        let is_multi = state.selected_ids.len() > 1 && state.is_selected(&drag_item.id);
+                        let ghost_w = if is_multi { 210.0 } else { 190.0 };
+                        let ghost_rect = Rect::from_min_size(pos + vec2(12.0, 10.0), vec2(ghost_w, 36.0));
                         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.id().with("dnd_ghost")));
 
                         painter.rect_filled(ghost_rect.translate(vec2(2.0, 2.0)), 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 35));
@@ -350,10 +396,16 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                         let dot_color = Color32::from_rgb(drag_item.color[0], drag_item.color[1], drag_item.color[2]);
                         painter.circle_filled(ghost_rect.left_center() + vec2(14.0, 0.0), 4.5, dot_color);
 
+                        let display_name = if is_multi {
+                            format!("{} (+{} others)", drag_item.name, state.selected_ids.len() - 1)
+                        } else {
+                            drag_item.name.clone()
+                        };
+
                         painter.text(
                             ghost_rect.left_center() + vec2(25.0, 0.0),
                             egui::Align2::LEFT_CENTER,
-                            &drag_item.name,
+                            &display_name,
                             egui::FontId::proportional(12.0),
                             Color32::from_rgb(33, 37, 41),
                         );
@@ -365,7 +417,9 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                     if let Some(from_id) = ui_state.dragging_item_id.take() {
                         let target_slot = ui_state.drop_target_slot.take();
                         if let Some(slot) = target_slot {
-                            if let Some(from_idx) = state.items.iter().position(|it| it.id == from_id) {
+                            if state.selected_ids.len() > 1 && state.is_selected(&from_id) {
+                                state.move_items_to(&state.selected_ids.clone(), slot);
+                            } else if let Some(from_idx) = state.items.iter().position(|it| it.id == from_id) {
                                 let to_idx = if slot > from_idx {
                                     slot.saturating_sub(1)
                                 } else {
@@ -373,7 +427,7 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                                 };
                                 if from_idx != to_idx && to_idx < state.items.len() {
                                     state.move_item_to(from_idx, to_idx);
-                                    state.selected_id = Some(from_id);
+                                    state.select_single(from_id);
                                 }
                             }
                         }
@@ -388,7 +442,32 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                 if let Some(id) = to_remove {
                     state.remove_item(&id);
                 }
+
+                // カード下部の空き領域をクリックした場合は選択全解除
+                let avail = ui.available_size();
+                if avail.y > 0.0 {
+                    let (_, empty_resp) = ui.allocate_exact_size(avail, egui::Sense::click());
+                    if empty_resp.clicked() && ui_state.dragging_item_id.is_none() {
+                        state.clear_selection();
+                        ui.ctx().request_repaint();
+                    }
+                }
+
+                card_rects
             });
+
+        // カードとカードの隙間やサイドバー背景の余白クリックによる選択全解除
+        if ui.input(|i| i.pointer.primary_clicked()) && ui_state.dragging_item_id.is_none() {
+            if let Some(click_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                if scroll_output.inner_rect.contains(click_pos) {
+                    let hit_card = scroll_output.inner.iter().any(|r| r.contains(click_pos));
+                    if !hit_card {
+                        state.clear_selection();
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+        }
     });
 }
 

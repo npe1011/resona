@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
@@ -96,7 +97,6 @@ pub struct MultiSpecSnapshot {
     #[serde(default)]
     pub title: String,
     pub items_meta: Vec<MultiSpecItemMeta>,
-    pub selected_id: Option<String>,
     pub common_ppm_min: f64,
     pub common_ppm_max: f64,
     pub stack_spacing: f64,
@@ -186,6 +186,7 @@ pub struct MultiSpecState {
     pub title: String,
     pub items: Vec<MultiSpecItem>,
     pub selected_id: Option<String>,
+    pub selected_ids: HashSet<String>,
     pub common_ppm_min: f64,
     pub common_ppm_max: f64,
     pub stack_spacing: f64,
@@ -205,6 +206,7 @@ impl Default for MultiSpecState {
             title: String::new(),
             items: Vec::new(),
             selected_id: None,
+            selected_ids: HashSet::new(),
             common_ppm_min: -1.0,
             common_ppm_max: 10.0,
             stack_spacing: 0.25,
@@ -228,6 +230,18 @@ impl MultiSpecState {
         s
     }
 
+    /// 既存の全アイテムと絶対に重複しない新しいアイテム ID を生成する
+    pub fn generate_unique_id(&mut self) -> String {
+        let existing_ids: HashSet<&str> = self.items.iter().map(|it| it.id.as_str()).collect();
+        loop {
+            let candidate = format!("spec_{}", self.next_item_num);
+            self.next_item_num += 1;
+            if !existing_ids.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+    }
+
     /// RSN ファイルから新規アイテムを追加する
     pub fn add_rsn_file<P: AsRef<std::path::Path>>(&mut self, path: P) -> crate::core::Result<String> {
         let p = path.as_ref();
@@ -240,8 +254,7 @@ impl MultiSpecState {
             .unwrap_or("Spectrum")
             .to_string();
 
-        let id = format!("spec_{}", self.next_item_num);
-        self.next_item_num += 1;
+        let id = self.generate_unique_id();
 
         let abs_path = std::fs::canonicalize(p)
             .map(|cp| clean_path(&cp))
@@ -251,6 +264,7 @@ impl MultiSpecState {
 
         if self.selected_id.is_none() {
             self.selected_id = Some(id.clone());
+            self.selected_ids.insert(id.clone());
         }
 
         self.update_common_ppm_range();
@@ -262,14 +276,14 @@ impl MultiSpecState {
 
     /// Project を直接アイテムとして追加する
     pub fn add_project(&mut self, name: String, source_path: Option<PathBuf>, project: Project) -> String {
-        let id = format!("spec_{}", self.next_item_num);
-        self.next_item_num += 1;
+        let id = self.generate_unique_id();
 
         let item = MultiSpecItem::new(id.clone(), name, source_path, project, self.items.len());
         self.items.push(item);
 
         if self.selected_id.is_none() {
             self.selected_id = Some(id.clone());
+            self.selected_ids.insert(id.clone());
         }
 
         self.update_common_ppm_range();
@@ -283,9 +297,18 @@ impl MultiSpecState {
     pub fn remove_item(&mut self, id: &str) -> bool {
         let before_len = self.items.len();
         self.items.retain(|it| it.id != id);
+        self.selected_ids.remove(id);
         if self.items.len() < before_len {
             if self.selected_id.as_deref() == Some(id) {
-                self.selected_id = self.items.first().map(|it| it.id.clone());
+                self.selected_id = self
+                    .selected_ids
+                    .iter()
+                    .next()
+                    .cloned()
+                    .or_else(|| self.items.first().map(|it| it.id.clone()));
+                if let Some(ref sid) = self.selected_id {
+                    self.selected_ids.insert(sid.clone());
+                }
             }
             self.auto_stack();
             self.push_history();
@@ -331,6 +354,42 @@ impl MultiSpecState {
         self.auto_stack();
         self.push_history();
         true
+    }
+
+    /// 複数アイテム (ids) を元の相対順序を保ったまま drop_slot 位置へ一括移動 (ドラッグ＆ドロップ用)
+    pub fn move_items_to(&mut self, ids: &HashSet<String>, drop_slot: usize) -> bool {
+        if ids.is_empty() || self.items.is_empty() {
+            return false;
+        }
+
+        let orig_ids: Vec<String> = self.items.iter().map(|it| it.id.clone()).collect();
+        let slot_clamped = drop_slot.min(self.items.len());
+        let insert_idx = orig_ids[..slot_clamped]
+            .iter()
+            .filter(|id| !ids.contains(*id))
+            .count();
+
+        let mut moving = Vec::new();
+        let mut remaining = Vec::new();
+
+        for it in self.items.drain(..) {
+            if ids.contains(&it.id) {
+                moving.push(it);
+            } else {
+                remaining.push(it);
+            }
+        }
+
+        let insert_idx = insert_idx.min(remaining.len());
+        remaining.splice(insert_idx..insert_idx, moving);
+
+        let changed = remaining.iter().zip(orig_ids.iter()).any(|(a, b)| a.id != *b);
+        self.items = remaining;
+        if changed {
+            self.auto_stack();
+            self.push_history();
+        }
+        changed
     }
 
     /// 全スペクトルの表示範囲を網羅するように共通 ppm 範囲を更新する
@@ -459,6 +518,89 @@ impl MultiSpecState {
         }
     }
 
+    /// 指定された ID が選択されているか判定
+    pub fn is_selected(&self, id: &str) -> bool {
+        self.selected_ids.contains(id) || self.selected_id.as_deref() == Some(id)
+    }
+
+    /// 単一選択 (既存の選択をクリアして 1 つだけ選択)
+    pub fn select_single(&mut self, id: String) {
+        self.selected_id = Some(id.clone());
+        self.selected_ids.clear();
+        self.selected_ids.insert(id);
+    }
+
+    /// 選択の切り替え (Ctrl + クリック)
+    pub fn toggle_select(&mut self, id: &str) {
+        if self.selected_ids.contains(id) {
+            self.selected_ids.remove(id);
+            if self.selected_id.as_deref() == Some(id) {
+                self.selected_id = self.selected_ids.iter().next().cloned();
+            }
+        } else {
+            self.selected_ids.insert(id.to_string());
+            self.selected_id = Some(id.to_string());
+        }
+    }
+
+    /// 範囲選択 (Shift + クリック)
+    /// 直前の selected_id (アンカー) から target_id までの全アイテムを選択
+    pub fn select_range(&mut self, target_id: &str) {
+        let anchor_idx = self
+            .selected_id
+            .as_ref()
+            .and_then(|id| self.items.iter().position(|it| &it.id == id));
+        let target_idx = self.items.iter().position(|it| it.id == target_id);
+
+        if let (Some(i1), Some(i2)) = (anchor_idx, target_idx) {
+            let start = i1.min(i2);
+            let end = i1.max(i2);
+            self.selected_ids.clear();
+            for it in &self.items[start..=end] {
+                self.selected_ids.insert(it.id.clone());
+            }
+        } else {
+            self.select_single(target_id.to_string());
+        }
+    }
+
+    /// 全選択 (Ctrl + A)
+    pub fn select_all(&mut self) {
+        self.selected_ids.clear();
+        for it in &self.items {
+            self.selected_ids.insert(it.id.clone());
+        }
+        if self.selected_id.is_none() {
+            self.selected_id = self.items.first().map(|it| it.id.clone());
+        }
+    }
+
+    /// 選択全解除
+    pub fn clear_selection(&mut self) {
+        self.selected_ids.clear();
+        self.selected_id = None;
+    }
+
+    /// 選択中スペクトルの Y-Scale Max を個別調整 (係数倍)
+    pub fn adjust_selected_y_scale(&mut self, factor: f64) {
+        let selected_id = self.selected_id.as_deref();
+        for it in &mut self.items {
+            if self.selected_ids.contains(&it.id) || selected_id == Some(&it.id) {
+                it.y_scale_max = (it.y_scale_max * factor).clamp(1.0, 10000.0);
+            }
+        }
+    }
+
+    /// 選択中スペクトルの Y-Scale Min を個別調整 (差分加算)
+    pub fn adjust_selected_y_scale_min(&mut self, delta: f64) {
+        let selected_id = self.selected_id.as_deref();
+        for it in &mut self.items {
+            if self.selected_ids.contains(&it.id) || selected_id == Some(&it.id) {
+                it.y_scale_min = (it.y_scale_min + delta).clamp(0.0, 10000.0);
+            }
+        }
+    }
+
     /// 現在のスナップショットを作成
     pub fn create_snapshot(&self) -> MultiSpecSnapshot {
         MultiSpecSnapshot {
@@ -477,7 +619,6 @@ impl MultiSpecState {
                     show_integral: it.show_integral,
                 })
                 .collect(),
-            selected_id: self.selected_id.clone(),
             common_ppm_min: self.common_ppm_min,
             common_ppm_max: self.common_ppm_max,
             stack_spacing: self.stack_spacing,
@@ -518,7 +659,6 @@ impl MultiSpecState {
 
     fn apply_snapshot(&mut self, snap: &MultiSpecSnapshot) {
         self.title = snap.title.clone();
-        self.selected_id = snap.selected_id.clone();
         self.common_ppm_min = snap.common_ppm_min;
         self.common_ppm_max = snap.common_ppm_max;
         self.stack_spacing = snap.stack_spacing;
@@ -544,6 +684,14 @@ impl MultiSpecState {
         // スナップショットに含まれなかった残りのアイテムがあれば末尾に追加
         reordered.extend(self.items.drain(..));
         self.items = reordered;
+
+        // 削除されたアイテムが存在する場合のみ選択から除外 (選択状態は Undo 履歴に含めず維持)
+        self.selected_ids.retain(|id| self.items.iter().any(|it| &it.id == id));
+        if let Some(ref sid) = self.selected_id {
+            if !self.items.iter().any(|it| &it.id == sid) {
+                self.selected_id = self.selected_ids.iter().next().cloned();
+            }
+        }
     }
 }
 
@@ -657,6 +805,196 @@ mod tests {
         assert_eq!(state.title, "New Title");
         assert!(state.undo());
         assert_eq!(state.title, "");
+    }
+
+    #[test]
+    fn test_multispec_selection_and_shortcuts() {
+        let mut state = MultiSpecState::new();
+        let p1 = create_dummy_project(0.0, 10.0);
+        let p2 = create_dummy_project(0.0, 10.0);
+        let p3 = create_dummy_project(0.0, 10.0);
+
+        let id1 = state.add_project("Sample 1".to_string(), None, p1);
+        let id2 = state.add_project("Sample 2".to_string(), None, p2);
+        let id3 = state.add_project("Sample 3".to_string(), None, p3);
+
+        // 初期状態: 最初のアイテムが選択されている
+        assert!(state.is_selected(&id1));
+        assert!(!state.is_selected(&id2));
+        assert!(!state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 1);
+
+        // Shift 範囲選択 (id1 から id3 まで)
+        state.select_range(&id3);
+        assert!(state.is_selected(&id1));
+        assert!(state.is_selected(&id2));
+        assert!(state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 3);
+
+        // Ctrl トグル選択 (id2 を除外)
+        state.toggle_select(&id2);
+        assert!(state.is_selected(&id1));
+        assert!(!state.is_selected(&id2));
+        assert!(state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 2);
+
+        // 単一選択 (id2 のみ)
+        state.select_single(id2.clone());
+        assert!(!state.is_selected(&id1));
+        assert!(state.is_selected(&id2));
+        assert!(!state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 1);
+
+        // 全選択 (Ctrl + A)
+        state.select_all();
+        assert!(state.is_selected(&id1));
+        assert!(state.is_selected(&id2));
+        assert!(state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 3);
+
+        // 選択解除
+        state.clear_selection();
+        assert!(!state.is_selected(&id1));
+        assert!(!state.is_selected(&id2));
+        assert!(!state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 0);
+    }
+
+    #[test]
+    fn test_multispec_adjust_selected_y_scale() {
+        let mut state = MultiSpecState::new();
+        let p1 = create_dummy_project(0.0, 10.0);
+        let p2 = create_dummy_project(0.0, 10.0);
+
+        let id1 = state.add_project("Sample 1".to_string(), None, p1);
+        let _id2 = state.add_project("Sample 2".to_string(), None, p2);
+
+        // 初期スケール値確認
+        assert_eq!(state.items[0].y_scale_max, 100.0);
+        assert_eq!(state.items[1].y_scale_max, 100.0);
+
+        // id1 のみ選択してスケール調整
+        state.select_single(id1.clone());
+        state.adjust_selected_y_scale(1.2);
+        assert!((state.items[0].y_scale_max - 120.0).abs() < 1e-4);
+        assert_eq!(state.items[1].y_scale_max, 100.0);
+
+        // 全選択してさらにスケール調整 (各自の現在の値に対して個別に倍率を掛ける)
+        state.select_all();
+        state.adjust_selected_y_scale(1.5);
+        assert!((state.items[0].y_scale_max - 180.0).abs() < 1e-4);
+        assert!((state.items[1].y_scale_max - 150.0).abs() < 1e-4);
+
+        // Y-Scale Min (差分加算) の個別処理
+        state.adjust_selected_y_scale_min(10.0);
+        assert_eq!(state.items[0].y_scale_min, 10.0);
+        assert_eq!(state.items[1].y_scale_min, 10.0);
+    }
+
+    #[test]
+    fn test_multispec_batch_move_items() {
+        let mut state = MultiSpecState::new();
+        let p1 = create_dummy_project(0.0, 10.0);
+        let p2 = create_dummy_project(0.0, 10.0);
+        let p3 = create_dummy_project(0.0, 10.0);
+        let p4 = create_dummy_project(0.0, 10.0);
+
+        let id1 = state.add_project("Sample 1".to_string(), None, p1);
+        let id2 = state.add_project("Sample 2".to_string(), None, p2);
+        let id3 = state.add_project("Sample 3".to_string(), None, p3);
+        let id4 = state.add_project("Sample 4".to_string(), None, p4);
+
+        // [id2, id3] を先頭 (slot 0) へ一括移動
+        let mut move_ids = HashSet::new();
+        move_ids.insert(id2.clone());
+        move_ids.insert(id3.clone());
+
+        assert!(state.move_items_to(&move_ids, 0));
+        assert_eq!(state.items[0].id, id2);
+        assert_eq!(state.items[1].id, id3);
+        assert_eq!(state.items[2].id, id1);
+        assert_eq!(state.items[3].id, id4);
+
+        // Undo で復元確認
+        assert!(state.undo());
+        assert_eq!(state.items[0].id, id1);
+        assert_eq!(state.items[1].id, id2);
+        assert_eq!(state.items[2].id, id3);
+        assert_eq!(state.items[3].id, id4);
+
+        // 飛び飛びの [id1, id3] を末尾 (slot 4) へ一括移動 -> [id2, id4, id1, id3]
+        let mut move_ids2 = HashSet::new();
+        move_ids2.insert(id1.clone());
+        move_ids2.insert(id3.clone());
+
+        assert!(state.move_items_to(&move_ids2, 4));
+        assert_eq!(state.items[0].id, id2);
+        assert_eq!(state.items[1].id, id4);
+        assert_eq!(state.items[2].id, id1);
+        assert_eq!(state.items[3].id, id3);
+    }
+
+    #[test]
+    fn test_multispec_four_items_independent_selection() {
+        let mut state = MultiSpecState::new();
+        let p1 = create_dummy_project(0.0, 10.0);
+        let p2 = create_dummy_project(0.0, 10.0);
+        let p3 = create_dummy_project(0.0, 10.0);
+        let p4 = create_dummy_project(0.0, 10.0);
+
+        let id1 = state.add_project("Sample 1".to_string(), None, p1);
+        let id2 = state.add_project("Sample 2".to_string(), None, p2);
+        let id3 = state.add_project("Sample 3".to_string(), None, p3);
+        let id4 = state.add_project("Sample 4".to_string(), None, p4);
+
+        // 全アイテムの ID が一意であることを確認
+        assert_ne!(id1, id2);
+        assert_ne!(id1, id3);
+        assert_ne!(id1, id4);
+        assert_ne!(id2, id3);
+        assert_ne!(id2, id4);
+        assert_ne!(id3, id4);
+
+        // 1 と 3 を複数選択
+        state.select_single(id1.clone());
+        state.toggle_select(&id3);
+        assert!(state.is_selected(&id1));
+        assert!(!state.is_selected(&id2));
+        assert!(state.is_selected(&id3));
+        assert!(!state.is_selected(&id4));
+
+        // この状態で 2 を単一クリック選択
+        state.select_single(id2.clone());
+        // 2 だけが選択され、1, 3, 4 は一切選択されていないことを確認 (2, 4 が選択されるバグの再発防止)
+        assert!(!state.is_selected(&id1));
+        assert!(state.is_selected(&id2));
+        assert!(!state.is_selected(&id3));
+        assert!(!state.is_selected(&id4));
+        assert_eq!(state.selected_ids.len(), 1);
+
+        // 2 と 4 を選択
+        state.toggle_select(&id4);
+        assert!(state.is_selected(&id2));
+        assert!(state.is_selected(&id4));
+        assert_eq!(state.selected_ids.len(), 2);
+
+        // 解析プロパティ変更 (タイトル変更など) を履歴に保存
+        state.title = "Step 1".to_string();
+        state.push_history();
+
+        // 別の解析プロパティ変更 + 選択を 3 に変更
+        state.title = "Step 2".to_string();
+        state.select_single(id3.clone());
+        state.push_history();
+        assert!(state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 1);
+
+        // Undo -> 解析プロパティ (title) は "Step 1" に戻るが、
+        // 選択状態は解析内容ではないため、Undo で過去の選択に戻されず現在の選択 (id3) が維持されること
+        assert!(state.undo());
+        assert_eq!(state.title, "Step 1");
+        assert!(state.is_selected(&id3));
+        assert_eq!(state.selected_ids.len(), 1);
     }
 }
 

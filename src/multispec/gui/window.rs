@@ -175,7 +175,9 @@ pub fn show_multispec_window(
             shortcut_display,
             shortcut_reset_zoom,
             shortcut_close,
+            shortcut_select_all,
         ) = if !modal_locked {
+            let wants_keyboard = ctx.wants_keyboard_input();
             ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::N),
@@ -188,10 +190,15 @@ pub fn show_multispec_window(
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::D),
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0) || i.consume_key(egui::Modifiers::NONE, egui::Key::Home),
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
+                    if !wants_keyboard {
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)
+                    } else {
+                        false
+                    },
                 )
             })
         } else {
-            (false, false, false, false, false, false, false, false, false, false)
+            (false, false, false, false, false, false, false, false, false, false, false)
         };
 
         if shortcut_new {
@@ -221,6 +228,9 @@ pub fn show_multispec_window(
         if shortcut_reset_zoom {
             state.reset_zoom();
             state.push_history();
+        }
+        if shortcut_select_all {
+            state.select_all();
         }
         if shortcut_close {
             if state.is_dirty && !state.items.is_empty() {

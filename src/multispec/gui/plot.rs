@@ -82,7 +82,6 @@ pub fn show_multispec_plot(
                     );
 
                     // 各スペクトルの描画
-                    let selected_id = state.selected_id.clone();
                     for (step_idx, &item_idx) in visible_items.iter().enumerate() {
                         let it = &state.items[item_idx];
                         let slot_y0 = rect.min.y + step_idx as f32 * slot_h;
@@ -93,7 +92,7 @@ pub fn show_multispec_plot(
                         );
                         let base_y = slot_y0 + slot_h * 0.85;
                         let unit_h = slot_h * 0.72;
-                        let is_selected = selected_id.as_deref() == Some(&it.id);
+                        let is_selected = state.is_selected(&it.id);
 
                         paint_spectrum_slot(
                             &painter,
@@ -167,10 +166,9 @@ pub fn show_multispec_plot(
         );
 
         // 各スペクトルの描画
-        let selected_id = state.selected_id.clone();
         for (step_idx, &item_idx) in visible_items.iter().enumerate() {
             let it = &state.items[item_idx];
-            let is_selected = selected_id.as_deref() == Some(&it.id);
+            let is_selected = state.is_selected(&it.id);
 
             let (base_y, unit_h, slot_rect) = if is_overlay {
                 let by = plot_bottom - 10.0;
@@ -410,11 +408,11 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
         return;
     }
 
-    let is_ctrl = ui.input(|i| i.modifiers.ctrl);
+    let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
     let is_shift = ui.input(|i| i.modifiers.shift);
     let mut any_changed = false;
 
-    // 1. 上下矢印キー: Y-Scale 調整 (ホイールはスクロール専用とし干渉を防止)
+    // 1. 上下矢印キー: Y-Scale 調整 (選択中スペクトルを個別に調整、Ctrl 押下時は全体調整)
     let up_pressed = ui.input(|i| i.key_pressed(Key::ArrowUp));
     let down_pressed = ui.input(|i| i.key_pressed(Key::ArrowDown));
     if up_pressed || down_pressed {
@@ -422,16 +420,16 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
             let delta = if up_pressed { 5.0 } else { -5.0 };
             if is_ctrl {
                 state.adjust_all_y_scale_min(delta);
-            } else if let Some(item) = state.selected_item_mut() {
-                item.y_scale_min = (item.y_scale_min + delta).clamp(0.0, 10000.0);
+            } else {
+                state.adjust_selected_y_scale_min(delta);
             }
             any_changed = true;
         } else {
             let factor = if up_pressed { 1.15 } else { 1.0 / 1.15 };
             if is_ctrl {
                 state.adjust_all_y_scale(factor);
-            } else if let Some(item) = state.selected_item_mut() {
-                item.y_scale_max = (item.y_scale_max * factor).clamp(1.0, 10000.0);
+            } else {
+                state.adjust_selected_y_scale(factor);
             }
             any_changed = true;
         }
@@ -457,7 +455,7 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
         state.push_history();
     }
 
-    // 4. クリックによるスペクトル選択
+    // 4. クリックによるスペクトル選択 (Shift: 範囲選択, Ctrl: トグル選択, 通常: 単一選択)
     let pointer_pos = response.hover_pos().or(response.interact_pointer_pos());
     if response.clicked() {
         // 単なるクリックのときはドラッグ用座標をクリア (青い縦線が残らないように)
@@ -466,12 +464,19 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
 
         if let Some(pos) = pointer_pos {
             if !state.is_overlay && !visible_items.is_empty() {
-                let slot_idx = (((pos.y - plot_top) / slot_h).floor() as usize).min(visible_items.len() - 1);
+                let slot_idx = (((pos.y - plot_top) / slot_h).max(0.0).floor() as usize).min(visible_items.len() - 1);
                 let clicked_item_idx = visible_items[slot_idx];
-                state.selected_id = Some(state.items[clicked_item_idx].id.clone());
+                let clicked_id = state.items[clicked_item_idx].id.clone();
+                if is_shift {
+                    state.select_range(&clicked_id);
+                } else if is_ctrl {
+                    state.toggle_select(&clicked_id);
+                } else {
+                    state.select_single(clicked_id);
+                }
             } else if let Some(&first_idx) = visible_items.first() {
                 if state.selected_id.is_none() {
-                    state.selected_id = Some(state.items[first_idx].id.clone());
+                    state.select_single(state.items[first_idx].id.clone());
                 }
             }
         }
@@ -483,11 +488,20 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
             *drag_start = Some(pos);
             *drag_current = Some(pos);
 
-            // ドラッグ開始時にもスペクトルを選択
+            // ドラッグ開始時にもスペクトルを選択 (未選択時のみ)
             if !state.is_overlay && !visible_items.is_empty() {
-                let slot_idx = (((pos.y - plot_top) / slot_h).floor() as usize).min(visible_items.len() - 1);
+                let slot_idx = (((pos.y - plot_top) / slot_h).max(0.0).floor() as usize).min(visible_items.len() - 1);
                 let clicked_item_idx = visible_items[slot_idx];
-                state.selected_id = Some(state.items[clicked_item_idx].id.clone());
+                let clicked_id = state.items[clicked_item_idx].id.clone();
+                if !state.is_selected(&clicked_id) {
+                    if is_shift {
+                        state.select_range(&clicked_id);
+                    } else if is_ctrl {
+                        state.toggle_select(&clicked_id);
+                    } else {
+                        state.select_single(clicked_id);
+                    }
+                }
             }
         }
     }

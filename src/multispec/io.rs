@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
@@ -8,6 +9,8 @@ use zip::{ZipArchive, ZipWriter};
 use crate::core::error::{ResonaError, Result};
 use crate::core::project::Project;
 use super::state::{clean_path, MultiSpecItem, MultiSpecState, StackLayoutMode};
+
+static TEMP_RSN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn default_fixed_slot_height() -> f32 {
     140.0
@@ -28,6 +31,7 @@ pub struct RsmManifest {
     pub stack_mode: StackLayoutMode,
     #[serde(default = "default_fixed_slot_height")]
     pub fixed_slot_height: f32,
+    #[serde(default, skip_serializing)]
     pub selected_id: Option<String>,
     pub items: Vec<RsmItemEntry>,
 }
@@ -105,14 +109,24 @@ pub fn save_rsm<P: AsRef<Path>>(state: &mut MultiSpecState, path: P) -> Result<(
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     let temp_dir = std::env::temp_dir();
-    let temp_rsn_path = temp_dir.join(format!("resona_temp_{}.rsn", std::process::id()));
-
     let mut item_entries = Vec::new();
 
     // 2. 各アイテムの RSN データをアーカイブ内に書き込む
     for (idx, item) in state.items.iter().enumerate() {
         let rsn_name = format!("items/item_{}_{}.rsn", idx, item.id);
         if let Some(ref proj) = item.project {
+            let counter = TEMP_RSN_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let temp_rsn_path = temp_dir.join(format!(
+                "resona_temp_{}_{}_{}_{}.rsn",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+                idx,
+                counter
+            ));
+
             // 一時ファイルに RSN を保存し、ZIP に格納
             proj.save_rsn(&temp_rsn_path)?;
             let mut rsn_file = File::open(&temp_rsn_path)?;
@@ -148,7 +162,7 @@ pub fn save_rsm<P: AsRef<Path>>(state: &mut MultiSpecState, path: P) -> Result<(
         is_overlay: state.is_overlay,
         stack_mode: state.stack_mode,
         fixed_slot_height: state.fixed_slot_height,
-        selected_id: state.selected_id.clone(),
+        selected_id: None,
         items: item_entries,
     };
 
@@ -255,10 +269,34 @@ pub fn load_rsm<P: AsRef<Path>>(path: P) -> Result<MultiSpecState> {
         }
     }
 
+    // 読み込んだ items の ID の重複を解消 (過去バージョンで保存された重複 ID へのフォールバック対応)
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut max_spec_num = 0usize;
+    for item in &items {
+        if let Some(num_str) = item.id.strip_prefix("spec_") {
+            if let Ok(num) = num_str.parse::<usize>() {
+                max_spec_num = max_spec_num.max(num);
+            }
+        }
+    }
+
+    for item in &mut items {
+        if !seen_ids.insert(item.id.clone()) {
+            // 重複 ID を発見したため、新しい一意な ID を割り当て
+            max_spec_num += 1;
+            let new_id = format!("spec_{}", max_spec_num);
+            seen_ids.insert(new_id.clone());
+            item.id = new_id;
+        }
+    }
+
+    let next_item_num = max_spec_num + 1;
+
     let mut state = MultiSpecState {
         title: manifest.title,
         items,
-        selected_id: manifest.selected_id,
+        selected_id: None,
+        selected_ids: std::collections::HashSet::new(),
         common_ppm_min: manifest.common_ppm_min,
         common_ppm_max: manifest.common_ppm_max,
         stack_spacing: manifest.stack_spacing,
@@ -267,14 +305,10 @@ pub fn load_rsm<P: AsRef<Path>>(path: P) -> Result<MultiSpecState> {
         fixed_slot_height: manifest.fixed_slot_height,
         zoom_history: Vec::new(),
         history: crate::multispec::state::MultiSpecHistory::new(),
-        next_item_num: 1,
+        next_item_num,
         rsm_path: Some(clean_path(p)),
         is_dirty: false,
     };
-
-    if state.selected_id.is_none() {
-        state.selected_id = state.items.first().map(|it| it.id.clone());
-    }
 
     state.push_history();
     Ok(state)
@@ -295,8 +329,12 @@ mod tests {
     #[test]
     fn test_rsm_save_and_load_roundtrip() {
         let temp_dir = std::env::temp_dir();
-        let rsn_path = temp_dir.join(format!("test_multi_{}.rsn", std::process::id()));
-        let rsm_path = temp_dir.join(format!("test_multi_{}.rsm", std::process::id()));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let rsn_path = temp_dir.join(format!("test_multi_{}_{}.rsn", std::process::id(), nanos));
+        let rsm_path = temp_dir.join(format!("test_multi_{}_{}.rsm", std::process::id(), nanos));
 
         // 1. RSN ファイルを一時作成
         let p1 = create_test_project();
@@ -319,6 +357,44 @@ mod tests {
         assert_eq!(fallback_loaded.items.len(), 1);
         assert!(fallback_loaded.items[0].project.is_some());
 
+        let _ = std::fs::remove_file(&rsm_path);
+    }
+
+    #[test]
+    fn test_load_rsm_preserves_unique_ids_on_new_add() {
+        let temp_dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let rsn_path1 = temp_dir.join(format!("test_uniq1_{}_{}.rsn", std::process::id(), nanos));
+        let rsn_path2 = temp_dir.join(format!("test_uniq2_{}_{}.rsn", std::process::id(), nanos));
+        let rsm_path = temp_dir.join(format!("test_uniq_{}_{}.rsm", std::process::id(), nanos));
+
+        let p1 = create_test_project();
+        p1.save_rsn(&rsn_path1).unwrap();
+        let p2 = create_test_project();
+        p2.save_rsn(&rsn_path2).unwrap();
+
+        let mut state = MultiSpecState::new();
+        let id1 = state.add_rsn_file(&rsn_path1).unwrap();
+        save_rsm(&mut state, &rsm_path).unwrap();
+
+        // ロードする
+        let mut loaded = load_rsm(&rsm_path).unwrap();
+        assert_eq!(loaded.items[0].id, id1);
+        assert!(loaded.selected_id.is_none());
+        assert!(loaded.selected_ids.is_empty());
+
+        // ロード後に新しいスペクトルを追加
+        let id2 = loaded.add_rsn_file(&rsn_path2).unwrap();
+        // id1 と id2 が絶対に重複していないことを検証！
+        assert_ne!(id1, id2);
+        assert_eq!(loaded.items.len(), 2);
+        assert_ne!(loaded.items[0].id, loaded.items[1].id);
+
+        let _ = std::fs::remove_file(&rsn_path1);
+        let _ = std::fs::remove_file(&rsn_path2);
         let _ = std::fs::remove_file(&rsm_path);
     }
 }
