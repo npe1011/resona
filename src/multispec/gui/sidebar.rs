@@ -275,36 +275,36 @@ pub fn show_multispec_sidebar(ui: &mut Ui, state: &mut MultiSpecState, ui_state:
                                     ui.label(RichText::new("[Embedded]").size(10.0).color(Color32::from_rgb(100, 116, 139)));
                                 }
 
-                                // 4段目: Y-Scale Max / Min 数値直接編集テキストボックス (コロン排除)
+                                // 4段目: Y-Scale / Offset 数値直接編集テキストボックス (コロン排除)
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label(RichText::new("Y-Scale").size(10.5).color(Color32::from_gray(100)));
+                                    ui.label(RichText::new("Y-Axis").size(10.5).color(Color32::from_gray(100)));
 
-                                    ui.label(RichText::new("Max").size(10.5));
-                                    let resp_max = ui.add(
-                                        egui::DragValue::new(&mut item.y_scale_max)
+                                    ui.label(RichText::new("Scale").size(10.5));
+                                    let resp_scale = ui.add(
+                                        egui::DragValue::new(&mut item.y_scale)
                                             .speed(1.0)
                                             .range(1.0..=10000.0)
                                             .suffix("%"),
-                                    ).on_hover_text("Click to type value manually, or drag to adjust");
-                                    if resp_max.changed() {
+                                    ).on_hover_text("Click to type scale percentage manually, or drag to adjust");
+                                    if resp_scale.changed() {
                                         any_changed = true;
                                     }
-                                    if resp_max.lost_focus() {
+                                    if resp_scale.lost_focus() {
                                         any_changed = true;
                                     }
 
-                                    ui.label(RichText::new("Min").size(10.5));
-                                    let resp_min = ui.add(
-                                        egui::DragValue::new(&mut item.y_scale_min)
+                                    ui.label(RichText::new("Offset").size(10.5));
+                                    let resp_offset = ui.add(
+                                        egui::DragValue::new(&mut item.y_offset)
                                             .speed(1.0)
                                             .range(-1000.0..=10000.0)
                                             .suffix("%"),
-                                    ).on_hover_text("Click to type value manually, or drag to adjust");
-                                    if resp_min.changed() {
+                                    ).on_hover_text("Click to type baseline offset percentage manually, or drag to adjust");
+                                    if resp_offset.changed() {
                                         any_changed = true;
                                     }
-                                    if resp_min.lost_focus() {
+                                    if resp_offset.lost_focus() {
                                         any_changed = true;
                                     }
                                 });

@@ -334,8 +334,8 @@ pub fn show_action_bar(
     nucleus: &str,
     noise_level: f64,
     baseline_method: BaselineMethod,
-    y_max_scale: &mut f64,
-    y_min_scale: &mut f64,
+    y_scale: &mut f64,
+    y_offset: &mut f64,
     has_spectrum: bool,
 ) -> ActionEvent {
     let mut event = ActionEvent::None;
@@ -348,7 +348,7 @@ pub fn show_action_bar(
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // -------------------------------------------------------------
-        // 1. 右端: Y-Scale (%) フレーム (常駐・一行表示)
+        // 1. 右端: Y-Axis (%) フレーム (常駐・一行表示)
         // -------------------------------------------------------------
         frame_style.show(ui, |ui| {
             ui.add_enabled_ui(has_spectrum, |ui| {
@@ -357,100 +357,100 @@ pub fn show_action_bar(
 
                     // ※ right_to_left レイアウト内のため、右端の要素から順に追加することで
                     // 画面上では左から右へ
-                    // [Y-Scale (%)]  Max [入力] [▲] [▼]   Min [入力] [▲] [▼]
+                    // [Y-Axis (%)]  Scale [入力] [▲] [▼]   Offset [入力] [▲] [▼]
                     // と正しく整列する。
 
-                    // 1. Min 下ボタン (▼) [値を下げる]
-                    let ymin_down = continuous_step_arrow_button(
+                    // 1. Offset 下ボタン (▼) [値を下げる]
+                    let yoff_down = continuous_step_arrow_button(
                         ui,
-                        "ab_ymin_dec",
+                        "ab_yoff_dec",
                         StepDirection::Down,
                         2.0,
                         15.0,
                         150.0,
                         1.0,
                     );
-                    if ymin_down > 0.0 {
-                        *y_min_scale = (*y_min_scale - ymin_down).clamp(0.0, 10000.0);
+                    if yoff_down > 0.0 {
+                        *y_offset = (*y_offset - yoff_down).clamp(-1000.0, 10000.0);
                     }
 
-                    // 2. Min 上ボタン (▲) [値を上げる]
-                    let ymin_up = continuous_step_arrow_button(
+                    // 2. Offset 上ボタン (▲) [値を上げる]
+                    let yoff_up = continuous_step_arrow_button(
                         ui,
-                        "ab_ymin_inc",
+                        "ab_yoff_inc",
                         StepDirection::Up,
                         2.0,
                         15.0,
                         150.0,
                         1.0,
                     );
-                    if ymin_up > 0.0 {
-                        *y_min_scale = (*y_min_scale + ymin_up).clamp(0.0, 10000.0);
+                    if yoff_up > 0.0 {
+                        *y_offset = (*y_offset + yoff_up).clamp(-1000.0, 10000.0);
                     }
 
-                    // 3. Min 入力欄 (絶対値表示 0.0..=10000.0)
+                    // 3. Offset 入力欄
                     ui.add(
-                        DragValue::new(y_min_scale)
+                        DragValue::new(y_offset)
                             .speed(1.0)
-                            .range(0.0..=10000.0),
+                            .range(-1000.0..=10000.0),
                     );
 
-                    // 4. Min ラベル
+                    // 4. Offset ラベル
                     ui.label(
-                        RichText::new("Min")
+                        RichText::new("Offset")
                             .size(11.5)
                             .color(Color32::from_rgb(108, 117, 125)),
                     );
 
                     ui.add_space(5.0);
 
-                    // 5. Max 下ボタン (▼)
-                    let ymax_dec = continuous_step_arrow_button(
+                    // 5. Scale 下ボタン (▼)
+                    let yscale_dec = continuous_step_arrow_button(
                         ui,
-                        "ab_ymax_dec",
+                        "ab_yscale_dec",
                         StepDirection::Down,
                         2.5,
                         15.0,
                         250.0,
                         1.0,
                     );
-                    if ymax_dec > 0.0 {
-                        *y_max_scale = (*y_max_scale - ymax_dec).clamp(1.0, 10000.0);
+                    if yscale_dec > 0.0 {
+                        *y_scale = (*y_scale - yscale_dec).clamp(1.0, 10000.0);
                     }
 
-                    // 6. Max 上ボタン (▲)
-                    let ymax_inc = continuous_step_arrow_button(
+                    // 6. Scale 上ボタン (▲)
+                    let yscale_inc = continuous_step_arrow_button(
                         ui,
-                        "ab_ymax_inc",
+                        "ab_yscale_inc",
                         StepDirection::Up,
                         2.5,
                         15.0,
                         250.0,
                         1.0,
                     );
-                    if ymax_inc > 0.0 {
-                        *y_max_scale = (*y_max_scale + ymax_inc).clamp(1.0, 10000.0);
+                    if yscale_inc > 0.0 {
+                        *y_scale = (*y_scale + yscale_inc).clamp(1.0, 10000.0);
                     }
 
-                    // 7. Max 入力欄
+                    // 7. Scale 入力欄
                     ui.add(
-                        DragValue::new(y_max_scale)
+                        DragValue::new(y_scale)
                             .speed(1.0)
                             .range(1.0..=10000.0),
                     );
 
-                    // 8. Max ラベル
+                    // 8. Scale ラベル
                     ui.label(
-                        RichText::new("Max")
+                        RichText::new("Scale")
                             .size(11.5)
                             .color(Color32::from_rgb(108, 117, 125)),
                     );
 
                     ui.add_space(3.0);
 
-                    // 9. Y-Scale (%) タイトルラベル [一番左端]
+                    // 9. Y-Axis (%) タイトルラベル [一番左端]
                     ui.label(
-                        RichText::new("Y-Scale (%)")
+                        RichText::new("Y-Axis (%)")
                             .size(11.5)
                             .strong()
                             .color(Color32::from_rgb(52, 58, 64)),

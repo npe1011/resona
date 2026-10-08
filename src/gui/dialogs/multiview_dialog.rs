@@ -8,10 +8,10 @@ pub struct MultiviewYScaleDialogState {
     pub auto_y: bool,
     /// 100% の基準となるインセット内最大ピーク強度
     pub max_peak_intensity: f64,
-    /// ピーク最大高さに対する上限比率 (%)
-    pub y_max_scale: f64,
-    /// ピーク最大高さに対する下限比率 (%)
-    pub y_min_scale: f64,
+    /// ピーク最大高さに対するスケール比率 (%)
+    pub y_scale: f64,
+    /// ベースライン位置のオフセット比率 (%)
+    pub y_offset: f64,
 }
 
 impl Default for MultiviewYScaleDialogState {
@@ -22,16 +22,16 @@ impl Default for MultiviewYScaleDialogState {
             target_label: String::new(),
             auto_y: true,
             max_peak_intensity: 1.0,
-            y_max_scale: 80.0,
-            y_min_scale: 10.0,
+            y_scale: 80.0,
+            y_offset: 10.0,
         }
     }
 }
 
 pub struct MultiviewYScaleResult {
     pub target_id: String,
-    pub y_min: Option<f64>,
-    pub y_max: Option<f64>,
+    pub y_scale: Option<f64>,
+    pub y_offset: Option<f64>,
 }
 
 pub fn show_multiview_yscale_dialog(
@@ -44,7 +44,7 @@ pub fn show_multiview_yscale_dialog(
 
     let mut result = None;
 
-    Window::new("Multiview Inset Y-Scale")
+    Window::new("Multiview Inset Y-Scale & Offset")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -65,18 +65,18 @@ pub fn show_multiview_yscale_dialog(
                         .color(Color32::from_gray(120)),
                 );
                 ui.horizontal(|ui| {
-                    ui.label("Max:");
+                    ui.label("Scale:");
                     ui.add(
-                        DragValue::new(&mut state.y_max_scale)
+                        DragValue::new(&mut state.y_scale)
                             .speed(2.0)
                             .range(1.0..=10000.0)
                             .suffix("%"),
                     );
-                    ui.label("Min:");
+                    ui.label("Offset:");
                     ui.add(
-                        DragValue::new(&mut state.y_min_scale)
+                        DragValue::new(&mut state.y_offset)
                             .speed(1.0)
-                            .range(0.0..=10000.0)
+                            .range(-1000.0..=10000.0)
                             .suffix("%"),
                     );
                 });
@@ -97,20 +97,16 @@ pub fn show_multiview_yscale_dialog(
 
                     if ui.add(btn_ok).clicked() {
                         if let Some(ref id) = state.target_id {
-                            let (y_min, y_max) = if state.auto_y {
+                            let (y_scale, y_offset) = if state.auto_y {
                                 (None, None)
                             } else {
-                                let base_y = state.max_peak_intensity.max(1e-6);
-                                let top_pct = state.y_max_scale.max(1.0);
-                                let computed_y_max = base_y * (100.0 / top_pct);
-                                let computed_y_min = -base_y * (state.y_min_scale / 100.0);
-                                (Some(computed_y_min), Some(computed_y_max))
+                                (Some(state.y_scale), Some(state.y_offset))
                             };
 
                             result = Some(MultiviewYScaleResult {
                                 target_id: id.clone(),
-                                y_min,
-                                y_max,
+                                y_scale,
+                                y_offset,
                             });
                         }
                         state.open = false;

@@ -26,12 +26,18 @@ pub struct MultiviewItem {
     pub src_x_min: f64,
     pub src_x_max: f64,
     #[serde(default)]
-    pub src_y_min: Option<f64>,
+    pub y_scale: Option<f64>,
     #[serde(default)]
-    pub src_y_max: Option<f64>,
+    pub y_offset: Option<f64>,
     #[serde(default = "default_ratio")]
     pub ratio: f64,
     pub geometry: RectF,
+
+    // --- レガシー互換フィールド (将来ここを削除すれば完全移行) ---
+    #[serde(default, skip_serializing)]
+    pub src_y_min: Option<f64>,
+    #[serde(default, skip_serializing)]
+    pub src_y_max: Option<f64>,
 }
 
 pub fn default_ratio() -> f64 {
@@ -72,8 +78,14 @@ pub struct DisplaySettings {
     #[serde(default)]
     pub x_max: Option<f64>,
     #[serde(default)]
-    pub y_min_scale: Option<f64>,
+    pub y_scale: Option<f64>,
     #[serde(default)]
+    pub y_offset: Option<f64>,
+
+    // --- レガシー互換フィールド (将来ここを削除すれば完全移行) ---
+    #[serde(default, skip_serializing)]
+    pub y_min_scale: Option<f64>,
+    #[serde(default, skip_serializing)]
     pub y_max_scale: Option<f64>,
 }
 
@@ -127,6 +139,37 @@ impl ProjectState {
             self.integration_ref_value / self.integration_ref_area
         } else {
             1.0
+        }
+    }
+
+    /// レガシー形式の Y 軸設定 (y_max_scale/y_min_scale, src_y_max/src_y_min) を
+    /// 新形式 (y_scale, y_offset) に自動変換する。
+    /// ※ 将来互換性を完全に削除する際は、このメソッド定義および load_rsn 内の呼び出し行を削除するだけで完了します。
+    pub fn migrate_legacy_y_settings(&mut self) {
+        // 1. DisplaySettings
+        if self.display_settings.y_scale.is_none() && self.display_settings.y_max_scale.is_some() {
+            let old_max = self.display_settings.y_max_scale.unwrap_or(80.0);
+            let old_min = self.display_settings.y_min_scale.unwrap_or(10.0);
+            let span_factor = (100.0 / old_max.max(1.0)) + (old_min / 100.0);
+            if span_factor > 1e-6 {
+                let new_scale = 100.0 / span_factor;
+                let new_offset = 100.0 * (old_min / 100.0) / span_factor;
+                self.display_settings.y_scale = Some(new_scale);
+                self.display_settings.y_offset = Some(new_offset);
+            }
+        }
+
+        // 2. MultiviewItem
+        for mv in &mut self.multiviews {
+            if mv.y_scale.is_none() && (mv.src_y_max.is_some() || mv.src_y_min.is_some()) {
+                if let (Some(cur_ymax), Some(cur_ymin)) = (mv.src_y_max, mv.src_y_min) {
+                    let span = (cur_ymax - cur_ymin).max(1e-6);
+                    let new_offset = ((-cur_ymin) / span * 100.0).clamp(0.0, 1000.0);
+                    let new_scale = 80.0;
+                    mv.y_scale = Some(new_scale);
+                    mv.y_offset = Some(new_offset);
+                }
+            }
         }
     }
 }
@@ -952,6 +995,8 @@ impl Project {
                 .map_err(|e| ResonaError::ProcessingError(format!("JSON parse error: {}", e)))?;
             self.metadata = data.metadata;
             self.state = data.state;
+            // 旧バージョンの Y軸設定 (y_max_scale, src_y_max 等) を自動移行
+            self.state.migrate_legacy_y_settings();
         }
 
         // 旧バージョンで保存されたプロジェクトの下位互換:

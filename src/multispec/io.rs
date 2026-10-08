@@ -36,6 +36,13 @@ pub struct RsmManifest {
     pub items: Vec<RsmItemEntry>,
 }
 
+fn default_entry_y_scale() -> f64 {
+    100.0
+}
+fn default_entry_y_offset() -> f64 {
+    0.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RsmItemEntry {
     pub id: String,
@@ -43,11 +50,31 @@ pub struct RsmItemEntry {
     pub source_path: Option<PathBuf>,
     pub color: [u8; 3],
     pub visible: bool,
-    pub y_scale_max: f64,
-    pub y_scale_min: f64,
+    #[serde(default = "default_entry_y_scale")]
+    pub y_scale: f64,
+    #[serde(default = "default_entry_y_offset")]
     pub y_offset: f64,
     pub show_integral: bool,
     pub rsn_archive_name: String,
+
+    // --- レガシー互換フィールド (将来ここを削除すれば完全移行) ---
+    #[serde(default, skip_serializing)]
+    pub y_scale_max: Option<f64>,
+    #[serde(default, skip_serializing)]
+    pub y_scale_min: Option<f64>,
+}
+
+impl RsmItemEntry {
+    /// レガシー形式 (y_scale_max, y_scale_min) から (y_scale, y_offset) への自動移行
+    /// ※ 将来互換性を完全に削除する際は、このメソッド定義および load_rsm 内の呼び出し行を削除するだけで完了します。
+    pub fn migrate_legacy_y(&mut self) {
+        if let Some(old_max) = self.y_scale_max {
+            self.y_scale = old_max;
+        }
+        if let Some(old_min) = self.y_scale_min {
+            self.y_offset = old_min;
+        }
+    }
 }
 
 /// 単一アイテムをディスクの参照先ファイルから最新化する
@@ -144,11 +171,12 @@ pub fn save_rsm<P: AsRef<Path>>(state: &mut MultiSpecState, path: P) -> Result<(
             source_path: item.source_path.clone(),
             color: item.color,
             visible: item.visible,
-            y_scale_max: item.y_scale_max,
-            y_scale_min: item.y_scale_min,
+            y_scale: item.y_scale,
             y_offset: item.y_offset,
             show_integral: item.show_integral,
             rsn_archive_name: rsn_name,
+            y_scale_max: None,
+            y_scale_min: None,
         });
     }
 
@@ -220,7 +248,10 @@ pub fn load_rsm<P: AsRef<Path>>(path: P) -> Result<MultiSpecState> {
     let mut items = Vec::new();
 
     // 2. 各アイテムの復元
-    for entry in manifest.items {
+    for mut entry in manifest.items {
+        // 旧バージョンの Y軸設定 (y_scale_max, y_scale_min) を自動移行
+        entry.migrate_legacy_y();
+
         let mut loaded_project = None;
         let cleaned_source_path = entry.source_path.map(|p| clean_path(&p));
 
@@ -260,11 +291,12 @@ pub fn load_rsm<P: AsRef<Path>>(path: P) -> Result<MultiSpecState> {
                 source_path: cleaned_source_path,
                 color: entry.color,
                 visible: entry.visible,
-                y_scale_max: entry.y_scale_max,
-                y_scale_min: entry.y_scale_min,
+                y_scale: entry.y_scale,
                 y_offset: entry.y_offset,
                 show_integral: entry.show_integral,
                 project: Some(proj),
+                y_scale_max: None,
+                y_scale_min: None,
             });
         }
     }

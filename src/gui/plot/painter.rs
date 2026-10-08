@@ -602,14 +602,22 @@ fn paint_multiviews(
             local_y_max = 1.0;
         }
 
-        // スペクトルと X 軸をぴったり近づけるため、下部は local_y_min.min(0.0) を基準にし、
-        // 下部余白はわずか 2% (ノイズがX軸直上に着地する程度) に抑える。
-        // 上部はピーク引き出し線と縦書き化学シフト値のスペースとして 35% の余裕を確保。
-        let y_min = mv.src_y_min.unwrap_or_else(|| local_y_min.min(0.0));
-        let y_max = mv.src_y_max.unwrap_or(local_y_max);
-        let h = (y_max - y_min).max(1e-6);
-        let y_min_adj = y_min - 0.02 * h;
-        let y_max_adj = y_max + 0.40 * h;
+        // スペクトルと X 軸をぴったり近づけるため、Auto の場合は下部は local_y_min.min(0.0) を基準にし、
+        // 下部余白はわずか 2% に抑え、上部はピーク引き出し線のスペースとして 40% の余裕を確保。
+        // 手動設定 (y_scale, y_offset) の場合は指定比率に従って計算。
+        let (y_min_adj, y_max_adj) = if let (Some(scale), Some(offset)) = (mv.y_scale, mv.y_offset) {
+            let base_y = local_y_max.max(1e-6);
+            let delta_y = base_y * (100.0 / scale.max(1.0));
+            let computed_min = -delta_y * (offset / 100.0);
+            let computed_max = delta_y * (1.0 - (offset / 100.0));
+            (computed_min, computed_max)
+        } else {
+            let y_min = local_y_min.min(0.0);
+            let y_max = local_y_max;
+            let h = (y_max - y_min).max(1e-6);
+            (y_min - 0.02 * h, y_max + 0.40 * h)
+        };
+        let h = (y_max_adj - y_min_adj).max(1e-6);
 
         // インセット専用の座標変換 (bottom_margin を 0.0 にすることでプロット下端を X 軸に一致させる)
         let inset_transform = PlotTransform::new(

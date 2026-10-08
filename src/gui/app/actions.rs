@@ -253,18 +253,18 @@ impl ResonaApp {
                             t.ppm_max = x_max;
                         }
                     }
-                    if let Some(y_min) = ds.y_min_scale {
-                        self.y_min_scale = y_min;
+                    if let Some(y_min) = ds.y_offset {
+                        self.y_offset = y_min;
                     }
-                    if let Some(y_max) = ds.y_max_scale {
-                        self.y_max_scale = y_max;
+                    if let Some(y_max) = ds.y_scale {
+                        self.y_scale = y_max;
                     }
                     if let Some(ref mut t) = self.transform {
                         if let Some(spec) = &self.project.spectrum_real {
                             let max_intensity = spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1e-6);
-                            let top_pct = self.y_max_scale.max(1.0);
-                            t.y_max = max_intensity * (100.0 / top_pct);
-                            t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                            let delta_y = max_intensity * (100.0 / self.y_scale.max(1.0));
+                            t.y_min = -delta_y * (self.y_offset / 100.0);
+                            t.y_max = delta_y * (1.0 - (self.y_offset / 100.0));
                             self.last_transform_y = Some((t.y_min, t.y_max));
                         }
                     }
@@ -322,8 +322,10 @@ impl ResonaApp {
         if let Some(ref t) = self.transform {
             self.project.state.display_settings.x_min = Some(t.ppm_min);
             self.project.state.display_settings.x_max = Some(t.ppm_max);
-            self.project.state.display_settings.y_min_scale = Some(self.y_min_scale);
-            self.project.state.display_settings.y_max_scale = Some(self.y_max_scale);
+            self.project.state.display_settings.y_scale = Some(self.y_scale);
+            self.project.state.display_settings.y_offset = Some(self.y_offset);
+            self.project.state.display_settings.y_min_scale = None;
+            self.project.state.display_settings.y_max_scale = None;
         }
 
         match self.project.save_rsn(&abs_path) {
@@ -619,10 +621,12 @@ impl ResonaApp {
                 id: m_id,
                 src_x_min: src_min,
                 src_x_max: src_max,
-                src_y_min: None,
-                src_y_max: None,
+                y_scale: None,
+                y_offset: None,
                 ratio,
                 geometry: geom,
+                src_y_min: None,
+                src_y_max: None,
             });
         }
 
@@ -665,18 +669,11 @@ impl ResonaApp {
         if let Some(ref t) = self.transform {
             self.display_dialog_state.ppm_min = t.ppm_min;
             self.display_dialog_state.ppm_max = t.ppm_max;
-            let top_pct = if t.y_max > 1e-6 {
-                (100.0 * max_intensity / t.y_max).clamp(1.0, 10000.0)
-            } else {
-                80.0
-            };
-            let min_pct = if max_intensity > 1e-6 {
-                (100.0 * (-t.y_min) / max_intensity).clamp(0.0, 10000.0)
-            } else {
-                10.0
-            };
-            self.display_dialog_state.y_max_scale = top_pct;
-            self.display_dialog_state.y_min_scale = min_pct;
+            let delta_y = (t.y_max - t.y_min).max(1e-6);
+            let scale_pct = (100.0 * max_intensity / delta_y).clamp(1.0, 10000.0);
+            let offset_pct = ((-t.y_min) / delta_y * 100.0).clamp(-1000.0, 10000.0);
+            self.display_dialog_state.y_scale = scale_pct;
+            self.display_dialog_state.y_offset = offset_pct;
 
             let span = (t.ppm_max - t.ppm_min).abs();
             if self.plot_style.tick_major <= 0.0 {
@@ -696,8 +693,8 @@ impl ResonaApp {
                 self.plot_style.tick_major = default_step;
             }
         } else {
-            self.display_dialog_state.y_min_scale = 10.0;
-            self.display_dialog_state.y_max_scale = 80.0;
+            self.display_dialog_state.y_scale = 80.0;
+            self.display_dialog_state.y_offset = 10.0;
         }
 
         self.display_dialog_state.auto_ticks = self.plot_style.auto_ticks;

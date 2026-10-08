@@ -70,8 +70,8 @@ pub struct ResonaApp {
     pub last_multiview_ratio: f64,
     pub status_message: String,
 
-    pub y_max_scale: f64,
-    pub y_min_scale: f64,
+    pub y_scale: f64,
+    pub y_offset: f64,
     pub last_transform_y: Option<(f64, f64)>,
     pub arrow_key_hold_time: f64,
     pub temp_zoom_saved: Option<Option<ZoomTool>>,
@@ -144,8 +144,8 @@ impl Default for ResonaApp {
             selected_j_idx: None,
             last_multiview_ratio: settings.multiview_ratio,
             status_message: "Ready".to_string(),
-            y_max_scale: 80.0,
-            y_min_scale: 10.0,
+            y_scale: 80.0,
+            y_offset: 10.0,
             last_transform_y: None,
             arrow_key_hold_time: 0.0,
             temp_zoom_saved: None,
@@ -365,26 +365,19 @@ impl eframe::App for ResonaApp {
         let noise_level = self.project.noise_level();
         let has_spectrum = self.project.spectrum_real.is_some();
 
-        let old_max_scale = self.y_max_scale;
-        let old_min_scale = self.y_min_scale;
+        let old_scale = self.y_scale;
+        let old_offset = self.y_offset;
         let max_intensity = self.project.max_intensity().max(1e-6);
 
         // 前回保存された Y 範囲からユーザーが手動でスケール変更した場合は同期
         if let Some(ref t) = self.transform {
             if let Some((last_min, last_max)) = self.last_transform_y {
                 if (t.y_max - last_max).abs() > 1e-6 || (t.y_min - last_min).abs() > 1e-6 {
-                    let top_pct = if t.y_max > 1e-6 {
-                        (100.0 * max_intensity / t.y_max).clamp(1.0, 10000.0)
-                    } else {
-                        80.0
-                    };
-                    let min_pct = if max_intensity > 1e-6 {
-                        (100.0 * (-t.y_min) / max_intensity).clamp(0.0, 10000.0)
-                    } else {
-                        10.0
-                    };
-                    self.y_max_scale = top_pct;
-                    self.y_min_scale = min_pct;
+                    let delta_y = (t.y_max - t.y_min).max(1e-6);
+                    let scale = (100.0 * max_intensity / delta_y).clamp(1.0, 10000.0);
+                    let offset = ((-t.y_min) / delta_y * 100.0).clamp(-1000.0, 10000.0);
+                    self.y_scale = scale;
+                    self.y_offset = offset;
                 }
             }
         }
@@ -417,19 +410,18 @@ impl eframe::App for ResonaApp {
                     &self.project.metadata.nucleus,
                     noise_level,
                     self.project.state.baseline_method,
-                    &mut self.y_max_scale,
-                    &mut self.y_min_scale,
+                    &mut self.y_scale,
+                    &mut self.y_offset,
                     has_spectrum,
                 )
             }).inner;
 
-        // ツールバーの Y-Axis (scale) が操作された場合、transform を更新
-        if (self.y_max_scale - old_max_scale).abs() > 1e-6 || (self.y_min_scale - old_min_scale).abs() > 1e-6 {
+        // ツールバーの Y-Axis (scale / offset) が操作された場合、transform を更新
+        if (self.y_scale - old_scale).abs() > 1e-6 || (self.y_offset - old_offset).abs() > 1e-6 {
             if let Some(ref mut t) = self.transform {
-                let base_y = max_intensity;
-                let top_pct = self.y_max_scale.max(1.0);
-                t.y_max = base_y * (100.0 / top_pct);
-                t.y_min = -base_y * (self.y_min_scale / 100.0);
+                let delta_y = max_intensity * (100.0 / self.y_scale.max(1.0));
+                t.y_min = -delta_y * (self.y_offset / 100.0);
+                t.y_max = delta_y * (1.0 - (self.y_offset / 100.0));
                 self.last_transform_y = Some((t.y_min, t.y_max));
             }
         }
@@ -689,7 +681,10 @@ impl eframe::App for ResonaApp {
                 t.ppm_max = res.ppm_max;
                 t.y_min = res.y_min;
                 t.y_max = res.y_max;
+                self.last_transform_y = Some((res.y_min, res.y_max));
             }
+            self.y_scale = res.y_scale;
+            self.y_offset = res.y_offset;
             self.plot_style.ppm_decimals = res.ppm_decimals;
             self.plot_style.integral_decimals = res.integral_decimals;
             self.plot_style.auto_ticks = res.auto_ticks;
@@ -715,8 +710,8 @@ impl eframe::App for ResonaApp {
 
         if let Some(res) = show_multiview_yscale_dialog(ctx, &mut self.multiview_yscale_dialog_state) {
             if let Some(mv) = self.project.state.multiviews.iter_mut().find(|m| m.id == res.target_id) {
-                mv.src_y_min = res.y_min;
-                mv.src_y_max = res.y_max;
+                mv.y_scale = res.y_scale;
+                mv.y_offset = res.y_offset;
                 self.push_history();
                 self.status_message = format!("Updated Y-scale for inset {}", res.target_id);
             }
@@ -900,19 +895,23 @@ mod tests {
             id: "mv-1".to_string(),
             src_x_min: 7.0,
             src_x_max: 7.5,
-            src_y_min: None,
-            src_y_max: None,
+            y_scale: None,
+            y_offset: None,
             ratio: 3.0,
             geometry: RectF { x: 50.0, y: 50.0, w: 120.0, h: 100.0 }, // 一番左上 (target_h = 100.0)
+            src_y_min: None,
+            src_y_max: None,
         });
         app.project.state.multiviews.push(MultiviewItem {
             id: "mv-2".to_string(),
             src_x_min: 2.0,
             src_x_max: 3.0,
-            src_y_min: None,
-            src_y_max: None,
+            y_scale: None,
+            y_offset: None,
             ratio: 3.0,
             geometry: RectF { x: 200.0, y: 50.0, w: 260.0, h: 180.0 }, // 幅260, 高さ180
+            src_y_min: None,
+            src_y_max: None,
         });
 
         let target_h = app.adjust_y_multiviews_internal().unwrap();
@@ -933,28 +932,34 @@ mod tests {
             id: "mv-1".to_string(),
             src_x_min: 7.0,
             src_x_max: 8.0,
-            src_y_min: None,
-            src_y_max: None,
+            y_scale: None,
+            y_offset: None,
             ratio: 3.0,
             geometry: RectF { x: 0.0, y: 0.0, w: 200.0, h: 140.0 },
+            src_y_min: None,
+            src_y_max: None,
         });
         app.project.state.multiviews.push(MultiviewItem {
             id: "mv-2".to_string(),
             src_x_min: 4.0,
             src_x_max: 5.0,
-            src_y_min: None,
-            src_y_max: None,
+            y_scale: None,
+            y_offset: None,
             ratio: 3.0,
             geometry: RectF { x: 0.0, y: 0.0, w: 300.0, h: 140.0 },
+            src_y_min: None,
+            src_y_max: None,
         });
         app.project.state.multiviews.push(MultiviewItem {
             id: "mv-3".to_string(),
             src_x_min: 1.0,
             src_x_max: 2.0,
-            src_y_min: None,
-            src_y_max: None,
+            y_scale: None,
+            y_offset: None,
             ratio: 3.0,
             geometry: RectF { x: 0.0, y: 0.0, w: 400.0, h: 140.0 },
+            src_y_min: None,
+            src_y_max: None,
         });
 
         // plot_rect 幅が 600.0 の場合 (available_w = 600 - 30 = 570)

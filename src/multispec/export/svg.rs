@@ -115,9 +115,9 @@ pub fn export_multispec_svg(
         };
 
         let max_val = proj.max_intensity().max(1e-6);
-        let top_val = max_val * (100.0 / it.y_scale_max.max(1.0));
-        let min_val = -max_val * (it.y_scale_min / 100.0);
-        let val_span = (top_val - min_val).max(1e-6);
+        let delta_y = max_val * (100.0 / it.y_scale.max(1.0));
+        let min_val = -delta_y * (it.y_offset / 100.0);
+        let val_span = delta_y.max(1e-6);
 
         let color_hex = format!("#{:02x}{:02x}{:02x}", it.color[0], it.color[1], it.color[2]);
 

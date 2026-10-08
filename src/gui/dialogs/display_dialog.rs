@@ -5,6 +5,8 @@ use egui::{Checkbox, DragValue, Window};
 pub struct DisplaySettingsResult {
     pub ppm_min: f64,
     pub ppm_max: f64,
+    pub y_scale: f64,
+    pub y_offset: f64,
     pub y_min: f64,
     pub y_max: f64,
     pub auto_ticks: bool,
@@ -18,10 +20,10 @@ pub struct DisplayDialogState {
     pub open: bool,
     pub ppm_min: f64,
     pub ppm_max: f64,
-    /// ピーク最大高さに対する下限比率 (%) (例: -10.0 で下部に10%のマージン)
-    pub y_min_scale: f64,
-    /// ピーク最大高さに対する上限比率 (%) (例: 110.0 で上部に10%のマージン)
-    pub y_max_scale: f64,
+    /// ピーク最大高さに対するスケール比率 (%) (例: 80.0 で上部にマージン)
+    pub y_scale: f64,
+    /// ベースライン位置のオフセット比率 (%) (例: 10.0 で下部に10%のマージン)
+    pub y_offset: f64,
     /// 100% の基準となる最大ピーク強度
     pub max_peak_intensity: f64,
     pub auto_ticks: bool,
@@ -37,8 +39,8 @@ impl Default for DisplayDialogState {
             open: false,
             ppm_min: 0.0,
             ppm_max: 10.0,
-            y_min_scale: 10.0,
-            y_max_scale: 80.0,
+            y_scale: 80.0,
+            y_offset: 10.0,
             max_peak_intensity: 1.0,
             auto_ticks: false,
             tick_major: 1.0,
@@ -77,26 +79,26 @@ pub fn show_display_dialog(
 
             ui.separator();
 
-            // 2. Y 軸スケール (最大ピークに対する相対パーセンテージ)
-            ui.label(egui::RichText::new("Y-Axis (scale)").strong());
+            // 2. Y 軸スケール / オフセット (最大ピークに対する相対パーセンテージ)
+            ui.label(egui::RichText::new("Y-Axis (scale & offset)").strong());
             ui.label(
                 egui::RichText::new(format!("Peak Top 100% = {:.2e}", state.max_peak_intensity))
                     .size(10.5)
                     .color(egui::Color32::from_gray(120)),
             );
             ui.horizontal(|ui| {
-                ui.label("Max");
+                ui.label("Scale");
                 ui.add(
-                    DragValue::new(&mut state.y_max_scale)
+                    DragValue::new(&mut state.y_scale)
                         .speed(2.0)
                         .range(1.0..=10000.0)
                         .suffix("%"),
                 );
-                ui.label("Min");
+                ui.label("Offset");
                 ui.add(
-                    DragValue::new(&mut state.y_min_scale)
+                    DragValue::new(&mut state.y_offset)
                         .speed(1.0)
-                        .range(0.0..=10000.0)
+                        .range(-1000.0..=10000.0)
                         .suffix("%"),
                 );
             });
@@ -137,13 +139,15 @@ pub fn show_display_dialog(
             ui.horizontal(|ui| {
                 if ui.button("Apply").clicked() {
                     let base_y = state.max_peak_intensity.max(1e-6);
-                    let top_pct = state.y_max_scale.max(1.0);
-                    let computed_y_max = base_y * (100.0 / top_pct);
-                    let computed_y_min = -base_y * (state.y_min_scale / 100.0);
+                    let delta_y = base_y * (100.0 / state.y_scale.max(1.0));
+                    let computed_y_min = -delta_y * (state.y_offset / 100.0);
+                    let computed_y_max = delta_y * (1.0 - (state.y_offset / 100.0));
 
                     applied = Some(DisplaySettingsResult {
                         ppm_min: state.ppm_min,
                         ppm_max: state.ppm_max,
+                        y_scale: state.y_scale,
+                        y_offset: state.y_offset,
                         y_min: computed_y_min,
                         y_max: computed_y_max,
                         auto_ticks: state.auto_ticks,

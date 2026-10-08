@@ -459,9 +459,9 @@ fn render_multispec_realtime_preview(
         };
 
         let max_val = proj.max_intensity().max(1e-6);
-        let top_val = max_val * (100.0 / it.y_scale_max.max(1.0));
-        let min_val = -max_val * (it.y_scale_min / 100.0);
-        let val_span = (top_val - min_val).max(1e-6);
+        let delta_y = max_val * (100.0 / it.y_scale.max(1.0));
+        let min_val = -delta_y * (it.y_offset / 100.0);
+        let val_span = delta_y.max(1e-6);
 
         let stroke_color = Color32::from_rgb(it.color[0], it.color[1], it.color[2]);
         let stroke_width = (style.main_spectrum.line_width * 0.8_f32).clamp(0.6_f32, 2.0_f32);
@@ -967,9 +967,9 @@ fn print_multispec_windows_native(
         };
 
         let max_val = proj.max_intensity().max(1e-6);
-        let top_val = max_val * (100.0 / it.y_scale_max.max(1.0));
-        let min_val = -max_val * (it.y_scale_min / 100.0);
-        let val_span = (top_val - min_val).max(1e-6);
+        let delta_y = max_val * (100.0 / it.y_scale.max(1.0));
+        let min_val = -delta_y * (it.y_offset / 100.0);
+        let val_span = delta_y.max(1e-6);
 
         let col = rgb(it.color[0], it.color[1], it.color[2]);
         let pen_w = ((style.main_spectrum.line_width as f64 * dpi_x as f64 / 96.0).round() as i32).max(1);

@@ -69,10 +69,12 @@ fn test_phase2_full_pipeline_and_persistence() {
         id: "mv-test".to_string(),
         src_x_min: 7.20,
         src_x_max: 7.35,
-        src_y_min: None,
-        src_y_max: None,
+        y_scale: None,
+        y_offset: None,
         ratio: 5.0,
         geometry: RectF { x: 50.0, y: 50.0, w: 200.0, h: 150.0 },
+        src_y_min: None,
+        src_y_max: None,
     });
 
     // 8. リファレンスシフト (0.1 ppm シフト)

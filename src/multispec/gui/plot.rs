@@ -246,9 +246,9 @@ fn paint_spectrum_slot<F: Fn(f64) -> f32>(
     }
 
     let max_val = proj.max_intensity().max(1e-6);
-    let top_val = max_val * (100.0 / item.y_scale_max.max(1.0));
-    let min_val = -max_val * (item.y_scale_min / 100.0);
-    let val_span = (top_val - min_val).max(1e-6);
+    let delta_y = max_val * (100.0 / item.y_scale.max(1.0));
+    let min_val = -delta_y * (item.y_offset / 100.0);
+    let val_span = delta_y.max(1e-6);
 
     let color = Color32::from_rgb(item.color[0], item.color[1], item.color[2]);
 
@@ -419,9 +419,9 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
         if is_shift {
             let delta = if up_pressed { 5.0 } else { -5.0 };
             if is_ctrl {
-                state.adjust_all_y_scale_min(delta);
+                state.adjust_all_y_offset(delta);
             } else {
-                state.adjust_selected_y_scale_min(delta);
+                state.adjust_selected_y_offset(delta);
             }
             any_changed = true;
         } else {

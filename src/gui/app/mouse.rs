@@ -375,25 +375,25 @@ impl ResonaApp {
                         if is_up || is_down {
                             let max_intensity = self.project.max_intensity().max(1e-6);
                             if is_shift {
-                                // Shift + 上下: Y-scale Min(%) を加速調整
+                                // Shift + 上下: Y-offset (%) を加速調整
                                 let step = if pressed_up || pressed_down { 2.0 } else { 25.0 * accel_mult * dt };
                                 if is_up {
-                                    self.y_min_scale = (self.y_min_scale + step).clamp(0.0, 10000.0);
+                                    self.y_offset = (self.y_offset + step).clamp(0.0, 10000.0);
                                 } else {
-                                    self.y_min_scale = (self.y_min_scale - step).clamp(0.0, 10000.0);
+                                    self.y_offset = (self.y_offset - step).clamp(0.0, 10000.0);
                                 }
                             } else {
-                                // 上下: Y-scale Max(%) を加速調整
+                                // 上下: Y-scale (%) を加速調整 (ベースライン位置は固定)
                                 let step = if pressed_up || pressed_down { 2.5 } else { 35.0 * accel_mult * dt };
                                 if is_up {
-                                    self.y_max_scale = (self.y_max_scale + step).clamp(1.0, 10000.0);
+                                    self.y_scale = (self.y_scale + step).clamp(1.0, 10000.0);
                                 } else {
-                                    self.y_max_scale = (self.y_max_scale - step).clamp(1.0, 10000.0);
+                                    self.y_scale = (self.y_scale - step).clamp(1.0, 10000.0);
                                 }
                             }
-                            let top_pct = self.y_max_scale.max(1.0);
-                            t.y_max = max_intensity * (100.0 / top_pct);
-                            t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                            let delta_y = max_intensity * (100.0 / self.y_scale.max(1.0));
+                            t.y_min = -delta_y * (self.y_offset / 100.0);
+                            t.y_max = delta_y * (1.0 - (self.y_offset / 100.0));
                             self.last_transform_y = Some((t.y_min, t.y_max));
                         }
                     } else {
@@ -401,7 +401,7 @@ impl ResonaApp {
                     }
                 }
 
-                // 4. マウスホイール (通常: Y-scale Max, Shift: Y-scale Min)
+                // 4. マウスホイール (通常: Y-scale, Shift: Y-offset)
                 if response.hovered() {
                     let raw_delta = ctx.input(|i| i.raw_scroll_delta);
                     let is_shift = ctx.input(|i| i.modifiers.shift);
@@ -420,25 +420,25 @@ impl ResonaApp {
                     if scroll_val.abs() > 0.1 {
                         let max_intensity = self.project.max_intensity().max(1e-6);
                         if is_shift {
-                            // Shift + ホイール: Min (%) 調整
+                            // Shift + ホイール: Offset (%) 調整
                             let delta = (scroll_val / 30.0).clamp(-10.0, 10.0) * 2.0;
-                            let new_min = (self.y_min_scale + delta).clamp(0.0, 10000.0);
-                            if (new_min - self.y_min_scale).abs() > 1e-4 {
-                                self.y_min_scale = new_min;
-                                let top_pct = self.y_max_scale.max(1.0);
-                                t.y_max = max_intensity * (100.0 / top_pct);
-                                t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                            let new_min = (self.y_offset + delta).clamp(-1000.0, 10000.0);
+                            if (new_min - self.y_offset).abs() > 1e-4 {
+                                self.y_offset = new_min;
+                                let delta_y = max_intensity * (100.0 / self.y_scale.max(1.0));
+                                t.y_min = -delta_y * (self.y_offset / 100.0);
+                                t.y_max = delta_y * (1.0 - (self.y_offset / 100.0));
                                 self.last_transform_y = Some((t.y_min, t.y_max));
                             }
                         } else {
-                            // 通常ホイール: Max (%) 調整
+                            // 通常ホイール: Scale (%) 調整
                             let factor = 1.10_f64.powf(scroll_val / 50.0);
-                            let new_max_scale = (self.y_max_scale * factor).clamp(1.0, 10000.0);
-                            if (new_max_scale - self.y_max_scale).abs() > 1e-4 {
-                                self.y_max_scale = new_max_scale;
-                                let top_pct = self.y_max_scale.max(1.0);
-                                t.y_max = max_intensity * (100.0 / top_pct);
-                                t.y_min = -max_intensity * (self.y_min_scale / 100.0);
+                            let new_max_scale = (self.y_scale * factor).clamp(1.0, 10000.0);
+                            if (new_max_scale - self.y_scale).abs() > 1e-4 {
+                                self.y_scale = new_max_scale;
+                                let delta_y = max_intensity * (100.0 / self.y_scale.max(1.0));
+                                t.y_min = -delta_y * (self.y_offset / 100.0);
+                                t.y_max = delta_y * (1.0 - (self.y_offset / 100.0));
                                 self.last_transform_y = Some((t.y_min, t.y_max));
                             }
                         }
@@ -551,22 +551,17 @@ impl ResonaApp {
                                         1.0
                                     };
 
-                                    let (y_max_scale, y_min_scale) = if let (Some(cur_ymax), Some(cur_ymin)) = (mv.src_y_max, mv.src_y_min) {
-                                        let top = if cur_ymax > 1e-6 { (100.0 * inset_max / cur_ymax).clamp(1.0, 10000.0) } else { 80.0 };
-                                        let min = (100.0 * (-cur_ymin) / inset_max).clamp(0.0, 10000.0);
-                                        (top, min)
-                                    } else {
-                                        (80.0, 10.0)
-                                    };
+                                    let y_scale = mv.y_scale.unwrap_or(80.0);
+                                    let y_offset = mv.y_offset.unwrap_or(10.0);
 
                                     self.multiview_yscale_dialog_state = MultiviewYScaleDialogState {
                                         open: true,
                                         target_id: Some(mv.id.clone()),
                                         target_label: format!("Inset: {:.3} ~ {:.3} ppm", mv.src_x_max, mv.src_x_min),
-                                        auto_y: mv.src_y_max.is_none(),
+                                        auto_y: mv.y_scale.is_none(),
                                         max_peak_intensity: inset_max,
-                                        y_max_scale,
-                                        y_min_scale,
+                                        y_scale,
+                                        y_offset,
                                     };
                                     break;
                                 }
@@ -1746,10 +1741,12 @@ impl ResonaApp {
                                                 id: mv_id.clone(),
                                                 src_x_min: p_low,
                                                 src_x_max: p_high,
-                                                src_y_min: None,
-                                                src_y_max: None,
+                                                y_scale: None,
+                                                y_offset: None,
                                                 ratio,
                                                 geometry: geom,
+                                                src_y_min: None,
+                                                src_y_max: None,
                                             });
                                             self.selected_multiview_ids.clear();
                                             self.selected_multiview_ids.insert(mv_id);

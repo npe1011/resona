@@ -86,10 +86,12 @@ fn test_generate_complete_page_svg_full() {
             id: "1".to_string(),
             src_x_min: 7.0,
             src_x_max: 7.5,
-            src_y_min: None,
-            src_y_max: None,
+            y_scale: None,
+            y_offset: None,
             ratio: 5.0,
             geometry: resona::core::RectF { x: 100.0, y: 100.0, w: 200.0, h: 150.0 },
+            src_y_min: None,
+            src_y_max: None,
         },
     ];
     let metadata = AcquisitionMetadata::default();

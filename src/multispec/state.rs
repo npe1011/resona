@@ -21,11 +21,11 @@ fn default_true() -> bool {
     true
 }
 
-fn default_y_scale_max() -> f64 {
+fn default_y_scale() -> f64 {
     100.0
 }
 
-fn default_y_scale_min() -> f64 {
+fn default_y_offset() -> f64 {
     0.0
 }
 
@@ -38,16 +38,20 @@ pub struct MultiSpecItem {
     pub color: [u8; 3],
     #[serde(default = "default_true")]
     pub visible: bool,
-    #[serde(default = "default_y_scale_max")]
-    pub y_scale_max: f64,
-    #[serde(default = "default_y_scale_min")]
-    pub y_scale_min: f64,
-    #[serde(default)]
+    #[serde(default = "default_y_scale")]
+    pub y_scale: f64,
+    #[serde(default = "default_y_offset")]
     pub y_offset: f64,
     #[serde(default = "default_true")]
     pub show_integral: bool,
     #[serde(skip)]
     pub project: Option<Project>,
+
+    // --- レガシー互換フィールド (将来ここを削除すれば完全移行) ---
+    #[serde(default, skip_serializing)]
+    pub y_scale_max: Option<f64>,
+    #[serde(default, skip_serializing)]
+    pub y_scale_min: Option<f64>,
 }
 
 impl MultiSpecItem {
@@ -59,11 +63,23 @@ impl MultiSpecItem {
             source_path,
             color,
             visible: true,
-            y_scale_max: 100.0,
-            y_scale_min: 0.0,
+            y_scale: 100.0,
             y_offset: 0.0,
             show_integral: true,
             project: Some(project),
+            y_scale_max: None,
+            y_scale_min: None,
+        }
+    }
+
+    /// レガシー形式 (y_scale_max, y_scale_min) から (y_scale, y_offset) への自動移行
+    /// ※ 将来互換性を完全に削除する際は、このメソッド定義および load_rsm 内の呼び出し行を削除するだけで完了します。
+    pub fn migrate_legacy_y(&mut self) {
+        if let Some(old_max) = self.y_scale_max {
+            self.y_scale = old_max;
+        }
+        if let Some(old_min) = self.y_scale_min {
+            self.y_offset = old_min;
         }
     }
 }
@@ -114,8 +130,7 @@ pub struct MultiSpecItemMeta {
     pub name: String,
     pub color: [u8; 3],
     pub visible: bool,
-    pub y_scale_max: f64,
-    pub y_scale_min: f64,
+    pub y_scale: f64,
     pub y_offset: f64,
     pub show_integral: bool,
 }
@@ -490,17 +505,17 @@ impl MultiSpecState {
         self.push_history();
     }
 
-    /// 全スペクトルの Y-Scale Max を一括調整
+    /// 全スペクトルの Y-Scale を一括調整
     pub fn adjust_all_y_scale(&mut self, factor: f64) {
         for it in &mut self.items {
-            it.y_scale_max = (it.y_scale_max * factor).clamp(1.0, 10000.0);
+            it.y_scale = (it.y_scale * factor).clamp(1.0, 10000.0);
         }
     }
 
-    /// 全スペクトルの Y-Scale Min を一括調整
-    pub fn adjust_all_y_scale_min(&mut self, delta: f64) {
+    /// 全スペクトルの Y-Offset (ベースライン位置) を一括調整
+    pub fn adjust_all_y_offset(&mut self, delta: f64) {
         for it in &mut self.items {
-            it.y_scale_min = (it.y_scale_min + delta).clamp(0.0, 10000.0);
+            it.y_offset = (it.y_offset + delta).clamp(-1000.0, 10000.0);
         }
     }
 
@@ -581,22 +596,22 @@ impl MultiSpecState {
         self.selected_id = None;
     }
 
-    /// 選択中スペクトルの Y-Scale Max を個別調整 (係数倍)
+    /// 選択中スペクトルの Y-Scale を個別調整 (係数倍)
     pub fn adjust_selected_y_scale(&mut self, factor: f64) {
         let selected_id = self.selected_id.as_deref();
         for it in &mut self.items {
             if self.selected_ids.contains(&it.id) || selected_id == Some(&it.id) {
-                it.y_scale_max = (it.y_scale_max * factor).clamp(1.0, 10000.0);
+                it.y_scale = (it.y_scale * factor).clamp(1.0, 10000.0);
             }
         }
     }
 
-    /// 選択中スペクトルの Y-Scale Min を個別調整 (差分加算)
-    pub fn adjust_selected_y_scale_min(&mut self, delta: f64) {
+    /// 選択中スペクトルの Y-Offset (ベースライン位置) を個別調整 (差分加算)
+    pub fn adjust_selected_y_offset(&mut self, delta: f64) {
         let selected_id = self.selected_id.as_deref();
         for it in &mut self.items {
             if self.selected_ids.contains(&it.id) || selected_id == Some(&it.id) {
-                it.y_scale_min = (it.y_scale_min + delta).clamp(0.0, 10000.0);
+                it.y_offset = (it.y_offset + delta).clamp(-1000.0, 10000.0);
             }
         }
     }
@@ -613,8 +628,7 @@ impl MultiSpecState {
                     name: it.name.clone(),
                     color: it.color,
                     visible: it.visible,
-                    y_scale_max: it.y_scale_max,
-                    y_scale_min: it.y_scale_min,
+                    y_scale: it.y_scale,
                     y_offset: it.y_offset,
                     show_integral: it.show_integral,
                 })
@@ -674,8 +688,7 @@ impl MultiSpecState {
                 it.name = meta.name.clone();
                 it.color = meta.color;
                 it.visible = meta.visible;
-                it.y_scale_max = meta.y_scale_max;
-                it.y_scale_min = meta.y_scale_min;
+                it.y_scale = meta.y_scale;
                 it.y_offset = meta.y_offset;
                 it.show_integral = meta.show_integral;
                 reordered.push(it);
@@ -870,25 +883,25 @@ mod tests {
         let _id2 = state.add_project("Sample 2".to_string(), None, p2);
 
         // 初期スケール値確認
-        assert_eq!(state.items[0].y_scale_max, 100.0);
-        assert_eq!(state.items[1].y_scale_max, 100.0);
+        assert_eq!(state.items[0].y_scale, 100.0);
+        assert_eq!(state.items[1].y_scale, 100.0);
 
         // id1 のみ選択してスケール調整
         state.select_single(id1.clone());
         state.adjust_selected_y_scale(1.2);
-        assert!((state.items[0].y_scale_max - 120.0).abs() < 1e-4);
-        assert_eq!(state.items[1].y_scale_max, 100.0);
+        assert!((state.items[0].y_scale - 120.0).abs() < 1e-4);
+        assert_eq!(state.items[1].y_scale, 100.0);
 
         // 全選択してさらにスケール調整 (各自の現在の値に対して個別に倍率を掛ける)
         state.select_all();
         state.adjust_selected_y_scale(1.5);
-        assert!((state.items[0].y_scale_max - 180.0).abs() < 1e-4);
-        assert!((state.items[1].y_scale_max - 150.0).abs() < 1e-4);
+        assert!((state.items[0].y_scale - 180.0).abs() < 1e-4);
+        assert!((state.items[1].y_scale - 150.0).abs() < 1e-4);
 
-        // Y-Scale Min (差分加算) の個別処理
-        state.adjust_selected_y_scale_min(10.0);
-        assert_eq!(state.items[0].y_scale_min, 10.0);
-        assert_eq!(state.items[1].y_scale_min, 10.0);
+        // Y-Offset (ベースライン位置) の個別処理
+        state.adjust_selected_y_offset(10.0);
+        assert_eq!(state.items[0].y_offset, 10.0);
+        assert_eq!(state.items[1].y_offset, 10.0);
     }
 
     #[test]

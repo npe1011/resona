@@ -569,11 +569,19 @@ fn generate_plot_svg_content(
                     mv_y_max = 1.0;
                 }
 
-                let y_min_val = mv.src_y_min.unwrap_or_else(|| mv_y_min.min(0.0));
-                let y_max_val = mv.src_y_max.unwrap_or(mv_y_max);
-                let h_diff = (y_max_val - y_min_val).max(1e-6);
-                let y_min_adj = y_min_val - 0.02 * h_diff;
-                let y_max_adj = y_max_val + 0.40 * h_diff;
+                let (y_min_adj, y_max_adj) = if let (Some(scale), Some(offset)) = (mv.y_scale, mv.y_offset) {
+                    let base_y = mv_y_max.max(1e-6);
+                    let delta_y = base_y * (100.0 / scale.max(1.0));
+                    let computed_min = -delta_y * (offset / 100.0);
+                    let computed_max = delta_y * (1.0 - (offset / 100.0));
+                    (computed_min, computed_max)
+                } else {
+                    let y_min_val = mv_y_min.min(0.0);
+                    let y_max_val = mv_y_max;
+                    let h_diff = (y_max_val - y_min_val).max(1e-6);
+                    (y_min_val - 0.02 * h_diff, y_max_val + 0.40 * h_diff)
+                };
+                let h_diff = (y_max_adj - y_min_adj).max(1e-6);
 
                 let inset_axis_y = inset_y + inset_h - 16.0;
                 let inset_plot_h = (inset_axis_y - inset_y - 6.0).max(10.0);
