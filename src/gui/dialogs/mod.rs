@@ -16,7 +16,8 @@ pub use full_auto_dialog::{
 };
 pub use jcoupling_dialog::{show_jcoupling_dialog, JCouplingDialogState};
 pub use multiview_dialog::{
-    show_multiview_yscale_dialog, MultiviewYScaleDialogState, MultiviewYScaleResult,
+    compute_inset_auto_y, show_multiview_yscale_dialog, MultiviewYScaleDialogState,
+    MultiviewYScaleResult,
 };
 pub use peak_list_dialog::{show_peak_list_dialog, PeakListDialogState};
 pub use print_dialog::{show_print_dialog, PrintDialogState};

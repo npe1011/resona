@@ -746,7 +746,7 @@ fn render_realtime_preview(
                     if inset_w > 25.0 && inset_h > 25.0 {
                         let inset_rect = Rect::from_min_size(Pos2::new(inset_x, inset_y), vec2(inset_w, inset_h));
                         painter.rect_filled(inset_rect, 0.0, Color32::WHITE);
-                        painter.rect_stroke(inset_rect, 0.0, Stroke::new(1.1_f32, Color32::from_gray(135)));
+                        let inset_clip_painter = painter.with_clip_rect(inset_rect);
 
                         let mv_src_min = mv.src_x_min.min(mv.src_x_max);
                         let mv_src_max = mv.src_x_min.max(mv.src_x_max);
@@ -802,7 +802,7 @@ fn render_realtime_preview(
                             }
                         }
                         if mv_points.len() > 1 {
-                            painter.add(egui::epaint::PathShape::line(
+                            inset_clip_painter.add(egui::epaint::PathShape::line(
                                 mv_points,
                                 Stroke::new(style.multiview.line_width, style.multiview.line_color.to_color32()),
                             ));
@@ -829,7 +829,7 @@ fn render_realtime_preview(
                                             }
                                         }
                                         if intg_pts.len() > 1 {
-                                            painter.add(egui::epaint::PathShape::line(
+                                            inset_clip_painter.add(egui::epaint::PathShape::line(
                                                 intg_pts,
                                                 Stroke::new(style.multiview.integral_width, style.multiview.integral_color.to_color32()),
                                             ));
@@ -846,7 +846,7 @@ fn render_realtime_preview(
                                             let text_pos = Pos2::new(mid_x + text_h * 0.5, start_y);
                                             let ts = egui::epaint::TextShape::new(text_pos, galley, color_intg)
                                                 .with_angle(std::f32::consts::FRAC_PI_2);
-                                            painter.add(ts);
+                                            inset_clip_painter.add(ts);
                                         }
                                     }
                                 }
@@ -900,9 +900,9 @@ fn render_realtime_preview(
 
                                     if line_start_y > mv_elbow_y + 1.0 {
                                         let stroke_lead = Stroke::new(style.multiview.peak_lead_width, style.multiview.peak_lead_color.to_color32());
-                                        painter.line_segment([Pos2::new(px, line_start_y), Pos2::new(px, mv_elbow_y)], stroke_lead);
-                                        painter.line_segment([Pos2::new(px, mv_elbow_y), Pos2::new(tx, text_bottom_y + 1.5)], stroke_lead);
-                                        painter.line_segment([Pos2::new(tx, text_bottom_y + 1.5), Pos2::new(tx, text_bottom_y)], stroke_lead);
+                                        inset_clip_painter.line_segment([Pos2::new(px, line_start_y), Pos2::new(px, mv_elbow_y)], stroke_lead);
+                                        inset_clip_painter.line_segment([Pos2::new(px, mv_elbow_y), Pos2::new(tx, text_bottom_y + 1.5)], stroke_lead);
+                                        inset_clip_painter.line_segment([Pos2::new(tx, text_bottom_y + 1.5), Pos2::new(tx, text_bottom_y)], stroke_lead);
                                     }
 
                                     let val_str = format!("{:.1$}", pk.ppm, settings.ppm_decimals);
@@ -911,13 +911,13 @@ fn render_realtime_preview(
                                     let pos = Pos2::new(tx + text_h * 0.5, mv_text_start_y);
                                     let ts = egui::epaint::TextShape::new(pos, galley, Color32::from_rgb(20, 20, 20))
                                         .with_angle(std::f32::consts::FRAC_PI_2);
-                                    painter.add(ts);
+                                    inset_clip_painter.add(ts);
                                 }
                             }
                         }
 
                         // 4. X 軸目盛り線 & PPM 数値ラベル (マルチビュー内)
-                        painter.line_segment(
+                        inset_clip_painter.line_segment(
                             [Pos2::new(inset_rect.min.x + 4.0, inset_axis_y), Pos2::new(inset_rect.max.x - 4.0, inset_axis_y)],
                             Stroke::new(0.8_f32, Color32::BLACK),
                         );
@@ -943,7 +943,7 @@ fn render_realtime_preview(
                             let m_ppm = m_idx as f64 * minor_step;
                             let m_x = mv_ppm_to_x(m_ppm);
                             if m_x >= inset_rect.min.x && m_x <= inset_rect.max.x {
-                                painter.line_segment(
+                                inset_clip_painter.line_segment(
                                     [Pos2::new(m_x, inset_axis_y), Pos2::new(m_x, inset_axis_y + 1.2)],
                                     Stroke::new(0.5_f32, Color32::from_gray(120)),
                                 );
@@ -955,12 +955,12 @@ fn render_realtime_preview(
                             let tick_ppm = t_idx as f64 * step;
                             let tick_x = mv_ppm_to_x(tick_ppm);
                             if tick_x >= inset_rect.min.x && tick_x <= inset_rect.max.x {
-                                painter.line_segment(
+                                inset_clip_painter.line_segment(
                                     [Pos2::new(tick_x, inset_axis_y), Pos2::new(tick_x, inset_axis_y + 2.5)],
                                     Stroke::new(0.7_f32, Color32::BLACK),
                                 );
                                 if tick_x >= inset_rect.min.x + 8.0 && tick_x <= inset_rect.max.x - 8.0 {
-                                    painter.text(
+                                    inset_clip_painter.text(
                                         Pos2::new(tick_x, inset_axis_y + 3.0),
                                         Align2::CENTER_TOP,
                                         format!("{:.1$}", tick_ppm, decimals),
@@ -970,6 +970,9 @@ fn render_realtime_preview(
                                 }
                             }
                         }
+
+                        // 5. 拡大図枠線 (細枠 0.75px で最前面に描画)
+                        painter.rect_stroke(inset_rect, 0.0, Stroke::new(0.75_f32, Color32::from_gray(135)));
                     }
                 }
             }

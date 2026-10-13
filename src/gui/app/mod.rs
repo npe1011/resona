@@ -708,12 +708,20 @@ impl eframe::App for ResonaApp {
             self.status_message = "Added J-coupling multiplet to results".to_string();
         }
 
-        if let Some(res) = show_multiview_yscale_dialog(ctx, &mut self.multiview_yscale_dialog_state) {
+        if let Some(res) = show_multiview_yscale_dialog(
+            ctx,
+            &mut self.multiview_yscale_dialog_state,
+            self.project.ppm.as_ref(),
+            self.project.spectrum_real.as_ref(),
+            self.project.max_intensity(),
+        ) {
             if let Some(mv) = self.project.state.multiviews.iter_mut().find(|m| m.id == res.target_id) {
+                mv.src_x_min = res.src_x_min;
+                mv.src_x_max = res.src_x_max;
                 mv.y_scale = res.y_scale;
                 mv.y_offset = res.y_offset;
                 self.push_history();
-                self.status_message = format!("Updated Y-scale for inset {}", res.target_id);
+                self.status_message = format!("Updated inset {}", res.target_id);
             }
         }
 

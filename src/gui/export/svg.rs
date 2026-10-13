@@ -542,9 +542,13 @@ fn generate_plot_svg_content(
             let inset_h = rel_h * plot_h;
 
             if inset_w > 30.0 && inset_h > 30.0 {
+                let clip_id = format!("mv_clip_{}", mv.id);
                 svg.push_str(&format!(
-                    r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" fill="#ffffff" stroke="#888888" stroke-width="1.1" />
+                    r##"<defs><clipPath id="{clip_id}"><rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" /></clipPath></defs>
+<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" fill="#ffffff" />
+<g clip-path="url(#{clip_id})">
 "##,
+                    clip_id = clip_id,
                     x = inset_x,
                     y = inset_y,
                     w = inset_w,
@@ -812,6 +816,16 @@ fn generate_plot_svg_content(
                         }
                     }
                 }
+
+                svg.push_str("</g>\n");
+                svg.push_str(&format!(
+                    r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" fill="none" stroke="#888888" stroke-width="0.75" />
+"##,
+                    x = inset_x,
+                    y = inset_y,
+                    w = inset_w,
+                    h = inset_h,
+                ));
             }
         }
     }

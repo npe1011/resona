@@ -251,6 +251,9 @@ pub fn print_windows_native(
         fn CreateFontIndirectW(lplf: *const LOGFONTW) -> isize;
         fn TextOutW(hdc: isize, x: i32, y: i32, lpString: *const u16, c: i32) -> i32;
         fn GetTextMetricsW(hdc: isize, lptm: *mut TEXTMETRICW) -> i32;
+        fn SaveDC(hdc: isize) -> i32;
+        fn RestoreDC(hdc: isize, nSavedDC: i32) -> i32;
+        fn IntersectClipRect(hdc: isize, left: i32, top: i32, right: i32, bottom: i32) -> i32;
     }
 
     const HORZRES: i32 = 8;
@@ -690,7 +693,7 @@ pub fn print_windows_native(
 
         // マルチビュー (拡大スペクトル、積分、ピーク引き出し線、X軸目盛り)
         if settings.multiview && !multiviews.is_empty() {
-            let mv_border_width = ((dpi_y as f64 * 1.1 / 72.0).round() as i32).max(1);
+            let mv_border_width = ((dpi_y as f64 * 0.75 / 72.0).round() as i32).max(1);
             let mv_pen = unsafe { CreatePen(PS_SOLID, mv_border_width, rgb(136, 136, 136)) };
             let white_brush = unsafe { CreateSolidBrush(rgb(255, 255, 255)) };
 
@@ -711,6 +714,12 @@ pub fn print_windows_native(
                     unsafe {
                         Rectangle(hdc, inset_x, inset_y, inset_x + inset_w, inset_y + inset_h);
                         SelectObject(hdc, old_b);
+                    }
+
+                    // 枠外への飛び出しを防止するためクリップ領域を設定
+                    let saved_dc = unsafe { SaveDC(hdc) };
+                    unsafe {
+                        IntersectClipRect(hdc, inset_x, inset_y, inset_x + inset_w, inset_y + inset_h);
                     }
 
                     let mv_src_min = mv.src_x_min.min(mv.src_x_max);
@@ -1014,7 +1023,10 @@ pub fn print_windows_native(
                         DeleteObject(axis_pen);
                     }
 
-                    unsafe { SelectObject(hdc, old_p); }
+                    unsafe {
+                        SelectObject(hdc, old_p);
+                        RestoreDC(hdc, saved_dc);
+                    }
                 }
             }
 

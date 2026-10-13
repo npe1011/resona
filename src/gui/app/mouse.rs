@@ -534,31 +534,27 @@ impl ResonaApp {
                             for mv in self.project.state.multiviews.iter().rev() {
                                 let rect = Rect::from_min_size(Pos2::new(mv.geometry.x, mv.geometry.y), egui::vec2(mv.geometry.w, mv.geometry.h));
                                 if rect.contains(pos) {
-                                    let p_min = mv.src_x_min.min(mv.src_x_max);
-                                    let p_max = mv.src_x_min.max(mv.src_x_max);
-                                    let inset_max = if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
-                                        let mut mx = 0.0_f64;
-                                        for i in 0..ppm.len().min(spec.len()) {
-                                            let p = ppm[i];
-                                            if p >= p_min && p <= p_max {
-                                                if spec[i] > mx {
-                                                    mx = spec[i];
-                                                }
-                                            }
-                                        }
-                                        if mx > 1e-6 { mx } else { self.project.max_intensity().max(1.0) }
-                                    } else {
-                                        1.0
-                                    };
+                                    let p_low = mv.src_x_min.min(mv.src_x_max);
+                                    let p_high = mv.src_x_min.max(mv.src_x_max);
 
-                                    let y_scale = mv.y_scale.unwrap_or(80.0);
-                                    let y_offset = mv.y_offset.unwrap_or(10.0);
+                                    let (auto_scale, auto_offset, inset_max) = crate::gui::dialogs::compute_inset_auto_y(
+                                        self.project.ppm.as_ref(),
+                                        self.project.spectrum_real.as_ref(),
+                                        p_low,
+                                        p_high,
+                                        self.project.max_intensity(),
+                                    );
+
+                                    let auto_y = mv.y_scale.is_none();
+                                    let y_scale = if auto_y { auto_scale } else { mv.y_scale.unwrap_or(auto_scale) };
+                                    let y_offset = if auto_y { auto_offset } else { mv.y_offset.unwrap_or(auto_offset) };
 
                                     self.multiview_yscale_dialog_state = MultiviewYScaleDialogState {
                                         open: true,
                                         target_id: Some(mv.id.clone()),
-                                        target_label: format!("Inset: {:.3} ~ {:.3} ppm", mv.src_x_max, mv.src_x_min),
-                                        auto_y: mv.y_scale.is_none(),
+                                        auto_y,
+                                        src_x_min: p_low,
+                                        src_x_max: p_high,
                                         max_peak_intensity: inset_max,
                                         y_scale,
                                         y_offset,
