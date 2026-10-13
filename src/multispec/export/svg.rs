@@ -16,7 +16,7 @@ fn html_escape(s: &str) -> String {
 pub fn export_multispec_svg(
     state: &MultiSpecState,
     print_settings: &MultiSpecPrintSettings,
-    _style: &PrintStyleSettings,
+    style: &PrintStyleSettings,
     ppm_range: (f64, f64),
 ) -> String {
     let (total_w, total_h) = match print_settings.orientation {
@@ -184,10 +184,11 @@ pub fn export_multispec_svg(
 
             if !points_str.is_empty() {
                 svg.push_str(&format!(
-                    r##"<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.0" />
+                    r##"<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="{w:.2}" />
 "##,
                     pts = points_str.trim_end(),
                     color = color_hex,
+                    w = style.main_spectrum.line_width,
                 ));
             }
         }
@@ -225,10 +226,11 @@ pub fn export_multispec_svg(
                             (it.color[2] as f64 * 0.85) as u8,
                         );
                         svg.push_str(&format!(
-                            r##"<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="0.9" />
+                            r##"<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="{w:.2}" />
 "##,
                             pts = intg_pts.trim_end(),
                             color = intg_color,
+                            w = style.main_spectrum.integral_width,
                         ));
 
                         // 積分値ラベル (曲線の上部に時計回り90度回転で配置)

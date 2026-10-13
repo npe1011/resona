@@ -53,11 +53,11 @@ pub struct PrintSpectrumStyle {
 impl Default for PrintSpectrumStyle {
     fn default() -> Self {
         Self {
-            line_width: 0.85,
+            line_width: 0.40,
             line_color: RgbColor::new(0, 0, 0),
-            integral_width: 1.3,
+            integral_width: 0.60,
             integral_color: RgbColor::new(225, 29, 72),
-            peak_lead_width: 0.55,
+            peak_lead_width: 0.30,
             peak_lead_color: RgbColor::new(112, 117, 122),
         }
     }
@@ -77,11 +77,11 @@ pub struct PrintMultiviewStyle {
 impl Default for PrintMultiviewStyle {
     fn default() -> Self {
         Self {
-            line_width: 0.85,
+            line_width: 0.40,
             line_color: RgbColor::new(0, 0, 0),
-            integral_width: 1.3,
+            integral_width: 0.60,
             integral_color: RgbColor::new(217, 27, 66),
-            peak_lead_width: 0.50,
+            peak_lead_width: 0.30,
             peak_lead_color: RgbColor::new(112, 117, 122),
         }
     }
@@ -188,7 +188,7 @@ pub fn show_print_style_dialog(
                     .num_columns(3)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Spectrum line:");
+                        ui.label("Spectrum line");
                         ui.add(
                             DragValue::new(&mut settings.main_spectrum.line_width)
                                 .speed(0.05)
@@ -198,7 +198,7 @@ pub fn show_print_style_dialog(
                         color_picker(ui, &mut settings.main_spectrum.line_color);
                         ui.end_row();
 
-                        ui.label("Integral curve:");
+                        ui.label("Integral curve");
                         ui.add(
                             DragValue::new(&mut settings.main_spectrum.integral_width)
                                 .speed(0.05)
@@ -208,7 +208,7 @@ pub fn show_print_style_dialog(
                         color_picker(ui, &mut settings.main_spectrum.integral_color);
                         ui.end_row();
 
-                        ui.label("Peak leader line:");
+                        ui.label("Peak leader line");
                         ui.add(
                             DragValue::new(&mut settings.main_spectrum.peak_lead_width)
                                 .speed(0.05)
@@ -229,7 +229,7 @@ pub fn show_print_style_dialog(
                     .num_columns(3)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Spectrum line:");
+                        ui.label("Spectrum line");
                         ui.add(
                             DragValue::new(&mut settings.multiview.line_width)
                                 .speed(0.05)
@@ -239,7 +239,7 @@ pub fn show_print_style_dialog(
                         color_picker(ui, &mut settings.multiview.line_color);
                         ui.end_row();
 
-                        ui.label("Integral curve:");
+                        ui.label("Integral curve");
                         ui.add(
                             DragValue::new(&mut settings.multiview.integral_width)
                                 .speed(0.05)
@@ -249,7 +249,7 @@ pub fn show_print_style_dialog(
                         color_picker(ui, &mut settings.multiview.integral_color);
                         ui.end_row();
 
-                        ui.label("Peak leader line:");
+                        ui.label("Peak leader line");
                         ui.add(
                             DragValue::new(&mut settings.multiview.peak_lead_width)
                                 .speed(0.05)
@@ -362,15 +362,15 @@ mod tests {
     #[test]
     fn test_print_style_settings_default() {
         let def = PrintStyleSettings::default();
-        assert!((def.main_spectrum.line_width - 0.85).abs() < 1e-5);
+        assert!((def.main_spectrum.line_width - 0.40).abs() < 1e-5);
         assert_eq!(def.main_spectrum.line_color, RgbColor::new(0, 0, 0));
-        assert!((def.main_spectrum.integral_width - 1.3).abs() < 1e-5);
-        assert!((def.main_spectrum.peak_lead_width - 0.55).abs() < 1e-5);
+        assert!((def.main_spectrum.integral_width - 0.60).abs() < 1e-5);
+        assert!((def.main_spectrum.peak_lead_width - 0.30).abs() < 1e-5);
 
-        assert!((def.multiview.line_width - 0.85).abs() < 1e-5);
+        assert!((def.multiview.line_width - 0.40).abs() < 1e-5);
         assert_eq!(def.multiview.line_color, RgbColor::new(0, 0, 0));
-        assert!((def.multiview.integral_width - 1.3).abs() < 1e-5);
-        assert!((def.multiview.peak_lead_width - 0.5).abs() < 1e-5);
+        assert!((def.multiview.integral_width - 0.60).abs() < 1e-5);
+        assert!((def.multiview.peak_lead_width - 0.30).abs() < 1e-5);
     }
 
     #[test]
