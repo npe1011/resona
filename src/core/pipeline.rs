@@ -5,14 +5,16 @@ use serde::{Deserialize, Serialize};
 use crate::core::error::Result;
 use crate::core::io::{AcquisitionMetadata, RawFid};
 use crate::core::signal::{
-    apply_phase_and_extract_real, apply_window, apply_zerofill, compute_ppm_scale, forward_fft,
-    remove_fractional_delay, WindowFunction,
+    apply_phase_and_extract_real, apply_window_with_trapezoid, apply_zerofill,
+    compute_ppm_scale, forward_fft, remove_fractional_delay, TrapezoidDecay, WindowFunction,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FtSettings {
     #[serde(default)]
     pub window: WindowFunction,
+    #[serde(default)]
+    pub trapezoid: TrapezoidDecay,
     #[serde(default = "default_zf")]
     pub zf_factor: usize,
     #[serde(default = "default_true")]
@@ -31,6 +33,7 @@ impl Default for FtSettings {
     fn default() -> Self {
         Self {
             window: WindowFunction::Exponential { lb: 0.12 },
+            trapezoid: TrapezoidDecay::default(),
             zf_factor: 2,
             remove_digital_filter: true,
         }
@@ -72,8 +75,13 @@ pub fn process_raw_fid(
         }
     }
 
-    // 2. 窓関数 (Apodization)
-    fid = apply_window(&fid, &ft_settings.window, raw_fid.metadata.spectral_width_hz);
+    // 2. 窓関数 (Apodization) + 末尾減衰 (Trapezoid)
+    fid = apply_window_with_trapezoid(
+        &fid,
+        &ft_settings.window,
+        &ft_settings.trapezoid,
+        raw_fid.metadata.spectral_width_hz,
+    );
 
     // 3. ゼロフィリング (Zero-filling)
     let target_size = raw_fid.metadata.points * ft_settings.zf_factor.max(1);

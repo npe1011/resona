@@ -27,7 +27,8 @@ pub use project::{
     DisplaySettings, FullAutoReport, HistoryManager, MultiviewItem, Project, ProjectState, RectF,
 };
 pub use signal::{
-    apply_phase_and_extract_real, apply_phase_complex, apply_window, apply_zerofill,
-    calc_ppm_ticks, compute_ppm_scale, compute_window_curve, find_highest_peak_in_range,
-    forward_fft, remove_fractional_delay, WindowFunction,
+    apply_phase_and_extract_real, apply_phase_complex, apply_window, apply_window_with_trapezoid,
+    apply_zerofill, calc_ppm_ticks, compute_ppm_scale, compute_total_window_curve,
+    compute_window_curve, find_highest_peak_in_range, forward_fft, remove_fractional_delay,
+    TrapezoidDecay, WindowFunction,
 };

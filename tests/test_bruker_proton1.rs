@@ -66,6 +66,7 @@ fn test_bruker_proton1_pipeline_and_project() {
         window: WindowFunction::Exponential { lb: 0.3 },
         zf_factor: 2,
         remove_digital_filter: true,
+        ..Default::default()
     };
 
     let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0).expect("Processing failed");

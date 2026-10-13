@@ -13,5 +13,8 @@ pub use phase::{
     find_max_magnitude_index,
 };
 pub use scale::{calc_ppm_ticks, compute_ppm_scale};
-pub use window::{apply_window, compute_window_curve, WindowFunction};
+pub use window::{
+    apply_window, apply_window_with_trapezoid, compute_total_window_curve,
+    compute_trapezoid_curve, compute_window_curve, TrapezoidDecay, WindowFunction,
+};
 pub use zerofill::apply_zerofill;

@@ -14,6 +14,7 @@ fn test_als_proton1_performance_and_result() {
         window: WindowFunction::Exponential { lb: 0.12 },
         zf_factor: 4,
         remove_digital_filter: true,
+        ..Default::default()
     };
     let processed = process_raw_fid(&raw_fid, &settings, 35.0, -15.0).expect("Process failed");
 

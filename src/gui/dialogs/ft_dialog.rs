@@ -6,9 +6,10 @@ use ndarray::Array1;
 use num_complex::Complex64;
 
 use crate::core::{
-    apply_phase_and_extract_real, autophase_acme, compute_window_curve, process_raw_fid,
-    AcquisitionMetadata, FtSettings, RawFid, WindowFunction,
+    apply_phase_and_extract_real, autophase_acme, compute_total_window_curve, process_raw_fid,
+    AcquisitionMetadata, FtSettings, RawFid, TrapezoidDecay, WindowFunction,
 };
+use crate::gui::panels::action_bar::continuous_step_button;
 
 pub struct FtDialogState {
     pub open: bool,
@@ -45,6 +46,7 @@ fn paint_fid_preview(
     fid: &Array1<Complex64>,
     metadata: &AcquisitionMetadata,
     window: &WindowFunction,
+    trapezoid: &TrapezoidDecay,
 ) {
     let painter = ui.painter_at(rect);
 
@@ -129,8 +131,8 @@ fn paint_fid_preview(
         ));
     }
 
-    // 2. Window関数の描画 (FIDのグラフに合わせて赤線で描画)
-    let win_curve = compute_window_curve(window, n, metadata.spectral_width_hz);
+    // 2. Window関数の描画 (Trapezoid末尾減衰を含む合成窓関数曲線を赤線で描画)
+    let win_curve = compute_total_window_curve(window, trapezoid, n, metadata.spectral_width_hz);
     let n_steps = (plot_rect.width() as usize).clamp(100, 800);
     let mut win_points: Vec<Pos2> = Vec::with_capacity(n_steps + 1);
     let mut win_points_lower: Vec<Pos2> = Vec::with_capacity(n_steps + 1);
@@ -181,12 +183,15 @@ fn paint_fid_preview(
         Color32::from_rgb(108, 117, 125),
     );
 
-    // 凡例バッジ (赤色: Window Function)
-    let win_desc = match window {
+    // 凡例バッジ (赤色: Window Function + Trapezoid)
+    let mut win_desc = match window {
         WindowFunction::None => "Window: None".to_string(),
         WindowFunction::Exponential { lb } => format!("Window: EM (LB={:.2} Hz)", lb),
-        WindowFunction::Gaussian { g1, g2, g3 } => format!("Window: GM (g1={:.1}, g2={:.1}, g3={:.2})", g1, g2, g3),
+        WindowFunction::Gaussian { g1, g2, g3 } => format!("Window: Lorentz-to-Gauss (g1={:.1}, g2={:.1}, g3={:.2})", g1, g2, g3),
     };
+    if trapezoid.enabled {
+        win_desc.push_str(&format!(" + Trap({:.0}%)", trapezoid.start_percent));
+    }
     painter.text(
         Pos2::new(plot_rect.max.x - 4.0, plot_rect.max.y - 4.0),
         Align2::RIGHT_BOTTOM,
@@ -380,7 +385,7 @@ pub fn show_ft_dialog(
                     // 1. 上段: FID プレビュー
                     let (fid_rect, _) = ui.allocate_exact_size(vec2(graph_w, half_h), egui::Sense::hover());
                     if let (Some(fid), Some(meta)) = (fid_raw, metadata) {
-                        paint_fid_preview(ui, fid_rect, fid, meta, &state.settings.window);
+                        paint_fid_preview(ui, fid_rect, fid, meta, &state.settings.window, &state.settings.trapezoid);
                     } else {
                         ui.painter().rect_filled(fid_rect, 3.0, Color32::from_rgb(248, 249, 250));
                         ui.painter().text(
@@ -434,7 +439,7 @@ pub fn show_ft_dialog(
                             if ui.selectable_label(is_em, "Exp (EM)").clicked() {
                                 state.settings.window = WindowFunction::Exponential { lb: 0.3 };
                             }
-                            if ui.selectable_label(is_gm, "Gauss (GM)").clicked() {
+                            if ui.selectable_label(is_gm, "Lorentz-to-Gauss").clicked() {
                                 state.settings.window = WindowFunction::Gaussian { g1: 0.0, g2: 2.0, g3: 0.0 };
                             }
                         });
@@ -446,28 +451,84 @@ pub fn show_ft_dialog(
                                     ui.label("LB (Hz)");
                                     ui.add(DragValue::new(lb).speed(0.05).range(0.01..=50.0));
                                 });
-                                ui.add(Slider::new(lb, 0.01..=20.0).show_value(false));
                             }
                             WindowFunction::Gaussian { g1, g2, g3 } => {
                                 ui.horizontal(|ui| {
                                     ui.label("g1 (Hz)");
                                     ui.add(DragValue::new(g1).speed(0.05).range(0.0..=20.0));
                                 });
-                                ui.add(Slider::new(g1, 0.0..=10.0).show_value(false));
+                                ui.horizontal(|ui| {
+                                    let dec = continuous_step_button(ui, "ft_g1_dec", "<", 0.1, 0.5, 5.0, 1.0);
+                                    if dec > 0.0 {
+                                        *g1 = (*g1 - dec).clamp(0.0, 20.0);
+                                    }
+                                    ui.add(Slider::new(g1, 0.0..=10.0).show_value(false));
+                                    let inc = continuous_step_button(ui, "ft_g1_inc", ">", 0.1, 0.5, 5.0, 1.0);
+                                    if inc > 0.0 {
+                                        *g1 = (*g1 + inc).clamp(0.0, 20.0);
+                                    }
+                                });
 
                                 ui.horizontal(|ui| {
                                     ui.label("g2 (Hz)");
                                     ui.add(DragValue::new(g2).speed(0.05).range(0.01..=50.0));
                                 });
-                                ui.add(Slider::new(g2, 0.1..=20.0).show_value(false));
+                                ui.horizontal(|ui| {
+                                    let dec = continuous_step_button(ui, "ft_g2_dec", "<", 0.1, 0.5, 5.0, 1.0);
+                                    if dec > 0.0 {
+                                        *g2 = (*g2 - dec).clamp(0.01, 50.0);
+                                    }
+                                    ui.add(Slider::new(g2, 0.1..=20.0).show_value(false));
+                                    let inc = continuous_step_button(ui, "ft_g2_inc", ">", 0.1, 0.5, 5.0, 1.0);
+                                    if inc > 0.0 {
+                                        *g2 = (*g2 + inc).clamp(0.01, 50.0);
+                                    }
+                                });
 
                                 ui.horizontal(|ui| {
                                     ui.label("g3");
                                     ui.add(DragValue::new(g3).speed(0.01).range(0.0..=1.0));
                                 });
-                                ui.add(Slider::new(g3, 0.0..=1.0).show_value(false));
+                                ui.horizontal(|ui| {
+                                    let dec = continuous_step_button(ui, "ft_g3_dec", "<", 0.02, 0.1, 1.0, 1.0);
+                                    if dec > 0.0 {
+                                        *g3 = (*g3 - dec).clamp(0.0, 1.0);
+                                    }
+                                    ui.add(Slider::new(g3, 0.0..=1.0).show_value(false));
+                                    let inc = continuous_step_button(ui, "ft_g3_inc", ">", 0.02, 0.1, 1.0, 1.0);
+                                    if inc > 0.0 {
+                                        *g3 = (*g3 + inc).clamp(0.0, 1.0);
+                                    }
+                                });
                             }
                             WindowFunction::None => {}
+                        }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(2.0);
+
+                        ui.checkbox(&mut state.settings.trapezoid.enabled, "Trapezoid (End Decay)");
+                        if state.settings.trapezoid.enabled {
+                            ui.horizontal(|ui| {
+                                ui.label("Start (%)");
+                                ui.add(
+                                    DragValue::new(&mut state.settings.trapezoid.start_percent)
+                                        .speed(0.5)
+                                        .range(10.0..=99.9)
+                                        .suffix("%"),
+                                );
+                                let trap_dec = continuous_step_button(ui, "ft_trap_dec", "<", 1.0, 5.0, 20.0, 1.0);
+                                if trap_dec > 0.0 {
+                                    state.settings.trapezoid.start_percent =
+                                        (state.settings.trapezoid.start_percent - trap_dec).clamp(10.0, 99.9);
+                                }
+                                let trap_inc = continuous_step_button(ui, "ft_trap_inc", ">", 1.0, 5.0, 20.0, 1.0);
+                                if trap_inc > 0.0 {
+                                    state.settings.trapezoid.start_percent =
+                                        (state.settings.trapezoid.start_percent + trap_inc).clamp(10.0, 99.9);
+                                }
+                            });
                         }
                     });
 

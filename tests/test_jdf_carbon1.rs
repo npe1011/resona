@@ -32,6 +32,7 @@ fn test_carbon1_pipeline() {
 
     let settings = FtSettings {
         window: WindowFunction::Exponential { lb: 0.12 },
+        trapezoid: resona::TrapezoidDecay { enabled: false, start_percent: 80.0 },
         zf_factor: 4,
         remove_digital_filter: true,
     };

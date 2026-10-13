@@ -178,10 +178,15 @@ pub fn generate_complete_page_svg_with_style(
             let eff_points = (metadata.points * ft_settings.zf_factor).max(1);
             let dig_res = format!("{:.4} Hz/pt", metadata.spectral_width_hz / (eff_points as f64));
             let ft_rows = [
-                ("Window", match ft_settings.window {
+                ("Win.Func. 1", match ft_settings.window {
                     crate::core::WindowFunction::None => "None".to_string(),
                     crate::core::WindowFunction::Exponential { lb } => format!("Exp ({} Hz)", lb),
-                    crate::core::WindowFunction::Gaussian { g1, g2, g3 } => format!("Gauss ({},{},{})", g1, g2, g3),
+                    crate::core::WindowFunction::Gaussian { g1, g2, g3 } => format!("Lorentz-to-Gauss ({},{},{})", g1, g2, g3),
+                }),
+                ("Win.Func. 2", if ft_settings.trapezoid.enabled {
+                    format!("Trapezoid ({:.0}%)", ft_settings.trapezoid.start_percent)
+                } else {
+                    "None".to_string()
                 }),
                 ("Zero Fill", format!("{}x", ft_settings.zf_factor)),
                 ("Digital Res.", dig_res),

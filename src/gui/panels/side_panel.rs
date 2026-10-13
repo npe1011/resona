@@ -41,10 +41,15 @@ pub fn show_side_panel(
         ui.label(RichText::new("FT Settings").strong().size(11.5).color(Color32::from_rgb(70, 75, 80)));
         if has_data {
             render_zebra_table(ui, "ft_table", &[
-                ("Window Type", match ft_settings.window {
+                ("Win.Func. 1", match ft_settings.window {
                     WindowFunction::None => "None".to_string(),
                     WindowFunction::Exponential { lb } => format!("Exponential ({} Hz)", lb),
-                    WindowFunction::Gaussian { g1, g2, g3 } => format!("Gaussian (g1={}, g2={}, g3={})", g1, g2, g3),
+                    WindowFunction::Gaussian { g1, g2, g3 } => format!("Lorentz-to-Gauss (g1={}, g2={}, g3={})", g1, g2, g3),
+                }),
+                ("Win.Func. 2", if ft_settings.trapezoid.enabled {
+                    format!("Trapezoid ({:.0}%)", ft_settings.trapezoid.start_percent)
+                } else {
+                    "None".to_string()
                 }),
                 ("Zero Fill", format!("{}x", ft_settings.zf_factor)),
                 ("Digital Resolution", {
@@ -56,7 +61,8 @@ pub fn show_side_panel(
             ]);
         } else {
             render_zebra_table(ui, "ft_table", &[
-                ("Window Type", "-".to_string()),
+                ("Win.Func. 1", "-".to_string()),
+                ("Win.Func. 2", "-".to_string()),
                 ("Zero Fill", "-".to_string()),
                 ("Digital Resolution", "-".to_string()),
                 ("Group Delay", "-".to_string()),

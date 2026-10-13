@@ -34,6 +34,7 @@ fn test_proton2_ft_baseline_smoothness() {
         window: WindowFunction::Exponential { lb: 0.12 },
         zf_factor: 2,
         remove_digital_filter: true,
+        ..Default::default()
     };
 
     let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0)
@@ -69,6 +70,7 @@ fn test_proton1_ft_runs_successfully() {
         window: WindowFunction::Exponential { lb: 0.12 },
         zf_factor: 2,
         remove_digital_filter: true,
+        ..Default::default()
     };
 
     let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0)

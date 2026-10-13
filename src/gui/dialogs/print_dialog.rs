@@ -1035,10 +1035,15 @@ fn render_realtime_preview(
                 let eff_points = (metadata.points * ft_settings.zf_factor).max(1);
                 let dig_res = format!("{:.4} Hz/pt", metadata.spectral_width_hz / (eff_points as f64));
                 let ft_items = [
-                    format!("Win: {}", match ft_settings.window {
+                    format!("Win.Func. 1: {}", match ft_settings.window {
                         crate::core::WindowFunction::None => "None".to_string(),
                         crate::core::WindowFunction::Exponential { lb } => format!("Exp ({}Hz)", lb),
-                        crate::core::WindowFunction::Gaussian { g1, g2, g3 } => format!("G({},{},{})", g1, g2, g3),
+                        crate::core::WindowFunction::Gaussian { g1, g2, g3 } => format!("LG({},{},{})", g1, g2, g3),
+                    }),
+                    format!("Win.Func. 2: {}", if ft_settings.trapezoid.enabled {
+                        format!("Trap ({:.0}%)", ft_settings.trapezoid.start_percent)
+                    } else {
+                        "None".to_string()
                     }),
                     format!("ZF: {}x", ft_settings.zf_factor),
                     format!("Res: {}", dig_res),

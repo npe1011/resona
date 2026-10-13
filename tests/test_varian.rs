@@ -191,6 +191,7 @@ fn test_varian_fft_processing() {
         window: WindowFunction::Exponential { lb: 0.5 },
         zf_factor: 2,
         remove_digital_filter: false, // Varian にはデジタルフィルタ遅延なし
+        ..Default::default()
     };
 
     let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0).expect("Processing failed");

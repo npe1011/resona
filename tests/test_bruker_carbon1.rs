@@ -68,6 +68,7 @@ fn test_bruker_carbon1_pipeline_and_cdcl3_peak() {
         window: WindowFunction::Exponential { lb: 1.0 },
         zf_factor: 1,
         remove_digital_filter: true,
+        ..Default::default()
     };
 
     let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0).expect("Processing failed");

@@ -27,7 +27,7 @@ pub use core::{
     signal::{
         apply_phase_and_extract_real, apply_phase_complex, apply_window, apply_zerofill,
         compute_ppm_scale, compute_window_curve, forward_fft, remove_fractional_delay,
-        WindowFunction,
+        TrapezoidDecay, WindowFunction,
     },
 };
 pub use gui::ResonaApp;
