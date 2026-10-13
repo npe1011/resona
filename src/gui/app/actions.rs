@@ -1,6 +1,58 @@
 use std::path::{Path, PathBuf};
 use egui::{Context, Pos2, Rect};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadedFormat {
+    Jeol,
+    Rsn,
+    Bruker,
+    Varian,
+}
+
+/// パス（ファイルまたはディレクトリ）から対応フォーマットを自動判定する
+pub fn detect_format(path: &Path) -> Option<LoadedFormat> {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+
+    if ext == "jdf" {
+        return Some(LoadedFormat::Jeol);
+    }
+    if ext == "rsn" {
+        return Some(LoadedFormat::Rsn);
+    }
+
+    if path.is_dir() {
+        if path.join("procpar").is_file() && path.join("fid").is_file() {
+            return Some(LoadedFormat::Varian);
+        }
+        if path.join("acqus").is_file()
+            || path.join("acqu").is_file()
+            || path.join("1").join("fid").is_file()
+            || path.join("1").join("acqus").is_file()
+            || path.join("fid").is_file()
+        {
+            return Some(LoadedFormat::Bruker);
+        }
+    } else {
+        if file_name == "procpar" {
+            return Some(LoadedFormat::Varian);
+        }
+        if file_name == "fid" {
+            let parent = path.parent().unwrap_or(path);
+            if parent.join("procpar").is_file() {
+                return Some(LoadedFormat::Varian);
+            }
+            if parent.join("acqus").is_file() || parent.join("acqu").is_file() {
+                return Some(LoadedFormat::Bruker);
+            }
+        }
+        if file_name == "acqus" || file_name == "acqu" || file_name == "audita.txt" || file_name == "ser" {
+            return Some(LoadedFormat::Bruker);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub enum FileDialogResult {
     OpenFile(PathBuf),
@@ -181,59 +233,67 @@ impl ResonaApp {
             p.to_path_buf()
         };
 
-        let ext = abs_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        let file_name = abs_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        let is_bruker_file = file_name == "fid"
-            || file_name == "ser"
-            || file_name == "acqus"
-            || file_name == "acqu"
-            || file_name == "audita.txt";
-        let is_dir = abs_path.is_dir();
+        let format = match detect_format(&abs_path) {
+            Some(fmt) => fmt,
+            None => {
+                self.status_message = format!("Unsupported file format: {}", abs_path.display());
+                return;
+            }
+        };
 
-        let is_raw_data = ext == "jdf" || is_bruker_file || is_dir;
+        let is_raw_data = format != LoadedFormat::Rsn;
 
-        let res = if ext == "jdf" {
-            self.project.load_jdf(&abs_path, None)
-        } else if ext == "rsn" {
-            self.project.load_rsn(&abs_path)
-        } else if is_bruker_file || is_dir || abs_path.join("fid").is_file() || abs_path.join("1/fid").is_file() {
-            self.project.load_bruker(&abs_path, None)
-        } else {
-            self.status_message = format!("Unsupported file format: {}", abs_path.display());
-            return;
+        let res = match format {
+            LoadedFormat::Jeol => self.project.load_jdf(&abs_path, None),
+            LoadedFormat::Rsn => self.project.load_rsn(&abs_path),
+            LoadedFormat::Bruker => self.project.load_bruker(&abs_path, None),
+            LoadedFormat::Varian => self.project.load_varian(&abs_path, None),
         };
 
         match res {
             Ok(_) => {
                 // ウィンドウタイトル用の current_file_path の決定:
-                // 生データ Bruker の場合はディレクトリパスを保持
-                let current_path = if is_bruker_file {
-                    let parent = abs_path.parent().unwrap_or(&abs_path);
-                    let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    if !parent_name.is_empty() && parent_name.chars().all(|c| c.is_ascii_digit()) {
-                        parent.parent().unwrap_or(parent).to_path_buf()
-                    } else {
-                        parent.to_path_buf()
+                // 生データ (Bruker / Varian) の場合はディレクトリパスを保持
+                let current_path = match format {
+                    LoadedFormat::Bruker => {
+                        if abs_path.is_file() {
+                            let parent = abs_path.parent().unwrap_or(&abs_path);
+                            let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                            if !parent_name.is_empty() && parent_name.chars().all(|c| c.is_ascii_digit()) {
+                                parent.parent().unwrap_or(parent).to_path_buf()
+                            } else {
+                                parent.to_path_buf()
+                            }
+                        } else {
+                            let dir_name = abs_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                            if !dir_name.is_empty() && dir_name.chars().all(|c| c.is_ascii_digit()) {
+                                abs_path.parent().unwrap_or(&abs_path).to_path_buf()
+                            } else {
+                                abs_path.clone()
+                            }
+                        }
                     }
-                } else if is_dir {
-                    let dir_name = abs_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    if !dir_name.is_empty() && dir_name.chars().all(|c| c.is_ascii_digit()) {
-                        abs_path.parent().unwrap_or(&abs_path).to_path_buf()
-                    } else {
-                        abs_path.clone()
+                    LoadedFormat::Varian => {
+                        if abs_path.is_file() {
+                            abs_path.parent().unwrap_or(&abs_path).to_path_buf()
+                        } else {
+                            abs_path.clone()
+                        }
                     }
-                } else {
-                    abs_path.clone()
+                    LoadedFormat::Jeol | LoadedFormat::Rsn => abs_path.clone(),
                 };
                 self.current_file_path = Some(current_path.clone());
 
                 // 保存先初期ディレクトリ current_directory:
-                // Bruker の場合は「データディレクトリの親ディレクトリ」
+                // Bruker / Varian の場合は「データディレクトリの親ディレクトリ」
                 // JEOL や RSN の場合は「ファイルの親ディレクトリ」
-                if is_bruker_file || is_dir {
-                    self.current_directory = current_path.parent().map(|p| p.to_path_buf());
-                } else if let Some(parent) = abs_path.parent() {
-                    self.current_directory = Some(parent.to_path_buf());
+                match format {
+                    LoadedFormat::Bruker | LoadedFormat::Varian => {
+                        self.current_directory = current_path.parent().map(|p| p.to_path_buf());
+                    }
+                    LoadedFormat::Jeol | LoadedFormat::Rsn => {
+                        self.current_directory = abs_path.parent().map(|p| p.to_path_buf());
+                    }
                 }
                 self.save_app_settings();
 
@@ -245,7 +305,7 @@ impl ResonaApp {
                 self.zoom_history.clear();
                 self.reset_zoom();
 
-                if ext == "rsn" {
+                if format == LoadedFormat::Rsn {
                     let ds = &self.project.state.display_settings;
                     if let (Some(x_min), Some(x_max)) = (ds.x_min, ds.x_max) {
                         if let Some(ref mut t) = self.transform {
@@ -714,11 +774,12 @@ impl ResonaApp {
         self.is_file_dialog_open.store(true, std::sync::atomic::Ordering::SeqCst);
 
         let mut dialog = rfd::FileDialog::new()
-            // All: JEOL (*.jdf), Resona (*.rsn), および Bruker (fid, acqus, acqu, ser) に厳密に限定
-            .add_filter("All", &["jdf;*.rsn;fid;acqus;acqu;ser"])
+            // All: JEOL (*.jdf), Resona (*.rsn), Bruker (fid, acqus, acqu, ser), Varian (fid, procpar)
+            .add_filter("All", &["jdf;*.rsn;fid;acqus;acqu;ser;procpar"])
             .add_filter("JEOL Raw FID (*.jdf)", &["jdf"])
             .add_filter("Resona Project (*.rsn)", &["rsn"])
-            .add_filter("Bruker Raw FID (fid, acqus)", &["bruker;fid;acqus;acqu;ser"]);
+            .add_filter("Bruker Raw FID (fid, acqus)", &["bruker;fid;acqus;acqu;ser"])
+            .add_filter("Varian Raw FID (fid, procpar)", &["varian;fid;procpar"]);
 
         if let Some(ref dir) = self.current_directory {
             let abs_dir = if dir.is_relative() {
@@ -745,7 +806,7 @@ impl ResonaApp {
         });
     }
 
-    /// 外部ダイアログ経由でフォルダを開く (Brukerデータセット等) - バックグラウンドスレッドで実行
+    /// 外部ダイアログ経由でフォルダを開く (Bruker/Varianデータセット等) - バックグラウンドスレッドで実行
     pub fn open_folder_dialog(&mut self, ctx: &Context) {
         if self.is_file_dialog_open.load(std::sync::atomic::Ordering::SeqCst) {
             return;
@@ -804,14 +865,15 @@ impl ResonaApp {
             dialog = dialog.set_directory(abs_dir);
         }
 
-        // ファイル名の初期値: 元データと同じ名前 (Brukerの名前はディレクトリ名)
+        // ファイル名の初期値: 元データと同じ名前 (Bruker/Varianの名前はディレクトリ名)
         if let Some(ref cur) = self.current_file_path {
             let base_name = if cur.is_dir() {
                 cur.file_name().and_then(|s| s.to_str()).unwrap_or("spectrum")
             } else {
                 cur.file_stem().and_then(|s| s.to_str()).unwrap_or("spectrum")
             };
-            dialog = dialog.set_file_name(format!("{}.rsn", base_name));
+            let cleaned_name = base_name.strip_suffix(".fid").unwrap_or(base_name);
+            dialog = dialog.set_file_name(format!("{}.rsn", cleaned_name));
         }
 
         let is_open_flag = std::sync::Arc::clone(&self.is_file_dialog_open);

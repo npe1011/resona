@@ -5,6 +5,7 @@ Cargo.lock
 # Test data & raw NMR data
 /test_data/
 /doc-dev/
+/resource/
 *.jdf
 *.rsn
 *.npy

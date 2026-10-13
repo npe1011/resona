@@ -15,7 +15,10 @@ pub use core::{
         baseline_polynomial, BaselineMethod,
     },
     error::{ResonaError, Result},
-    io::{AcquisitionMetadata, BrukerReader, JeolJdfReader, NmrDataSource, RawFid},
+    io::{
+        AcquisitionMetadata, BrukerReader, JeolJdfReader, NmrDataSource, RawFid,
+        VarianReader, resolve_varian_paths,
+    },
     pipeline::{process_raw_fid, FtSettings, ProcessedSpectrum},
     project::{
         DisplaySettings, FullAutoReport, HistoryManager, MultiviewItem, Project, ProjectState,
