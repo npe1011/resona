@@ -432,24 +432,33 @@ impl ResonaApp {
             }
             let (p_min, p_max) = (ppm[ppm.len() - 1], ppm[0]); // ppmは通常降順
             let mut y_min = f64::MAX;
-            let mut y_max = f64::MIN;
             for &y in spec.iter() {
                 if y < y_min { y_min = y; }
-                if y > y_max { y_max = y; }
             }
-            if y_min >= y_max {
+            if y_min == f64::MAX {
                 y_min = 0.0;
-                y_max = 1.0;
             }
-            let y_span = y_max - y_min;
-            let eff_y_min = y_min - y_span * 0.05;
-            let eff_y_max = y_max + y_span * 0.1;
+
+            let max_intensity = self.project.max_intensity().max(1e-6);
+            let min_val = y_min.min(0.0);
+            let total_span = (max_intensity - min_val).max(1e-6);
+
+            // スペクトル全体が上下に対称な余白 (上下に約 7.5% ずつ) を持って綺麗に収まる Scale / Offset を算出
+            let scale = (max_intensity / total_span * 85.0).clamp(10.0, 1000.0);
+            let offset = ((-min_val) / total_span * 85.0 + 7.5).clamp(0.0, 1000.0);
+            self.y_scale = scale;
+            self.y_offset = offset;
+
+            let delta_y = max_intensity * (100.0 / self.y_scale.max(1.0));
+            let eff_y_min = -delta_y * (self.y_offset / 100.0);
+            let eff_y_max = delta_y * (1.0 - (self.y_offset / 100.0));
 
             if let Some(ref mut t) = self.transform {
                 t.ppm_min = p_min.min(p_max);
                 t.ppm_max = p_min.max(p_max);
                 t.y_min = eff_y_min;
                 t.y_max = eff_y_max;
+                self.last_transform_y = Some((eff_y_min, eff_y_max));
 
                 let span = (t.ppm_max - t.ppm_min).abs();
                 let is_13c = self.project.metadata.nucleus.to_uppercase().contains("13C")
@@ -939,6 +948,11 @@ impl ResonaApp {
                         t.ppm_max = p_max;
                         t.y_min = y_min;
                         t.y_max = y_max;
+                        self.last_transform_y = Some((y_min, y_max));
+                        let max_intensity = self.project.max_intensity().max(1e-6);
+                        let delta_y = (y_max - y_min).max(1e-6);
+                        self.y_scale = (100.0 * max_intensity / delta_y).clamp(1.0, 10000.0);
+                        self.y_offset = ((-y_min) / delta_y * 100.0).clamp(-1000.0, 10000.0);
                     }
                 }
             }

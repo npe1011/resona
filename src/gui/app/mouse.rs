@@ -217,6 +217,10 @@ impl ResonaApp {
                         t.y_min = y_min;
                         t.y_max = y_max;
                         self.last_transform_y = Some((t.y_min, t.y_max));
+                        let max_intensity = self.project.max_intensity().max(1e-6);
+                        let delta_y = (y_max - y_min).max(1e-6);
+                        self.y_scale = (100.0 * max_intensity / delta_y).clamp(1.0, 10000.0);
+                        self.y_offset = ((-y_min) / delta_y * 100.0).clamp(-1000.0, 10000.0);
                         self.status_message = "Zoom undone (double-click)".to_string();
                     } else {
                         do_reset_zoom = true;
@@ -235,6 +239,10 @@ impl ResonaApp {
                             t.y_min = y_min;
                             t.y_max = y_max;
                             self.last_transform_y = Some((t.y_min, t.y_max));
+                            let max_intensity = self.project.max_intensity().max(1e-6);
+                            let delta_y = (y_max - y_min).max(1e-6);
+                            self.y_scale = (100.0 * max_intensity / delta_y).clamp(1.0, 10000.0);
+                            self.y_offset = ((-y_min) / delta_y * 100.0).clamp(-1000.0, 10000.0);
                             self.status_message = "Zoom undone (Backspace)".to_string();
                         } else {
                             do_reset_zoom = true;

@@ -219,4 +219,34 @@ mod tests {
         // 末尾は 0.0
         assert!((total[100] - 0.0).abs() < 1e-12);
     }
+
+    #[test]
+    fn test_total_window_product_combinations() {
+        let n = 101;
+        let sw_hz = 1000.0;
+
+        // 1. メイン窓関数 None + Trapezoid 有効 -> 80%まで1.0、末尾0.0
+        let win_none = WindowFunction::None;
+        let trap_on = TrapezoidDecay {
+            enabled: true,
+            start_percent: 80.0,
+        };
+        let total_none_trap = compute_total_window_curve(&win_none, &trap_on, n, sw_hz);
+        assert!((total_none_trap[0] - 1.0).abs() < 1e-12);
+        assert!((total_none_trap[80] - 1.0).abs() < 1e-12);
+        assert!((total_none_trap[90] - 0.5).abs() < 1e-12);
+        assert!((total_none_trap[100] - 0.0).abs() < 1e-12);
+
+        // 2. メイン窓関数 Exponential + Trapezoid 無効 -> 完全に Exponential そのもの
+        let win_exp = WindowFunction::Exponential { lb: 1.0 };
+        let trap_off = TrapezoidDecay {
+            enabled: false,
+            start_percent: 80.0,
+        };
+        let total_exp_only = compute_total_window_curve(&win_exp, &trap_off, n, sw_hz);
+        let exp_curve = compute_window_curve(&win_exp, n, sw_hz);
+        for i in 0..n {
+            assert!((total_exp_only[i] - exp_curve[i]).abs() < 1e-12);
+        }
+    }
 }

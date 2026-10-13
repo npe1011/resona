@@ -211,8 +211,8 @@ pub fn continuous_step_button(
             let next_hold = hold_time + dt;
             ui.data_mut(|d| d.insert_temp(id, next_hold));
 
-            // ディレイ 0.25秒後から加速・等速フェーズ
-            const DELAY: f64 = 0.25;
+            // ディレイ 0.35秒後から加速・等速フェーズ (誤判定を防止)
+            const DELAY: f64 = 0.35;
             if next_hold > DELAY {
                 let t = next_hold - DELAY;
                 // accel_duration 秒間で min_speed から max_speed まで加速し、以降は等速運動
@@ -304,7 +304,7 @@ pub fn continuous_step_arrow_button(
             let next_hold = hold_time + dt;
             ui.data_mut(|d| d.insert_temp(id, next_hold));
 
-            const DELAY: f64 = 0.20;
+            const DELAY: f64 = 0.35;
             if next_hold > DELAY {
                 let t = next_hold - DELAY;
                 let progress = (t / accel_duration.max(0.001)).clamp(0.0, 1.0);
@@ -366,8 +366,8 @@ pub fn show_action_bar(
                         "ab_yoff_dec",
                         StepDirection::Down,
                         2.0,
-                        15.0,
-                        150.0,
+                        10.0,
+                        80.0,
                         1.0,
                     );
                     if yoff_down > 0.0 {
@@ -380,8 +380,8 @@ pub fn show_action_bar(
                         "ab_yoff_inc",
                         StepDirection::Up,
                         2.0,
-                        15.0,
-                        150.0,
+                        10.0,
+                        80.0,
                         1.0,
                     );
                     if yoff_up > 0.0 {
@@ -411,7 +411,7 @@ pub fn show_action_bar(
                         StepDirection::Down,
                         2.5,
                         15.0,
-                        250.0,
+                        120.0,
                         1.0,
                     );
                     if yscale_dec > 0.0 {
@@ -425,7 +425,7 @@ pub fn show_action_bar(
                         StepDirection::Up,
                         2.5,
                         15.0,
-                        250.0,
+                        120.0,
                         1.0,
                     );
                     if yscale_inc > 0.0 {

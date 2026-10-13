@@ -274,7 +274,15 @@ impl MultiSpecState {
         let abs_path = std::fs::canonicalize(p)
             .map(|cp| clean_path(&cp))
             .unwrap_or_else(|_| clean_path(p));
-        let item = MultiSpecItem::new(id.clone(), filename, Some(abs_path), proj, self.items.len());
+        let mut item = MultiSpecItem::new(id.clone(), filename, Some(abs_path), proj, self.items.len());
+        if let Some(ref p) = item.project {
+            if let Some(ys) = p.state.display_settings.y_scale {
+                item.y_scale = ys;
+            }
+            if let Some(yo) = p.state.display_settings.y_offset {
+                item.y_offset = yo;
+            }
+        }
         self.items.push(item);
 
         if self.selected_id.is_none() {
@@ -293,7 +301,15 @@ impl MultiSpecState {
     pub fn add_project(&mut self, name: String, source_path: Option<PathBuf>, project: Project) -> String {
         let id = self.generate_unique_id();
 
-        let item = MultiSpecItem::new(id.clone(), name, source_path, project, self.items.len());
+        let mut item = MultiSpecItem::new(id.clone(), name, source_path, project, self.items.len());
+        if let Some(ref p) = item.project {
+            if let Some(ys) = p.state.display_settings.y_scale {
+                item.y_scale = ys;
+            }
+            if let Some(yo) = p.state.display_settings.y_offset {
+                item.y_offset = yo;
+            }
+        }
         self.items.push(item);
 
         if self.selected_id.is_none() {

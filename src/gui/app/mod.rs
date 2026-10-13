@@ -365,11 +365,10 @@ impl eframe::App for ResonaApp {
         let noise_level = self.project.noise_level();
         let has_spectrum = self.project.spectrum_real.is_some();
 
-        let old_scale = self.y_scale;
-        let old_offset = self.y_offset;
         let max_intensity = self.project.max_intensity().max(1e-6);
 
-        // 前回保存された Y 範囲からユーザーが手動でスケール変更した場合は同期
+        // 外部操作（マウスドラッグによるパン、Rect ズーム等）で transform が変更された場合、
+        // アクションバーの y_scale / y_offset を同期する
         if let Some(ref t) = self.transform {
             if let Some((last_min, last_max)) = self.last_transform_y {
                 if (t.y_max - last_max).abs() > 1e-6 || (t.y_min - last_min).abs() > 1e-6 {
@@ -378,9 +377,16 @@ impl eframe::App for ResonaApp {
                     let offset = ((-t.y_min) / delta_y * 100.0).clamp(-1000.0, 10000.0);
                     self.y_scale = scale;
                     self.y_offset = offset;
+                    self.last_transform_y = Some((t.y_min, t.y_max));
                 }
+            } else {
+                self.last_transform_y = Some((t.y_min, t.y_max));
             }
         }
+
+        // ツールバー描画直前の値を基準値として記録 (外部操作による同期との混同・ピンポン振動を完全に防ぐ)
+        let old_scale = self.y_scale;
+        let old_offset = self.y_offset;
 
         // Peak ピックモードに入った直後で閾値が未初期化の場合、ノイズレベル×感度係数で自動設定
         if self.mode == Some(AppMode::Peak) && (self.action_state.peak_threshold == 0.0 || self.project.state.peak_threshold.is_none()) {
@@ -416,7 +422,7 @@ impl eframe::App for ResonaApp {
                 )
             }).inner;
 
-        // ツールバーの Y-Axis (scale / offset) が操作された場合、transform を更新
+        // ツールバーの Y-Axis (scale / offset) が明示的に操作された場合のみ、transform を更新
         if (self.y_scale - old_scale).abs() > 1e-6 || (self.y_offset - old_offset).abs() > 1e-6 {
             if let Some(ref mut t) = self.transform {
                 let delta_y = max_intensity * (100.0 / self.y_scale.max(1.0));

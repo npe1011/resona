@@ -437,12 +437,21 @@ fn handle_plot_inputs<F: Fn(f32) -> f64>(
 
     // 3. 左右矢印キー: X軸スクロール (全域範囲外への飛び出しをブロック)
     let (full_min, full_max) = state.get_full_ppm_range();
-    let left_pressed = ui.input(|i| i.key_pressed(Key::ArrowLeft) || i.key_down(Key::ArrowLeft));
-    let right_pressed = ui.input(|i| i.key_pressed(Key::ArrowRight) || i.key_down(Key::ArrowRight));
-    if left_pressed || right_pressed {
+    let left_down = ui.input(|i| i.key_down(Key::ArrowLeft));
+    let right_down = ui.input(|i| i.key_down(Key::ArrowRight));
+    let left_pressed = ui.input(|i| i.key_pressed(Key::ArrowLeft));
+    let right_pressed = ui.input(|i| i.key_pressed(Key::ArrowRight));
+
+    if left_down || right_down {
+        let dt = (ui.input(|i| i.stable_dt) as f64).min(0.1);
         let shift_mult = if is_shift { 3.0 } else { 1.0 };
-        let dt_step = (p_span * 0.02 * shift_mult) as f64;
-        let dx = if left_pressed { dt_step } else { -dt_step };
+        // 初回押下時は離散ステップ (2%)、長押し中は時間積分による等速スクロール (毎秒 60%)
+        let step = if left_pressed || right_pressed {
+            p_span * 0.02 * shift_mult
+        } else {
+            p_span * 0.60 * shift_mult * dt
+        };
+        let dx = if left_down { step } else { -step };
         let new_min = state.common_ppm_min + dx;
         let new_max = state.common_ppm_max + dx;
         if new_min >= full_min - 0.5 && new_max <= full_max + 0.5 {
