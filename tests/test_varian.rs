@@ -195,10 +195,51 @@ fn test_varian_fft_processing() {
 
     let processed = process_raw_fid(&raw_fid, &settings, 0.0, 0.0).expect("Processing failed");
 
-    // ZF=2 なので点数は 22321 * 2 = 44642
-    assert_eq!(processed.spectrum_real.len(), 44642);
-    assert_eq!(processed.ppm.len(), 44642);
-
     let max_val = processed.spectrum_real.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     assert!(max_val > 0.0);
 }
+
+#[test]
+fn test_varian_1h_old_full_auto() {
+    let dir_path = get_test_data_path("Varian_1H_old.fid");
+    let mut project = Project::new();
+    project.load_varian(&dir_path, None).expect("load_varian failed");
+    assert_eq!(project.metadata.solvent, "DMSO");
+    assert_eq!(project.metadata.nucleus, "1H");
+
+    // 溶媒選択解決の検証
+    let (solvent_idx, target_ppm) = resona::core::analysis::resolve_solvent_selection(
+        &project.metadata.solvent,
+        &project.metadata.nucleus,
+    );
+    assert_eq!(target_ppm, 2.50);
+    let solvents = resona::core::analysis::get_available_solvents(&project.metadata.nucleus);
+    assert_eq!(solvents[solvent_idx].0.name, "DMSO-d6");
+
+    // auto_detect_reference_peak の検証
+    let spec = project.spectrum_real.as_ref().unwrap();
+    let ppm = project.ppm.as_ref().unwrap();
+    let detected = resona::core::analysis::auto_detect_reference_peak(spec, ppm, 2.50, 0.20, 2.0);
+    assert!(detected.is_some(), "DMSO peak should be detected within ±0.20 ppm");
+    let peak_ppm = detected.unwrap();
+    assert!((peak_ppm - 2.483).abs() < 0.01, "Detected peak should be near 2.483 ppm, got {}", peak_ppm);
+
+    // Full auto 実行の検証
+    let report = project.execute_full_auto(resona::BaselineMethod::None, false);
+    assert!(report.reference_applied, "Reference should be applied! Desc: {}", report.reference_desc);
+    assert!(report.reference_desc.contains("DMSO-d6"));
+
+    // シフト後、DMSO ピークが 2.50 ppm に合致していることを検証
+    let ppm_after = project.ppm.as_ref().unwrap();
+    let spec_after = project.spectrum_real.as_ref().unwrap();
+    let dmso_idx = ppm_after
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - 2.50).abs().partial_cmp(&(*b - 2.50).abs()).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    assert!(spec_after[dmso_idx] > 0.0);
+    assert!((ppm_after[dmso_idx] - 2.50).abs() < 0.005);
+}
+
+

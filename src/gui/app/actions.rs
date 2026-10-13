@@ -297,9 +297,12 @@ impl ResonaApp {
                 }
                 self.save_app_settings();
 
-                let is_13c = self.project.metadata.nucleus.contains("13C") || self.project.metadata.nucleus.contains("C13");
-                self.action_state.ref_target_ppm = if is_13c { 77.16 } else { 7.26 };
-                self.action_state.ref_solvent_idx = 0;
+                let (solvent_idx, target_ppm) = crate::core::analysis::resolve_solvent_selection(
+                    &self.project.metadata.solvent,
+                    &self.project.metadata.nucleus,
+                );
+                self.action_state.ref_target_ppm = target_ppm;
+                self.action_state.ref_solvent_idx = solvent_idx;
                 self.action_state.ref_set_active = false;
                 self.sync_action_bar_from_project();
                 self.zoom_history.clear();
@@ -367,6 +370,19 @@ impl ResonaApp {
         }
         if let Some(target) = self.project.state.reference_point {
             self.action_state.ref_target_ppm = target;
+            let available = crate::core::analysis::get_available_solvents(&self.project.metadata.nucleus);
+            let mut best_i = 0;
+            let mut min_diff = f64::MAX;
+            for (i, (_, ppm)) in available.iter().enumerate() {
+                let diff = (ppm - target).abs();
+                if diff < min_diff {
+                    min_diff = diff;
+                    best_i = i;
+                }
+            }
+            if min_diff < 0.15 {
+                self.action_state.ref_solvent_idx = best_i;
+            }
         }
     }
 
@@ -964,45 +980,24 @@ impl ResonaApp {
             ActionEvent::AutoReference => {
                 let target = self.action_state.ref_target_ppm;
                 let nuc = &self.project.metadata.nucleus;
-                let is_1h = nuc.contains("1H") || nuc.is_empty() || nuc.contains("H1");
-                let delta = if is_1h { 0.10 } else { 1.00 };
-                let search_min = target - delta;
-                let search_max = target + delta;
+                let is_13c = nuc.contains("13C") || nuc.contains("C13");
+                let delta = if is_13c { 1.50 } else { 0.20 };
 
                 if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
-                    let mut best_p = None;
-                    let mut max_val = f64::NEG_INFINITY;
-                    for i in 0..ppm.len().min(spec.len()) {
-                        let p = ppm[i];
-                        if p >= search_min && p <= search_max {
-                            let v = spec[i];
-                            if v > max_val {
-                                max_val = v;
-                                best_p = Some(p);
-                            }
-                        }
-                    }
-
-                    let noise = self.project.noise_level();
-                    if let Some(peak_ppm) = best_p {
-                        if max_val > noise * 2.0 {
-                            self.apply_shift_reference(peak_ppm, target);
-                            self.push_history();
-                            self.status_message = format!(
-                                "Auto referenced: {:.3} ppm -> {:.3} ppm (Δ = {:+.3} ppm)",
-                                peak_ppm,
-                                target,
-                                target - peak_ppm
-                            );
-                        } else {
-                            self.status_message = format!(
-                                "Auto reference failed: No significant peak found within ±{:.2} ppm of {:.3} ppm (intensity={:.1}, noise={:.1})",
-                                delta, target, max_val, noise
-                            );
-                        }
+                    if let Some(peak_ppm) = crate::core::analysis::auto_detect_reference_peak(
+                        spec, ppm, target, delta, 2.0,
+                    ) {
+                        self.apply_shift_reference(peak_ppm, target);
+                        self.push_history();
+                        self.status_message = format!(
+                            "Auto referenced: {:.3} ppm -> {:.3} ppm (Δ = {:+.3} ppm)",
+                            peak_ppm,
+                            target,
+                            target - peak_ppm
+                        );
                     } else {
                         self.status_message = format!(
-                            "Auto reference failed: No data points within ±{:.2} ppm of {:.3} ppm",
+                            "Auto reference failed: No significant peak found within ±{:.2} ppm of {:.3} ppm",
                             delta, target
                         );
                     }

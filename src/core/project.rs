@@ -758,7 +758,7 @@ impl Project {
             let solvent_str = &self.metadata.solvent;
             let nuc = &self.metadata.nucleus;
             let is_13c = nuc.contains("13C") || nuc.contains("C13");
-            let delta = if is_13c { 1.00 } else { 0.10 };
+            let delta = if is_13c { 1.50 } else { 0.20 };
 
             if let Some((solvent_name, target_ppm)) = resolve_solvent_target_ppm(solvent_str, nuc) {
                 if let (Some(ppm), Some(spec)) = (&self.ppm, &self.spectrum_real) {

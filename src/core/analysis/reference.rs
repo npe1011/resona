@@ -151,6 +151,47 @@ pub fn resolve_solvent_target_ppm(solvent_str: &str, nucleus: &str) -> Option<(&
     None
 }
 
+/// 核種に応じた利用可能な溶媒一覧と、各溶媒の標準ケミカルシフト (ppm) を返す
+pub fn get_available_solvents(nucleus: &str) -> Vec<(&'static SolventInfo, f64)> {
+    let is_13c = nucleus.contains("13C") || nucleus.contains("C13");
+    let mut list = Vec::new();
+    for info in KNOWN_SOLVENTS {
+        let target = if is_13c { info.carbon_ppm } else { info.proton_ppm };
+        if let Some(ppm) = target {
+            list.push((info, ppm));
+        }
+    }
+    list
+}
+
+/// 溶媒名文字列と核種から、get_available_solvents のインデックスと target_ppm を解決する
+pub fn resolve_solvent_selection(solvent_str: &str, nucleus: &str) -> (usize, f64) {
+    let solvents = get_available_solvents(nucleus);
+    if solvents.is_empty() {
+        return (0, 0.0);
+    }
+
+    if let Some((matched_name, target_ppm)) = resolve_solvent_target_ppm(solvent_str, nucleus) {
+        for (i, (info, _)) in solvents.iter().enumerate() {
+            if info.name == matched_name {
+                return (i, target_ppm);
+            }
+        }
+    }
+
+    // デフォルト: CDCl3 を探し、なければ 0 番目
+    let is_13c = nucleus.contains("13C") || nucleus.contains("C13");
+    let default_name = "CDCl3";
+    let default_target = if is_13c { 77.16 } else { 7.26 };
+    for (i, (info, ppm)) in solvents.iter().enumerate() {
+        if info.name == default_name {
+            return (i, *ppm);
+        }
+    }
+
+    (0, default_target)
+}
+
 /// 指定した target_ppm 周辺のピークを自動検出し、ピーク位置 (ppm) を返す。
 /// 有意なピークが見つからなかった場合は None。
 pub fn auto_detect_reference_peak(
@@ -351,4 +392,30 @@ mod tests {
         // 期待値: u = 0.25 なので、ppm = 7.26 + 0.25 * (-0.02) = 7.255
         assert!((detected - 7.255).abs() < 1e-6);
     }
+
+    #[test]
+    fn test_resolve_solvent_selection() {
+        // 1H DMSO
+        let (idx_dmso, target_dmso) = resolve_solvent_selection("DMSO", "1H");
+        assert_eq!(target_dmso, 2.50);
+        let solvents_1h = get_available_solvents("1H");
+        assert_eq!(solvents_1h[idx_dmso].0.name, "DMSO-d6");
+
+        // 1H CDCl3
+        let (idx_cdcl3, target_cdcl3) = resolve_solvent_selection("cdcl3", "1H");
+        assert_eq!(target_cdcl3, 7.26);
+        assert_eq!(solvents_1h[idx_cdcl3].0.name, "CDCl3");
+
+        // 13C CDCl3
+        let (idx_13c_cdcl3, target_13c_cdcl3) = resolve_solvent_selection("cdcl3", "13C");
+        assert_eq!(target_13c_cdcl3, 77.16);
+        let solvents_13c = get_available_solvents("13C");
+        assert_eq!(solvents_13c[idx_13c_cdcl3].0.name, "CDCl3");
+
+        // 未知の溶媒 -> デフォルト CDCl3
+        let (idx_unk, target_unk) = resolve_solvent_selection("unknown", "1H");
+        assert_eq!(target_unk, 7.26);
+        assert_eq!(solvents_1h[idx_unk].0.name, "CDCl3");
+    }
 }
+

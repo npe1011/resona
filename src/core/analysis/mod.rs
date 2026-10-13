@@ -8,6 +8,7 @@ pub use integral::{auto_detect_integrations, compute_integral, IntegralResult, I
 pub use jcoupling::{analyze_multiplet, parse_jcoupling_sort_ppm, JCouplingCandidate, JCouplingResultItem};
 pub use peak::{add_peak_in_range, estimate_noise_mad, pick_peaks, snap_and_add_peak, PeakItem};
 pub use reference::{
-    auto_detect_reference_peak, resolve_solvent_target_ppm, SolventInfo, KNOWN_SOLVENTS,
+    auto_detect_reference_peak, get_available_solvents, resolve_solvent_selection,
+    resolve_solvent_target_ppm, SolventInfo, KNOWN_SOLVENTS,
 };
 pub use sensitivity::AutoSensitivity;

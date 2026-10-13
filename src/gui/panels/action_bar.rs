@@ -2,7 +2,7 @@ use egui::{
     vec2, Button, Color32, DragValue, Frame, Margin, RichText, Slider, Stroke, Ui,
 };
 
-use crate::core::analysis::KNOWN_SOLVENTS;
+use crate::core::analysis::get_available_solvents;
 use crate::core::baseline::BaselineMethod;
 use crate::gui::mode::{AppMode, IntegrateSubMode, MultiviewSubMode, PeakSubMode, ZoomTool};
 
@@ -654,14 +654,11 @@ pub fn show_action_bar(
                                 ui.label(RichText::new(status_txt).size(11.0).strong().color(status_color));
                             }
                             AppMode::Reference => {
-                                let is_13c = nucleus.contains("13C") || nucleus.contains("C13");
-                                let mut solvents: Vec<(String, f64)> = Vec::new();
-                                for info in KNOWN_SOLVENTS {
-                                    let target = if is_13c { info.carbon_ppm } else { info.proton_ppm };
-                                    if let Some(ppm) = target {
-                                        solvents.push((format!("{} ({:.2} ppm)", info.name, ppm), ppm));
-                                    }
-                                }
+                                let available = get_available_solvents(nucleus);
+                                let solvents: Vec<(String, f64)> = available
+                                    .into_iter()
+                                    .map(|(info, ppm)| (format!("{} ({:.2} ppm)", info.name, ppm), ppm))
+                                    .collect();
 
                                 ui.label(RichText::new("Solvent").size(12.0));
                                 let current_solvent_name = solvents
