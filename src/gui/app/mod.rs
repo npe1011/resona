@@ -691,6 +691,13 @@ impl eframe::App for ResonaApp {
             }
             self.y_scale = res.y_scale;
             self.y_offset = res.y_offset;
+            self.project.state.display_settings.x_min = Some(res.ppm_min);
+            self.project.state.display_settings.x_max = Some(res.ppm_max);
+            self.project.state.display_settings.user_set_x_min = Some(res.user_set_ppm_min);
+            self.project.state.display_settings.user_set_x_max = Some(res.user_set_ppm_max);
+            self.project.state.display_settings.y_scale = Some(res.y_scale);
+            self.project.state.display_settings.y_offset = Some(res.y_offset);
+            self.is_dirty = true;
             self.plot_style.ppm_decimals = res.ppm_decimals;
             self.plot_style.integral_decimals = res.integral_decimals;
             self.plot_style.auto_ticks = res.auto_ticks;
@@ -991,5 +998,41 @@ mod tests {
         for mv in &app.project.state.multiviews {
             assert_eq!(mv.geometry.h, 140.0);
         }
+    }
+
+    #[test]
+    fn test_apply_user_set_x_range_and_zoom_history() {
+        let mut app = ResonaApp::default();
+        app.project.ppm = Some(ndarray::Array1::linspace(10.0, 0.0, 100));
+        app.transform = Some(crate::gui::plot::transform::PlotTransform::new(
+            Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0)),
+            0.0,
+            10.0,
+            0.0,
+            100.0,
+        ));
+
+        // 初期ズーム履歴は空
+        assert!(app.zoom_history.is_empty());
+
+        // user set X-range を 2.5 .. 7.5 に設定
+        app.project.state.display_settings.user_set_x_min = Some(2.5);
+        app.project.state.display_settings.user_set_x_max = Some(7.5);
+
+        // ショートカット同等メソッド実行
+        app.apply_user_set_x_range();
+
+        // 表示範囲が user set の範囲に更新されていること
+        let t = app.transform.as_ref().unwrap();
+        assert_eq!(t.ppm_min, 2.5);
+        assert_eq!(t.ppm_max, 7.5);
+
+        // ズーム履歴に直前の表示範囲 (0.0, 10.0, 0.0, 100.0) が保存されていること
+        assert_eq!(app.zoom_history.len(), 1);
+        assert_eq!(app.zoom_history[0], (0.0, 10.0, 0.0, 100.0));
+
+        // project.state.display_settings の current も更新されていること
+        assert_eq!(app.project.state.display_settings.x_min, Some(2.5));
+        assert_eq!(app.project.state.display_settings.x_max, Some(7.5));
     }
 }

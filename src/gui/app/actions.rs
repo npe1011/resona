@@ -332,6 +332,7 @@ impl ResonaApp {
                         }
                     }
                 }
+                self.project.ensure_user_set_x_range();
                 self.is_dirty = false;
                 self.status_message = format!("Loaded {}", abs_path.display());
 
@@ -403,6 +404,7 @@ impl ResonaApp {
             self.project.state.display_settings.y_min_scale = None;
             self.project.state.display_settings.y_max_scale = None;
         }
+        self.project.ensure_user_set_x_range();
 
         match self.project.save_rsn(&abs_path) {
             Ok(_) => {
@@ -787,7 +789,30 @@ impl ResonaApp {
         self.display_dialog_state.tick_minor = self.plot_style.tick_minor;
         self.display_dialog_state.ppm_decimals = self.plot_style.ppm_decimals;
         self.display_dialog_state.integral_decimals = self.plot_style.integral_decimals;
+
+        if let Some((u_min, u_max)) = self.project.user_set_x_range() {
+            self.display_dialog_state.user_set_ppm_min = u_min;
+            self.display_dialog_state.user_set_ppm_max = u_max;
+        } else if let Some(ref t) = self.transform {
+            self.display_dialog_state.user_set_ppm_min = t.ppm_min;
+            self.display_dialog_state.user_set_ppm_max = t.ppm_max;
+        }
+
         self.display_dialog_state.open = true;
+    }
+
+    /// ユーザー指定の X 軸範囲 (user set X-range) を現在の表示範囲に適用する
+    pub fn apply_user_set_x_range(&mut self) {
+        if let Some((user_min, user_max)) = self.project.user_set_x_range() {
+            if let Some(ref mut t) = self.transform {
+                self.zoom_history.push((t.ppm_min, t.ppm_max, t.y_min, t.y_max));
+                t.ppm_min = user_min;
+                t.ppm_max = user_max;
+                self.project.state.display_settings.x_min = Some(user_min);
+                self.project.state.display_settings.x_max = Some(user_max);
+                self.status_message = format!("Set X-Axis range to user set: [{:.3}, {:.3}] ppm", user_max, user_min);
+            }
+        }
     }
 
     /// 外部ダイアログ経由でデータファイルを開く (Open Data)

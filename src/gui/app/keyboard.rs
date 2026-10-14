@@ -5,7 +5,7 @@ use super::ResonaApp;
 impl ResonaApp {
     /// キーボードショートカットの処理
     pub(crate) fn handle_shortcuts(&mut self, ctx: &Context) {
-        if self.has_open_dialog() {
+        if self.has_open_dialog() || ctx.wants_keyboard_input() {
             return;
         }
 
@@ -78,6 +78,11 @@ impl ResonaApp {
         // Home or Ctrl + 0: Reset Zoom (常に動作)
         if input.key_pressed(Key::Home) || (ctrl_or_cmd && input.key_pressed(Key::Num0)) {
             self.reset_zoom();
+        }
+
+        // Insert or I: ユーザー指定 X 軸範囲の適用 (user set X-range)
+        if !ctrl_or_cmd && !input.modifiers.alt && (input.key_pressed(Key::Insert) || input.key_pressed(Key::I)) {
+            self.apply_user_set_x_range();
         }
 
         // Delete / Backspace: 選択されたMultiviewまたはJ-Coupling行の削除

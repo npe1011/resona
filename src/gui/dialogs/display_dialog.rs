@@ -5,6 +5,8 @@ use egui::{Checkbox, DragValue, Window};
 pub struct DisplaySettingsResult {
     pub ppm_min: f64,
     pub ppm_max: f64,
+    pub user_set_ppm_min: f64,
+    pub user_set_ppm_max: f64,
     pub y_scale: f64,
     pub y_offset: f64,
     pub y_min: f64,
@@ -20,6 +22,8 @@ pub struct DisplayDialogState {
     pub open: bool,
     pub ppm_min: f64,
     pub ppm_max: f64,
+    pub user_set_ppm_min: f64,
+    pub user_set_ppm_max: f64,
     /// ピーク最大高さに対するスケール比率 (%) (例: 80.0 で上部にマージン)
     pub y_scale: f64,
     /// ベースライン位置のオフセット比率 (%) (例: 10.0 で下部に10%のマージン)
@@ -39,6 +43,8 @@ impl Default for DisplayDialogState {
             open: false,
             ppm_min: 0.0,
             ppm_max: 10.0,
+            user_set_ppm_min: 0.0,
+            user_set_ppm_max: 10.0,
             y_scale: 80.0,
             y_offset: 10.0,
             max_peak_intensity: 1.0,
@@ -68,8 +74,8 @@ pub fn show_display_dialog(
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
 
-            // 1. X 軸表示範囲
-            ui.label(egui::RichText::new("X-Axis (range)").strong());
+            // 1. X 軸表示範囲 (current)
+            ui.label(egui::RichText::new("X-Axis Range (current)").strong());
             ui.horizontal(|ui| {
                 ui.label("Max ppm");
                 ui.add(DragValue::new(&mut state.ppm_max).speed(0.1));
@@ -77,10 +83,23 @@ pub fn show_display_dialog(
                 ui.add(DragValue::new(&mut state.ppm_min).speed(0.1));
             });
 
+            // 2. X 軸表示範囲 (user set)
+            ui.label(egui::RichText::new("X-Axis Range (user set)").strong());
+            ui.horizontal(|ui| {
+                ui.label("Max ppm");
+                ui.add(DragValue::new(&mut state.user_set_ppm_max).speed(0.1));
+                ui.label("Min ppm");
+                ui.add(DragValue::new(&mut state.user_set_ppm_min).speed(0.1));
+                if ui.button("Apply").on_hover_text("Apply user set range to current range").clicked() {
+                    state.ppm_max = state.user_set_ppm_max;
+                    state.ppm_min = state.user_set_ppm_min;
+                }
+            });
+
             ui.separator();
 
-            // 2. Y 軸スケール / オフセット (最大ピークに対する相対パーセンテージ)
-            ui.label(egui::RichText::new("Y-Axis (scale & offset)").strong());
+            // 3. Y 軸スケール / オフセット (最大ピークに対する相対パーセンテージ)
+            ui.label(egui::RichText::new("Y-Axis Range").strong());
             ui.label(
                 egui::RichText::new(format!("Peak Top 100% = {:.2e}", state.max_peak_intensity))
                     .size(10.5)
@@ -146,6 +165,8 @@ pub fn show_display_dialog(
                     applied = Some(DisplaySettingsResult {
                         ppm_min: state.ppm_min,
                         ppm_max: state.ppm_max,
+                        user_set_ppm_min: state.user_set_ppm_min,
+                        user_set_ppm_max: state.user_set_ppm_max,
                         y_scale: state.y_scale,
                         y_offset: state.y_offset,
                         y_min: computed_y_min,

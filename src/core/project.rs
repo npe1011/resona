@@ -78,6 +78,10 @@ pub struct DisplaySettings {
     #[serde(default)]
     pub x_max: Option<f64>,
     #[serde(default)]
+    pub user_set_x_min: Option<f64>,
+    #[serde(default)]
+    pub user_set_x_max: Option<f64>,
+    #[serde(default)]
     pub y_scale: Option<f64>,
     #[serde(default)]
     pub y_offset: Option<f64>,
@@ -346,6 +350,42 @@ impl Project {
         self.cached_max_intensity.set(None);
     }
 
+    /// スペクトル全体の化学シフト範囲 (ppm_min, ppm_max) を取得する
+    pub fn full_ppm_range(&self) -> Option<(f64, f64)> {
+        self.ppm.as_ref().and_then(|ppm| {
+            if ppm.is_empty() {
+                None
+            } else {
+                let p1 = ppm[0];
+                let p2 = ppm[ppm.len() - 1];
+                Some((p1.min(p2), p1.max(p2)))
+            }
+        })
+    }
+
+    /// ユーザー指定の X 軸範囲 (ppm_min, ppm_max) を取得する
+    /// 未設定の場合はスペクトルのフルレンジにフォールバックする
+    pub fn user_set_x_range(&self) -> Option<(f64, f64)> {
+        match (self.state.display_settings.user_set_x_min, self.state.display_settings.user_set_x_max) {
+            (Some(min), Some(max)) => Some((min.min(max), min.max(max))),
+            _ => self.full_ppm_range(),
+        }
+    }
+
+    /// user_set_x_min / user_set_x_max が未設定の場合、スペクトルのフルレンジで初期化する
+    pub fn ensure_user_set_x_range(&mut self) {
+        if self.state.display_settings.user_set_x_min.is_none() || self.state.display_settings.user_set_x_max.is_none() {
+            if let Some((min, max)) = self.full_ppm_range() {
+                if self.state.display_settings.user_set_x_min.is_none() {
+                    self.state.display_settings.user_set_x_min = Some(min);
+                }
+                if self.state.display_settings.user_set_x_max.is_none() {
+                    self.state.display_settings.user_set_x_max = Some(max);
+                }
+            }
+        }
+    }
+
     /// JDF ファイルを開き、初期化して処理を実行する
     pub fn load_jdf<P: AsRef<Path>>(&mut self, path: P, ft_settings: Option<FtSettings>) -> Result<()> {
         let raw_fid = JeolJdfReader::read_fid(&path)?;
@@ -368,6 +408,9 @@ impl Project {
 
         // 初期自動位相補正を実行
         self.auto_phase();
+
+        // ユーザー指定 X 範囲をフルレンジで初期化
+        self.ensure_user_set_x_range();
 
         self.invalidate_cache();
         self.history = HistoryManager::new();
@@ -399,6 +442,9 @@ impl Project {
         // 初期自動位相補正を実行
         self.auto_phase();
 
+        // ユーザー指定 X 範囲をフルレンジで初期化
+        self.ensure_user_set_x_range();
+
         self.invalidate_cache();
         self.history = HistoryManager::new();
         self.history.commit(&self.state, &self.ppm, &self.spectrum_real);
@@ -428,6 +474,9 @@ impl Project {
 
         // 初期自動位相補正を実行
         self.auto_phase();
+
+        // ユーザー指定 X 範囲をフルレンジで初期化
+        self.ensure_user_set_x_range();
 
         self.invalidate_cache();
         self.history = HistoryManager::new();
@@ -1050,6 +1099,9 @@ impl Project {
             self.spectrum_real = Some(real);
         }
 
+        // ユーザー指定 X 範囲が未設定 (旧RSN等) の場合はフルレンジで初期化
+        self.ensure_user_set_x_range();
+
         self.invalidate_cache();
         self.history = HistoryManager::new();
         self.history.commit(&self.state, &self.ppm, &self.spectrum_real);
@@ -1341,6 +1393,64 @@ mod tests {
         let mut loaded = Project::new();
         loaded.load_rsn(&test_file).expect("Load failed");
         loaded.save_rsn(&test_file).expect("Save after load failed");
+
+        let _ = std::fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_user_set_x_range_and_compatibility() {
+        // 1. 旧形式 JSON のデシリアライズ後方互換性テスト
+        let legacy_json = r#"{
+            "x_min": 1.0,
+            "x_max": 9.0,
+            "y_scale": 80.0,
+            "y_offset": 10.0
+        }"#;
+        let ds: DisplaySettings = serde_json::from_str(legacy_json).expect("Failed to deserialize legacy DisplaySettings");
+        assert_eq!(ds.x_min, Some(1.0));
+        assert_eq!(ds.x_max, Some(9.0));
+        assert_eq!(ds.user_set_x_min, None);
+        assert_eq!(ds.user_set_x_max, None);
+
+        // 2. Project での full_ppm_range と user_set_x_range の挙動
+        let mut proj = Project::new();
+        proj.ppm = Some(Array1::linspace(12.0, -2.0, 100)); // 降順: 12.0 -> -2.0
+
+        let (full_min, full_max) = proj.full_ppm_range().expect("full_ppm_range should return Some");
+        assert!((full_min - (-2.0)).abs() < 1e-6);
+        assert!((full_max - 12.0).abs() < 1e-6);
+
+        // user_set_x が未設定時は full_ppm_range が返る
+        assert_eq!(proj.user_set_x_range(), Some((full_min, full_max)));
+
+        // ensure_user_set_x_range で自動初期化
+        proj.ensure_user_set_x_range();
+        assert_eq!(proj.state.display_settings.user_set_x_min, Some(full_min));
+        assert_eq!(proj.state.display_settings.user_set_x_max, Some(full_max));
+
+        // ユーザーがカスタム範囲を設定した場合
+        proj.state.display_settings.user_set_x_min = Some(1.5);
+        proj.state.display_settings.user_set_x_max = Some(8.5);
+        assert_eq!(proj.user_set_x_range(), Some((1.5, 8.5)));
+
+        // ensure_user_set_x_range を呼んでもユーザー設定は上書きされない
+        proj.ensure_user_set_x_range();
+        assert_eq!(proj.state.display_settings.user_set_x_min, Some(1.5));
+        assert_eq!(proj.state.display_settings.user_set_x_max, Some(8.5));
+
+        // 3. RSN 保存 & ロードでの永続化テスト
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_user_set_x_roundtrip.rsn");
+        proj.complex_spectrum_unphased = Some(Array1::zeros(100));
+        proj.spectrum_real = Some(Array1::zeros(100));
+
+        proj.save_rsn(&test_file).expect("save_rsn failed");
+
+        let mut loaded = Project::new();
+        loaded.load_rsn(&test_file).expect("load_rsn failed");
+        assert_eq!(loaded.state.display_settings.user_set_x_min, Some(1.5));
+        assert_eq!(loaded.state.display_settings.user_set_x_max, Some(8.5));
+        assert_eq!(loaded.user_set_x_range(), Some((1.5, 8.5)));
 
         let _ = std::fs::remove_file(&test_file);
     }
