@@ -949,6 +949,7 @@ mod tests {
     fn test_multiview_align_one_row_rx_scaling() {
         let mut app = ResonaApp::default();
         // 幅 200, 300, 400 のインセット (合計幅 900 + gap 30 = 930)
+        // それぞれ異なる高さ (120, 160, 200) を設定 (一番左上は mv-1 の y: 0.0, h: 120.0)
         app.project.state.multiviews.push(MultiviewItem {
             id: "mv-1".to_string(),
             src_x_min: 7.0,
@@ -956,7 +957,7 @@ mod tests {
             y_scale: None,
             y_offset: None,
             ratio: 3.0,
-            geometry: RectF { x: 0.0, y: 0.0, w: 200.0, h: 140.0 },
+            geometry: RectF { x: 0.0, y: 0.0, w: 200.0, h: 120.0 },
             src_y_min: None,
             src_y_max: None,
         });
@@ -967,7 +968,7 @@ mod tests {
             y_scale: None,
             y_offset: None,
             ratio: 3.0,
-            geometry: RectF { x: 0.0, y: 0.0, w: 300.0, h: 140.0 },
+            geometry: RectF { x: 200.0, y: 50.0, w: 300.0, h: 160.0 },
             src_y_min: None,
             src_y_max: None,
         });
@@ -978,7 +979,7 @@ mod tests {
             y_scale: None,
             y_offset: None,
             ratio: 3.0,
-            geometry: RectF { x: 0.0, y: 0.0, w: 400.0, h: 140.0 },
+            geometry: RectF { x: 400.0, y: 100.0, w: 400.0, h: 200.0 },
             src_y_min: None,
             src_y_max: None,
         });
@@ -994,9 +995,9 @@ mod tests {
         assert!((app.project.state.multiviews[1].geometry.w - 180.0).abs() < 1e-4);
         assert!((app.project.state.multiviews[2].geometry.w - 240.0).abs() < 1e-4);
 
-        // 高さは一切縮小されず 140.0 のままであること
+        // 高さは一番左上 (mv-1) の 120.0 に統一されていること (アスペクト比は維持しない)
         for mv in &app.project.state.multiviews {
-            assert_eq!(mv.geometry.h, 140.0);
+            assert_eq!(mv.geometry.h, 120.0);
         }
     }
 

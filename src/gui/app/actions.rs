@@ -592,6 +592,21 @@ impl ResonaApp {
             return;
         }
 
+        // 縦方向の大きさを一番左上のインセットに統一 (Adjust-Y と同様。アスペクト比は維持しない)
+        let target_mv = self.project.state.multiviews.iter().min_by(|a, b| {
+            if (a.geometry.y - b.geometry.y).abs() < 10.0 {
+                a.geometry.x.partial_cmp(&b.geometry.x).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                a.geometry.y.partial_cmp(&b.geometry.y).unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
+        let target_h = target_mv.map(|mv| mv.geometry.h).unwrap_or(0.0);
+        if target_h > 0.0 {
+            for mv in &mut self.project.state.multiviews {
+                mv.geometry.h = target_h;
+            }
+        }
+
         // 最大化学シフト降順にソート (ezNMR準拠)
         self.project.state.multiviews.sort_by(|a, b| {
             let max_a = a.src_x_min.max(a.src_x_max);
