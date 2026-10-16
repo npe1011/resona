@@ -83,6 +83,7 @@ pub fn generate_theoretical_peaks(pattern: &str, j_vals: &[f64]) -> Vec<(f64, f6
         "dq" => generate_tree(&["d", "q"], j_vals),
         "qd" => generate_tree(&["q", "d"], j_vals),
         "tt" => generate_tree(&["t", "t"], j_vals),
+        "ddd" => generate_tree(&["d", "d", "d"], j_vals),
         _ => return Vec::new(),
     };
 
@@ -304,6 +305,57 @@ pub fn analyze_multiplet(
                 });
             }
         }
+
+        // 3. 3次多重線 (ddd) - ピーク数が 7 または 8 の条件付き探索
+        if n == 7 || n == 8 {
+            let mut best_err = 999.0;
+            let mut best_j = None;
+
+            let j1_min = width / 3.0;
+            let j1_max = (width - 0.2).max(j1_min);
+            let steps_j1 = 50;
+
+            for s1 in 0..=steps_j1 {
+                let j1 = j1_min + (j1_max - j1_min) * (s1 as f64) / (steps_j1 as f64);
+                let rem = width - j1;
+                if rem <= 0.0 {
+                    continue;
+                }
+
+                let j2_min = rem / 2.0;
+                let j2_max = j1.min(rem - 0.1);
+                if j2_max < j2_min {
+                    continue;
+                }
+
+                let steps_j2 = 30;
+                for s2 in 0..=steps_j2 {
+                    let j2 = j2_min + (j2_max - j2_min) * (s2 as f64) / (steps_j2 as f64);
+                    let j3 = rem - j2;
+                    if j3 <= 0.0 || j2 < j3 || j1 < j2 {
+                        continue;
+                    }
+
+                    let tree = generate_tree(&["d", "d", "d"], &[j1, j2, j3]);
+                    if let Some(err) = score_model(&tree, center, &peaks_hz, &intensities, tolerance) {
+                        if err < best_err {
+                            best_err = err;
+                            best_j = Some(vec![j1, j2, j3]);
+                        }
+                    }
+                }
+            }
+
+            if let Some(j) = best_j {
+                // パラメータ数増加に対するペナルティ (+0.15) を付与して過剰適合を防止
+                candidates.push(JCouplingCandidate {
+                    pattern: "ddd".to_string(),
+                    j_vals: j,
+                    error: best_err + 0.15,
+                    text: String::new(),
+                });
+            }
+        }
     }
 
     // 0.01 Hz 未満の微小 J 値を除外
@@ -430,6 +482,45 @@ mod tests {
         let center_val = evaluate_lorentzian_sum(&t_peaks, 0.0, 1.0);
         let off_val = evaluate_lorentzian_sum(&t_peaks, 20.0, 1.0);
         assert!(center_val > off_val);
+
+        // ddd theoretical peaks
+        let ddd_peaks = generate_theoretical_peaks("ddd", &[11.0, 6.0, 2.5]);
+        assert_eq!(ddd_peaks.len(), 8);
+    }
+
+    #[test]
+    fn test_ddd_analysis() {
+        // J1 = 11.0, J2 = 6.0, J3 = 2.5 Hz (center = 2000.0 Hz)
+        // 8 peaks: +-9.75, +-7.25, +-3.75, +-1.25
+        let center = 2000.0;
+        let peaks_hz = vec![
+            center - 9.75,
+            center - 7.25,
+            center - 3.75,
+            center - 1.25,
+            center + 1.25,
+            center + 3.75,
+            center + 7.25,
+            center + 9.75,
+        ];
+        let intensities = vec![100.0; 8];
+
+        let candidates = analyze_multiplet(
+            peaks_hz,
+            intensities,
+            "5.00",
+            "4.98-5.02",
+            "1H",
+            0.5,
+        );
+
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].pattern, "ddd");
+        assert_eq!(candidates[0].j_vals.len(), 3);
+        approx::assert_relative_eq!(candidates[0].j_vals[0], 11.0, epsilon = 0.5);
+        approx::assert_relative_eq!(candidates[0].j_vals[1], 6.0, epsilon = 0.5);
+        approx::assert_relative_eq!(candidates[0].j_vals[2], 2.5, epsilon = 0.5);
+        assert!(candidates[0].text.contains("ddd, J ="));
     }
 }
 
