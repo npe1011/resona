@@ -17,6 +17,8 @@ pub enum ActionEvent {
     ClearBaseline,
     AutoReference,
     ApplyShiftReference { peak_ppm: f64, target_ppm: f64 },
+    ExtReference,
+    ClearReference,
     AutoPeak,
     PickPeaks { threshold: f64 },
     ClearPeaks,
@@ -688,6 +690,16 @@ pub fn show_action_bar(
                                 if light_button(ui, "Set", state.ref_set_active, 46.0).clicked() {
                                     state.ref_set_active = true;
                                     *active_zoom = None;
+                                }
+
+                                if light_button(ui, "Ext", false, 46.0).clicked() {
+                                    *active_zoom = None;
+                                    event = ActionEvent::ExtReference;
+                                }
+
+                                if light_button(ui, "Clear", false, 46.0).clicked() {
+                                    *active_zoom = None;
+                                    event = ActionEvent::ClearReference;
                                 }
                             }
                             AppMode::Peak => {

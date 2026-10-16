@@ -53,7 +53,16 @@ impl Default for PlotStyle {
     }
 }
 
+/// Reference モードでの基準ピーク表示情報
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReferenceMarkerInfo {
+    pub ppm: f64,
+    pub shift: f64,
+    pub is_external: bool,
+}
+
 /// スペクトルと関連要素を描画する
+#[allow(clippy::too_many_arguments)]
 pub fn paint_spectrum(
     ui: &Ui,
     transform: &PlotTransform,
@@ -74,7 +83,7 @@ pub fn paint_spectrum(
     is_threshold_submode: bool,
     is_integrate_edit_mode: bool,
     ref_drag_range: Option<(f64, f64)>,
-    ref_marker: Option<f64>,
+    ref_marker: Option<ReferenceMarkerInfo>,
     style: &PlotStyle,
 ) {
     let painter = ui.painter_at(transform.screen_rect);
@@ -97,33 +106,55 @@ pub fn paint_spectrum(
         painter.rect_stroke(sel_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(13, 110, 253)));
     }
 
-    // 2.2 Reference 基準ピークの表示 (赤い縦線 + 画面上部の化学シフト値)
-    if let Some(ref_ppm) = ref_marker {
-        let sx = transform.ppm_to_screen_x(ref_ppm);
+    // 2.2 Reference 基準ピークの表示 (赤い縦線 + 画面上部の化学シフト値 & 補正値)
+    if let Some(marker) = ref_marker {
+        let sx = transform.ppm_to_screen_x(marker.ppm);
         if sx >= rect.min.x && sx <= rect.max.x {
             // 赤い縦線 (1.2px)
             let stroke_ref = Stroke::new(1.2_f32, Color32::from_rgb(220, 38, 38));
             painter.line_segment([Pos2::new(sx, rect.min.y), Pos2::new(sx, axis_y)], stroke_ref);
 
-            // 画面上部の化学シフト値バッジ (白背景 + 赤色枠線 + 赤文字)
-            let label_str = format!("{:.3} ppm", ref_ppm);
-            let font_ref = FontId::new(10.5, FontFamily::Proportional);
+            // 画面上部の情報バッジ (白背景 + 赤色枠線 + 赤文字)
             let text_color = Color32::from_rgb(220, 38, 38);
-            let galley = painter.layout_no_wrap(label_str, font_ref, text_color);
-            let badge_size = galley.size() + vec2(8.0, 4.0);
-            let badge_center = Pos2::new(
-                sx.clamp(rect.min.x + badge_size.x * 0.5 + 4.0, rect.max.x - badge_size.x * 0.5 - 4.0),
-                rect.min.y + 12.0,
-            );
-            let badge_rect = Rect::from_center_size(badge_center, badge_size);
+            let font_header = FontId::new(9.5, FontFamily::Proportional);
+            let font_main = FontId::new(10.5, FontFamily::Proportional);
+            let font_sub = FontId::new(10.0, FontFamily::Proportional);
 
-            painter.rect_filled(badge_rect, 3.0, Color32::from_rgba_premultiplied(255, 255, 255, 235));
+            let mut galleys = Vec::new();
+            if marker.is_external {
+                galleys.push(painter.layout_no_wrap("Ext.".to_string(), font_header, text_color));
+            }
+            galleys.push(painter.layout_no_wrap(format!("{:.3} ppm", marker.ppm), font_main, text_color));
+            galleys.push(painter.layout_no_wrap(format!("({:+.3})", marker.shift), font_sub, text_color));
+
+            let mut max_w = 0.0_f32;
+            let mut total_h = 0.0_f32;
+            let line_gap = 2.0_f32;
+            for (i, g) in galleys.iter().enumerate() {
+                max_w = max_w.max(g.size().x);
+                total_h += g.size().y;
+                if i > 0 {
+                    total_h += line_gap;
+                }
+            }
+
+            let badge_size = vec2(max_w + 10.0, total_h + 6.0);
+            let min_badge_x = rect.min.x + 4.0;
+            let max_badge_x = (rect.max.x - badge_size.x - 4.0).max(min_badge_x);
+            let badge_x = (sx - badge_size.x * 0.5).clamp(min_badge_x, max_badge_x);
+            let badge_y = rect.min.y + 6.0;
+            let badge_rect = Rect::from_min_size(Pos2::new(badge_x, badge_y), badge_size);
+
+            painter.rect_filled(badge_rect, 3.0, Color32::from_rgba_premultiplied(255, 255, 255, 240));
             painter.rect_stroke(badge_rect, 3.0, Stroke::new(1.0_f32, text_color));
-            painter.galley(
-                Pos2::new(badge_rect.min.x + 4.0, badge_rect.min.y + 2.0),
-                galley,
-                text_color,
-            );
+
+            let mut cur_y = badge_rect.min.y + 3.0;
+            for g in galleys {
+                let gx = badge_rect.center().x - g.size().x * 0.5;
+                let gh = g.size().y;
+                painter.galley(Pos2::new(gx, cur_y), g, text_color);
+                cur_y += gh + line_gap;
+            }
         }
     }
 

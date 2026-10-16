@@ -58,6 +58,7 @@ pub enum FileDialogResult {
     OpenFile(PathBuf),
     SaveFile(PathBuf),
     SaveCancelled,
+    OpenExtReference(PathBuf),
 }
 use crate::core::{
     auto_detect_integrations, compute_integral, pick_peaks, MultiviewItem, RectF,
@@ -216,6 +217,103 @@ impl ResonaApp {
             *z_max += shift;
         }
         self.is_dirty = true;
+    }
+
+    /// 化学シフトのリファレンスをクリアし、未補正状態に巻き戻す
+    pub fn clear_shift_reference(&mut self) {
+        let rev_shift = -self.project.state.shift_reference;
+        self.project.clear_shift_reference();
+        if rev_shift.abs() > 1e-12 {
+            if let Some(ref mut t) = self.transform {
+                t.ppm_min += rev_shift;
+                t.ppm_max += rev_shift;
+            }
+            for (z_min, z_max, _, _) in &mut self.zoom_history {
+                *z_min += rev_shift;
+                *z_max += rev_shift;
+            }
+        }
+        self.push_history();
+        self.status_message = "Cleared reference calibration".to_string();
+    }
+
+    /// 外部標準による化学シフトのリファレンスを適用する
+    pub fn apply_external_reference(&mut self, ext_shift: f64, ext_ref_point: Option<f64>) {
+        let net_shift = ext_shift - self.project.state.shift_reference;
+        self.project.set_external_reference(ext_shift, ext_ref_point, net_shift);
+        if net_shift.abs() > 1e-12 {
+            if let Some(ref mut t) = self.transform {
+                t.ppm_min += net_shift;
+                t.ppm_max += net_shift;
+            }
+            for (z_min, z_max, _, _) in &mut self.zoom_history {
+                *z_min += net_shift;
+                *z_max += net_shift;
+            }
+        }
+        self.push_history();
+    }
+
+    /// RSN ファイルから外部標準リファレンスを読み込み、適用する
+    pub fn apply_external_reference_from_file(&mut self, path: &Path) {
+        match crate::core::Project::read_state_from_rsn(path) {
+            Ok(ext_state) => {
+                // 読み込み先ファイルに Reference の補正がないときは何もしない
+                if ext_state.shift_reference.abs() < 1e-12 && ext_state.reference_point.is_none() {
+                    self.status_message = format!("No reference calibration found in {}", path.display());
+                    return;
+                }
+
+                let ext_shift = ext_state.shift_reference;
+                let ext_ref_point = ext_state.reference_point;
+
+                self.apply_external_reference(ext_shift, ext_ref_point);
+                self.status_message = format!(
+                    "Applied external reference from {} ({:+.3} ppm)",
+                    path.file_name().and_then(|s| s.to_str()).unwrap_or("RSN"),
+                    ext_shift
+                );
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to read reference from RSN: {}", e);
+            }
+        }
+    }
+
+    /// 外部標準 RSN ファイル選択ダイアログを開く (バックグラウンドスレッドで実行)
+    pub fn open_ext_reference_dialog(&mut self, ctx: &Context) {
+        if self.is_file_dialog_open.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.is_file_dialog_open.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Select External Reference RSN")
+            .add_filter("Resona Project (*.rsn)", &["rsn"]);
+
+        if let Some(ref dir) = self.current_directory {
+            let abs_dir = if dir.is_relative() {
+                std::env::current_dir().unwrap_or_default().join(dir)
+            } else {
+                dir.clone()
+            };
+            dialog = dialog.set_directory(abs_dir);
+        }
+
+        let is_open_flag = std::sync::Arc::clone(&self.is_file_dialog_open);
+        let result_slot = std::sync::Arc::clone(&self.file_dialog_result);
+        let ctx_clone = ctx.clone();
+
+        std::thread::spawn(move || {
+            let res = dialog.pick_file();
+            is_open_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+            if let Some(path) = res {
+                if let Ok(mut lock) = result_slot.lock() {
+                    *lock = Some(FileDialogResult::OpenExtReference(path));
+                }
+                ctx_clone.request_repaint();
+            }
+        });
     }
 
     /// 履歴に現在の解析状態を記録し、未保存フラグを立てる
@@ -1061,6 +1159,12 @@ impl ResonaApp {
                 self.apply_shift_reference(peak_ppm, target_ppm);
                 self.push_history();
                 self.status_message = format!("Referenced peak at {:.3} ppm -> {:.3} ppm", peak_ppm, target_ppm);
+            }
+            ActionEvent::ExtReference => {
+                self.open_ext_reference_dialog(_ctx);
+            }
+            ActionEvent::ClearReference => {
+                self.clear_shift_reference();
             }
             ActionEvent::AutoPeak => {
                 if let (Some(spec), Some(ppm)) = (&self.project.spectrum_real, &self.project.ppm) {

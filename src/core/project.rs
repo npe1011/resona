@@ -108,6 +108,9 @@ pub struct ProjectState {
     /// 基準ピークの化学シフト (ppm)
     #[serde(default)]
     pub reference_point: Option<f64>,
+    /// 外部標準補正フラグ
+    #[serde(default)]
+    pub reference_is_external: bool,
     #[serde(default)]
     pub peak_threshold: Option<f64>,
     #[serde(default)]
@@ -193,6 +196,7 @@ impl Default for ProjectState {
             pivot_index: None,
             shift_reference: 0.0,
             reference_point: None,
+            reference_is_external: false,
             peak_threshold: None,
             peaks: Vec::new(),
             integrations: Vec::new(),
@@ -702,6 +706,7 @@ impl Project {
             *ppm += shift;
             self.state.shift_reference += shift;
             self.state.reference_point = Some(target_ppm);
+            self.state.reference_is_external = false;
 
             // ピークの追従
             for p in &mut self.state.peaks {
@@ -727,6 +732,59 @@ impl Project {
         }
     }
 
+    /// 化学シフトのリファレンスをクリアし、未補正状態に巻き戻す
+    pub fn clear_shift_reference(&mut self) {
+        let rev_shift = -self.state.shift_reference;
+        if rev_shift.abs() > 1e-12 {
+            if let Some(ref mut ppm) = self.ppm {
+                *ppm += rev_shift;
+            }
+            for p in &mut self.state.peaks {
+                p.ppm += rev_shift;
+            }
+            for intg in &mut self.state.integrations {
+                intg.start_ppm += rev_shift;
+                intg.end_ppm += rev_shift;
+            }
+            for mv in &mut self.state.multiviews {
+                mv.src_x_min += rev_shift;
+                mv.src_x_max += rev_shift;
+            }
+            for jc in &mut self.state.j_couplings {
+                jc.ppm += rev_shift;
+            }
+        }
+        self.state.shift_reference = 0.0;
+        self.state.reference_point = None;
+        self.state.reference_is_external = false;
+    }
+
+    /// 外部標準による化学シフトのリファレンスを適用する
+    pub fn set_external_reference(&mut self, ext_shift: f64, ext_ref_point: Option<f64>, net_shift: f64) {
+        if let Some(ref mut ppm) = self.ppm {
+            if net_shift.abs() > 1e-12 {
+                *ppm += net_shift;
+                for p in &mut self.state.peaks {
+                    p.ppm += net_shift;
+                }
+                for intg in &mut self.state.integrations {
+                    intg.start_ppm += net_shift;
+                    intg.end_ppm += net_shift;
+                }
+                for mv in &mut self.state.multiviews {
+                    mv.src_x_min += net_shift;
+                    mv.src_x_max += net_shift;
+                }
+                for jc in &mut self.state.j_couplings {
+                    jc.ppm += net_shift;
+                }
+            }
+            self.state.shift_reference = ext_shift;
+            self.state.reference_point = ext_ref_point;
+            self.state.reference_is_external = true;
+        }
+    }
+
     /// 全ての解析処理 (Referenceシフト, Phase, Baseline, Peak, Integrate, Multiview, JCoupling) を初期状態にリセットする
     pub fn clear_all_processing(&mut self) {
         // 1. Reference シフトの巻き戻し
@@ -737,6 +795,7 @@ impl Project {
         }
         self.state.shift_reference = 0.0;
         self.state.reference_point = None;
+        self.state.reference_is_external = false;
 
         // 2. Baseline のクリア
         self.baseline_array = None;
@@ -1011,6 +1070,27 @@ impl Project {
         }
 
         Ok(())
+    }
+
+    /// .rsn ファイル (ZIPアーカイブ) から解析状態 (ProjectState) のみを高速に読み出す
+    pub fn read_state_from_rsn<P: AsRef<Path>>(path: P) -> Result<ProjectState> {
+        let file = File::open(path)?;
+        let mut archive = ZipArchive::new(file)?;
+        let mut entry = archive.by_name("project.json")
+            .map_err(|e| ResonaError::ProcessingError(format!("Failed to find project.json in RSN: {}", e)))?;
+        let mut json_str = String::new();
+        entry.read_to_string(&mut json_str)?;
+
+        #[derive(Deserialize)]
+        struct ProjectJsonData {
+            #[serde(default)]
+            state: ProjectState,
+        }
+
+        let mut data: ProjectJsonData = serde_json::from_str(&json_str)
+            .map_err(|e| ResonaError::ProcessingError(format!("JSON parse error: {}", e)))?;
+        data.state.migrate_legacy_y_settings();
+        Ok(data.state)
     }
 
     /// .rsn (または旧 .ez) ファイル (ZIPアーカイブ) からプロジェクトを復元する
@@ -1451,6 +1531,63 @@ mod tests {
         assert_eq!(loaded.state.display_settings.user_set_x_min, Some(1.5));
         assert_eq!(loaded.state.display_settings.user_set_x_max, Some(8.5));
         assert_eq!(loaded.user_set_x_range(), Some((1.5, 8.5)));
+
+        let _ = std::fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_reference_clear_and_external() {
+        // 1. 旧形式 JSON のデシリアライズ後方互換性テスト (reference_is_external なし)
+        let legacy_json = r#"{
+            "shift_reference": 0.05,
+            "reference_point": 7.26
+        }"#;
+        let state: ProjectState = serde_json::from_str(legacy_json).expect("Failed to deserialize legacy ProjectState");
+        assert_eq!(state.shift_reference, 0.05);
+        assert_eq!(state.reference_point, Some(7.26));
+        assert_eq!(state.reference_is_external, false);
+
+        // 2. clear_shift_reference の検証
+        let mut proj = Project::new();
+        proj.ppm = Some(Array1::linspace(10.0, 0.0, 101));
+        proj.state.peaks.push(PeakItem { ppm: 7.20, intensity: 100.0, is_auto: true });
+
+        proj.set_shift_reference(7.20, 7.26); // +0.06 ppm
+        assert!((proj.state.shift_reference - 0.06).abs() < 1e-6);
+        assert_eq!(proj.state.reference_point, Some(7.26));
+        assert_eq!(proj.state.reference_is_external, false);
+        assert!((proj.state.peaks[0].ppm - 7.26).abs() < 1e-6);
+        assert!((proj.ppm.as_ref().unwrap()[0] - 10.06).abs() < 1e-6);
+
+        // Clear 実行
+        proj.clear_shift_reference();
+        assert_eq!(proj.state.shift_reference, 0.0);
+        assert_eq!(proj.state.reference_point, None);
+        assert_eq!(proj.state.reference_is_external, false);
+        assert!((proj.state.peaks[0].ppm - 7.20).abs() < 1e-6);
+        assert!((proj.ppm.as_ref().unwrap()[0] - 10.00).abs() < 1e-6);
+
+        // 3. set_external_reference の検証
+        // 未補正 (shift=0) の状態から外部標準 +0.15 ppm を適用
+        proj.set_external_reference(0.15, Some(7.26), 0.15);
+        assert!((proj.state.shift_reference - 0.15).abs() < 1e-6);
+        assert_eq!(proj.state.reference_point, Some(7.26));
+        assert_eq!(proj.state.reference_is_external, true);
+        assert!((proj.state.peaks[0].ppm - 7.35).abs() < 1e-6);
+        assert!((proj.ppm.as_ref().unwrap()[0] - 10.15).abs() < 1e-6);
+
+        // 4. read_state_from_rsn による RSN からの外部標準読み出しテスト
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_ext_ref.rsn");
+        proj.complex_spectrum_unphased = Some(Array1::zeros(101));
+        proj.spectrum_real = Some(Array1::zeros(101));
+
+        proj.save_rsn(&test_file).expect("save_rsn failed");
+
+        let read_state = Project::read_state_from_rsn(&test_file).expect("read_state_from_rsn failed");
+        assert!((read_state.shift_reference - 0.15).abs() < 1e-6);
+        assert_eq!(read_state.reference_point, Some(7.26));
+        assert_eq!(read_state.reference_is_external, true);
 
         let _ = std::fs::remove_file(&test_file);
     }

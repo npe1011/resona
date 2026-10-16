@@ -201,6 +201,9 @@ impl eframe::App for ResonaApp {
                 FileDialogResult::SaveCancelled => {
                     self.close_after_save = false;
                 }
+                FileDialogResult::OpenExtReference(path) => {
+                    self.apply_external_reference_from_file(&path);
+                }
             }
         }
 
@@ -557,7 +560,13 @@ impl eframe::App for ResonaApp {
 
                         // Reference モード時のみ基準ピークマーカーを表示
                         let ref_marker = if self.mode == Some(AppMode::Reference) {
-                            self.project.state.reference_point
+                            self.project.state.reference_point.map(|ppm| {
+                                crate::gui::plot::ReferenceMarkerInfo {
+                                    ppm,
+                                    shift: self.project.state.shift_reference,
+                                    is_external: self.project.state.reference_is_external,
+                                }
+                            })
                         } else {
                             None
                         };
@@ -1035,5 +1044,51 @@ mod tests {
         // project.state.display_settings の current も更新されていること
         assert_eq!(app.project.state.display_settings.x_min, Some(2.5));
         assert_eq!(app.project.state.display_settings.x_max, Some(7.5));
+    }
+
+    #[test]
+    fn test_app_reference_clear_and_external_with_transform() {
+        let mut app = ResonaApp::default();
+        app.project.ppm = Some(ndarray::Array1::linspace(10.0, 0.0, 101));
+        app.project.state.peaks.push(crate::core::PeakItem { ppm: 7.20, intensity: 100.0, is_auto: true });
+        app.transform = Some(crate::gui::plot::transform::PlotTransform::new(
+            Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0)),
+            0.0,
+            10.0,
+            0.0,
+            100.0,
+        ));
+        app.zoom_history.push((0.0, 10.0, 0.0, 100.0));
+
+        // 1. 通常のリファレンス補正 (+0.06 ppm)
+        app.apply_shift_reference(7.20, 7.26);
+        let t = app.transform.as_ref().unwrap();
+        assert!((t.ppm_min - 0.06).abs() < 1e-4);
+        assert!((t.ppm_max - 10.06).abs() < 1e-4);
+        assert!((app.zoom_history[0].0 - 0.06).abs() < 1e-4);
+        assert!((app.project.state.peaks[0].ppm - 7.26).abs() < 1e-4);
+        assert_eq!(app.project.state.reference_is_external, false);
+
+        // 2. リファレンス補正のクリア
+        app.clear_shift_reference();
+        let t = app.transform.as_ref().unwrap();
+        assert!((t.ppm_min - 0.00).abs() < 1e-4);
+        assert!((t.ppm_max - 10.00).abs() < 1e-4);
+        assert!((app.zoom_history[0].0 - 0.00).abs() < 1e-4);
+        assert!((app.project.state.peaks[0].ppm - 7.20).abs() < 1e-4);
+        assert_eq!(app.project.state.shift_reference, 0.0);
+        assert_eq!(app.project.state.reference_point, None);
+        assert_eq!(app.project.state.reference_is_external, false);
+
+        // 3. 外部標準リファレンス補正 (+0.12 ppm)
+        app.apply_external_reference(0.12, Some(7.26));
+        let t = app.transform.as_ref().unwrap();
+        assert!((t.ppm_min - 0.12).abs() < 1e-4);
+        assert!((t.ppm_max - 10.12).abs() < 1e-4);
+        assert!((app.zoom_history[0].0 - 0.12).abs() < 1e-4);
+        assert!((app.project.state.peaks[0].ppm - 7.32).abs() < 1e-4);
+        assert!((app.project.state.shift_reference - 0.12).abs() < 1e-4);
+        assert_eq!(app.project.state.reference_point, Some(7.26));
+        assert_eq!(app.project.state.reference_is_external, true);
     }
 }
