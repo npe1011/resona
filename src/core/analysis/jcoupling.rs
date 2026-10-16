@@ -66,6 +66,53 @@ fn generate_tree(parts: &[&str], j_vals: &[f64]) -> BTreeMap<i64, f64> {
     peaks
 }
 
+/// 候補パターンと J 値から、中心からの相対オフセット (Hz) と相対強度のペア一覧を生成する
+pub fn generate_theoretical_peaks(pattern: &str, j_vals: &[f64]) -> Vec<(f64, f64)> {
+    if pattern == "s" {
+        return vec![(0.0, 1.0)];
+    }
+    if pattern == "m" || j_vals.is_empty() {
+        return Vec::new();
+    }
+
+    let tree = match pattern {
+        "d" | "t" | "q" | "quint" | "sext" | "sept" => generate_tree(&[pattern], j_vals),
+        "dd" => generate_tree(&["d", "d"], j_vals),
+        "dt" => generate_tree(&["d", "t"], j_vals),
+        "td" => generate_tree(&["t", "d"], j_vals),
+        "dq" => generate_tree(&["d", "q"], j_vals),
+        "qd" => generate_tree(&["q", "d"], j_vals),
+        "tt" => generate_tree(&["t", "t"], j_vals),
+        _ => return Vec::new(),
+    };
+
+    let scale = 1000.0;
+    let mut res: Vec<(f64, f64)> = tree
+        .into_iter()
+        .map(|(pos_int, val)| ((pos_int as f64) / scale, val))
+        .collect();
+
+    let max_val = res.iter().map(|p| p.1).fold(0.0_f64, f64::max);
+    if max_val > 0.0 {
+        for p in &mut res {
+            p.1 /= max_val;
+        }
+    }
+
+    res
+}
+
+/// 理論ピーク群と半値幅 (FWHM, Hz) から、周波数オフセット (Hz) におけるローレンツ和強度を算出する
+pub fn evaluate_lorentzian_sum(peaks: &[(f64, f64)], offset_hz: f64, fwhm_hz: f64) -> f64 {
+    let gamma = (fwhm_hz * 0.5).max(1e-6);
+    let mut sum = 0.0;
+    for &(p_hz, weight) in peaks {
+        let diff = (offset_hz - p_hz) / gamma;
+        sum += weight / (1.0 + diff * diff);
+    }
+    sum
+}
+
 /// 理論ピークと観測ピークの一致スコアを計算
 fn score_model(
     theo_peaks: &BTreeMap<i64, f64>,
@@ -348,6 +395,41 @@ mod tests {
         assert_eq!(parse_jcoupling_sort_ppm("-0.05--0.10 (m, 2H)"), Some(-0.05));
         assert_eq!(parse_jcoupling_sort_ppm("-0.05 (s, 1H)"), Some(-0.05));
         assert_eq!(parse_jcoupling_sort_ppm("invalid"), None);
+    }
+
+    #[test]
+    fn test_generate_theoretical_peaks_and_lorentzian() {
+        // singlet
+        let s_peaks = generate_theoretical_peaks("s", &[]);
+        assert_eq!(s_peaks, vec![(0.0, 1.0)]);
+
+        // multiplet 'm'
+        let m_peaks = generate_theoretical_peaks("m", &[]);
+        assert!(m_peaks.is_empty());
+
+        // doublet J = 8.0 Hz
+        let d_peaks = generate_theoretical_peaks("d", &[8.0]);
+        assert_eq!(d_peaks.len(), 2);
+        approx::assert_relative_eq!(d_peaks[0].0, -4.0, epsilon = 1e-3);
+        approx::assert_relative_eq!(d_peaks[1].0, 4.0, epsilon = 1e-3);
+        approx::assert_relative_eq!(d_peaks[0].1, 1.0, epsilon = 1e-3);
+        approx::assert_relative_eq!(d_peaks[1].1, 1.0, epsilon = 1e-3);
+
+        // triplet J = 7.0 Hz
+        let t_peaks = generate_theoretical_peaks("t", &[7.0]);
+        assert_eq!(t_peaks.len(), 3);
+        approx::assert_relative_eq!(t_peaks[0].0, -7.0, epsilon = 1e-3);
+        approx::assert_relative_eq!(t_peaks[1].0, 0.0, epsilon = 1e-3);
+        approx::assert_relative_eq!(t_peaks[2].0, 7.0, epsilon = 1e-3);
+        // 強度比 1:2:1 正規化後 0.5:1.0:0.5
+        approx::assert_relative_eq!(t_peaks[0].1, 0.5, epsilon = 1e-3);
+        approx::assert_relative_eq!(t_peaks[1].1, 1.0, epsilon = 1e-3);
+        approx::assert_relative_eq!(t_peaks[2].1, 0.5, epsilon = 1e-3);
+
+        // evaluate_lorentzian_sum
+        let center_val = evaluate_lorentzian_sum(&t_peaks, 0.0, 1.0);
+        let off_val = evaluate_lorentzian_sum(&t_peaks, 20.0, 1.0);
+        assert!(center_val > off_val);
     }
 }
 

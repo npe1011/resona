@@ -1857,10 +1857,28 @@ impl ResonaApp {
                                             );
 
                                             if !candidates.is_empty() {
+                                                let mut real_ppm = Vec::new();
+                                                let mut real_spectrum = Vec::new();
+                                                if let (Some(ppm), Some(spec)) = (&self.project.ppm, &self.project.spectrum_real) {
+                                                    let n_pts = ppm.len().min(spec.len());
+                                                    for i in 0..n_pts {
+                                                        let p = ppm[i];
+                                                        if p >= p_low && p <= p_high {
+                                                            real_ppm.push(p);
+                                                            real_spectrum.push(spec[i]);
+                                                        }
+                                                    }
+                                                }
+
                                                 self.jcoupling_dialog_state.candidates = candidates;
                                                 self.jcoupling_dialog_state.selected_idx = 0;
                                                 self.jcoupling_dialog_state.edited_text = self.jcoupling_dialog_state.candidates[0].text.clone();
                                                 self.jcoupling_dialog_state.center_ppm = center_ppm;
+                                                self.jcoupling_dialog_state.p_min = p_low;
+                                                self.jcoupling_dialog_state.p_max = p_high;
+                                                self.jcoupling_dialog_state.obs_freq_mhz = freq_mhz;
+                                                self.jcoupling_dialog_state.real_ppm = real_ppm;
+                                                self.jcoupling_dialog_state.real_spectrum = real_spectrum;
                                                 self.jcoupling_dialog_state.open = true;
                                             }
                                         }
